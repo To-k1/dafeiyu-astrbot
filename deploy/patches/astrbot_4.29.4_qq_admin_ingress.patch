@@ -8,7 +8,7 @@
  from astrbot.core.platform.astr_message_event import MessageSesion
  
  from ...register import register_platform_adapter
-@@ -126,6 +127,26 @@
+@@ -126,6 +127,28 @@
          await super().send_by_session(session, message_chain)
  
      async def convert_message(self, event: Event) -> AstrBotMessage | None:
@@ -20,14 +20,16 @@
 +        ):
 +            return None
 +
-+        admins = astrbot_config.get("admins_id") or []
++        admins = [str(admin).strip() for admin in astrbot_config.get("admins_id") or []]
++        # AstrBot also uses this list for its built-in WebChat administrator.
++        qq_admins = [admin for admin in admins if admin.isascii() and admin.isdecimal()]
 +        sender = event.get("sender")
-+        if len(admins) != 1 or not isinstance(sender, dict):
++        if len(qq_admins) != 1 or not isinstance(sender, dict):
 +            return None
-+        admin_id = str(admins[0]).strip()
++
++        admin_id = qq_admins[0]
 +        if (
-+            not admin_id
-+            or str(event.get("user_id", "")) != admin_id
++            str(event.get("user_id", "")) != admin_id
 +            or str(sender.get("user_id", "")) != admin_id
 +        ):
 +            return None

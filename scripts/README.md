@@ -25,7 +25,7 @@ $python = Join-Path $env:USERPROFILE '.conda\envs\fish-home-dev\python.exe'
 
 ## M2 管理员私聊入口
 
-[AstrBot 4.29.4 OneBot 补丁](../deploy/patches/astrbot_4.29.4_qq_admin_ingress.patch) 用于 FishHome 独立实例。它在事件转换和日志之前读取现有的 `admins_id`，仅让唯一管理员的好友私聊进入后续处理。请求、通知、群聊、其他账号及缺少唯一管理员的配置均在入口拦截。
+[AstrBot 4.29.4 OneBot 补丁](../deploy/patches/astrbot_4.29.4_qq_admin_ingress.patch) 用于 FishHome 独立实例。它在事件转换和日志之前读取 `admins_id` 中的数字 QQ 号，仅让唯一 QQ 管理员的好友私聊进入后续处理。内置 WebChat 管理员 `astrbot` 仍可保留。请求、通知、群聊、其他账号及缺少唯一 QQ 管理员的配置均在入口拦截。
 
 当前开发环境已应用补丁，下次启动 AstrBot 时加载。重建固定版 venv 时，使用以下 PowerShell 命令。
 
