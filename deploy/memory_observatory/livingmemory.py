@@ -1,15 +1,33 @@
-"""Explicit SSH source; destination is configured at startup, never by HTTP."""
+"""Read-only sources configured at startup, never by HTTP."""
 
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 
-from .livingmemory_reader import SourceError
+from .livingmemory_reader import SourceError, read_snapshot, version_from_file
 from .model import normalize
+
+
+class LocalMemorySource:
+    def __init__(self, astrbot_root: Path):
+        data = astrbot_root / "data"
+        plugin = "astrbot_plugin_livingmemory"
+        self.db = data / "plugin_data" / plugin / "livingmemory.db"
+        self.metadata = data / "plugins" / plugin / "metadata.yaml"
+
+    def load(self):
+        try:
+            raw = read_snapshot(self.db, version_from_file(self.metadata))
+            snapshot = normalize(raw, allow_empty=True)
+            info = {**raw["source_info"], "enabled": True, "state": "ready"}
+            return snapshot, info
+        except (OSError, ValueError, sqlite3.Error):
+            raise SourceError("无法读取本机 LivingMemory；请检查路径、版本和表结构。") from None
 
 
 class SSHMemorySource:

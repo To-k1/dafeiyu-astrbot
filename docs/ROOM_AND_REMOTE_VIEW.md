@@ -30,6 +30,14 @@ ThinkBook Windows 11（正式鱼）
 4. 读取失败和旧缓存标注**最后同步时间、数据源、错误状态**；网络掉线时不自动落到演示数据；多次同步要单飞/去重、不能刺激真实生活系统改变记忆。
 5. AstrBot/NapCat 管理 WebUI 可以用 SSH loopback 端口转发独立访问；**小房间是观察页面，备份/恢复/公开写授权是管理操作**，不能因只读 WebUI 需要而给页面部署管理员密钥。
 
+台式机开发实例可通过 `--astrbot-root` 读取本机 LivingMemory 2.9.1。在仓库根目录运行下面的命令。
+
+```powershell
+python -B -m deploy.memory_observatory.server --port 8767 --astrbot-root 'D:\Share\code\FishHome\dev\astrbot-4.29.4'
+```
+
+星海入口为 <http://127.0.0.1:8767/>，小房间入口为 <http://127.0.0.1:8767/room>。本机活动账本准备好后可另加 `--life-data-dir` 指定目录。活动来源未配置时，小房间显示未知状态。
+
 ## 参考
 
 - <https://github.com/whyever77/dafeiyu-astrbot/blob/main/deploy/memory_observatory/ROOM_V02.md>

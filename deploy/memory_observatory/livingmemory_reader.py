@@ -1,4 +1,4 @@
-"""Read-only projection for the inspected LivingMemory 2.7.0-beta.2 schema.
+"""Read-only projection for the inspected LivingMemory schemas.
 
 This file also runs through SSH stdin with Python's standard library. It imports
 no plugin code, opens no conversation database, and has no network/write calls.
@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SUPPORTED_VERSION = "2.7.0-beta.2"
+SUPPORTED_VERSIONS = {SUPPORTED_VERSION, "2.9.1"}
 MAX_RECORDS = 500
 ATOM_KINDS = {"episodic": "episode", "factual": "knowledge", "preference": "preference",
               "planned": "plan", "relational": "relation", "unknown": "unclassified"}
@@ -77,7 +78,7 @@ def version_from_file(path):
 
 
 def read_snapshot(db_path, version, *, now=None):
-    if version != SUPPORTED_VERSION:
+    if version not in SUPPORTED_VERSIONS:
         raise SourceError("LivingMemory version not supported; inspect schema before updating adapter")
     at = now or datetime.now(timezone.utc)
     if at.tzinfo is None:

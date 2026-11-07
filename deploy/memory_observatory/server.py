@@ -260,7 +260,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="大肥鱼 · 本地记忆星海（演示或显式连接只读源）")
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--livingmemory-ssh", action="store_true", help="使用现有 SSH 配置只读连接 LivingMemory")
+    memory = parser.add_mutually_exclusive_group()
+    memory.add_argument("--livingmemory-ssh", action="store_true", help="使用现有 SSH 配置只读连接 LivingMemory")
+    memory.add_argument("--astrbot-root", type=Path, help="只读连接指定 AstrBot 目录的本机 LivingMemory")
     activity = parser.add_mutually_exclusive_group()
     activity.add_argument("--life-data-dir", type=Path, help="只读活动账本目录（control.json + activity.sqlite3）")
     activity.add_argument("--life-ssh", action="store_true", help="使用现有 SSH 配置只读连接固定活动账本")
@@ -276,7 +278,10 @@ def main():
             activity_source = SSHActivitySource()
         except SourceError as exc:
             parser.exit(1, str(exc) + "\n")
-    if args.livingmemory_ssh:
+    if args.astrbot_root:
+        from .livingmemory import LocalMemorySource
+        source = LocalMemorySource(args.astrbot_root)
+    elif args.livingmemory_ssh:
         from .livingmemory import SSHMemorySource
         try:
             source = SSHMemorySource()
