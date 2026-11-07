@@ -1,0 +1,73 @@
+# 逻辑设计示例，原版 AstrBot/大肥鱼插件未必直接认识这些字段。
+# Codex M0 必须查上游实际 schema，再实现最小映射。此模板禁止放入任何真实密钥。
+control:
+  fish_home_env: FISH_HOME  # 仅台式机一个用户环境变量
+  repo_subdir: repo
+  backups_subdir: backups
+  exports_subdir: exports
+  secrets_subdir: secrets  # 可选本地私密文件目录，非自动归档/导出目标
+  dev_target: local-dev
+  prod_ssh_alias: fishbook  # 待 Windows OpenSSH 与实际主机信息配置
+  room_location: desktop-local
+  room_loopback_port_reference: 8767  # 仅原作者文档参考；现场核验
+runtime:
+  preferred_platform: windows-native
+  desktop_role: developer-and-observer
+  production_role: thinkbook-windows11
+  production_memory_gib: 16
+  production_login_required_for_gui_autostart: true
+  windows_sleep_disabled_when_plugged_in: true
+  wsl_required: false
+  vmware_linux_optional: true
+  fish_windows_user_standard: true
+  fish_can_run_elevated: false
+  share_codex_github_credentials_with_fish: false
+profiles:
+  dev:
+    data_scope: dev
+    autonomous_paid_work_initially_enabled: false
+  prod:
+    data_scope: prod
+    autonomous_paid_work_initially_enabled: false
+  qq_identity_mode: shared   # shared (默认), separate (可选)
+  memory_migration_mode: none # none (默认), selective, full
+model:
+  provider: deepseek-official
+  model_id: deepseek-flash
+  api_key_from_secure_runtime_environment: true
+budget:
+  currency: CNY
+  autonomous_daily_cap: 5.0
+  interactive_daily_cap: 5.0
+  reset_timezone: Asia/Shanghai
+  reset_local_time: '04:00'
+  admin_cap_override: desktop-only
+  temporary_override_until: next-reset
+  qq_balance_view_enabled: true
+  include_astrbot_dsh_and_billable_tools: true
+  require_verified_pre_call_gate_for_unattended_paid_work: true
+  prefer_off_peak_for_nonurgent_expensive_work: true
+social:
+  public_write_enabled: false  # 全局总开关；开启不绕开平台审批/额度
+  per_platform_authorization_required: true
+  qq_direct_messages_independent: true
+  github_codex_push_independent: true
+  never_claim_strong_network_isolation_without_tests: true
+  signed_in_bilibili_autonomy_requires_verified_write_restrictions: true
+backup:
+  source: production-windows-native-consistent-snapshot
+  workstation_download: true
+  native_restore_and_readable_export_are_separate: true
+  room_observation_snapshot_is_separate: true
+  encrypted: false
+  third_storage_media_required: false
+  exclude_secrets_and_login_states: true
+  raw_private_chat_auto_sync: false
+  protect_existing_production_data: true
+  restore_background_jobs_paused: true
+observability:
+  use_upstream_memory_observatory: true
+  desktop_local_room: true
+  production_data_via_readonly_ssh_adapter: true
+  offline_cache_must_show_age: true
+  memory_snapshot_is_redacted: true

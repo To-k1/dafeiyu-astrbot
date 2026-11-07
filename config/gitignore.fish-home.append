@@ -1,0 +1,20 @@
+# 合并进上游 .gitignore；不要覆盖原文件。Git ignore 不能从已跟踪历史中自动抹去秘密。
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.json
+secrets/
+backups/
+exports/
+logs/
+*.partial
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+__pycache__/
+.venv/
+# 不把任意真实聊天记录/QQ 登录态/安卓模拟器 profiles 作为新 Git 文件
