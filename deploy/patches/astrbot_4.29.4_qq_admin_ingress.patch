@@ -1,0 +1,37 @@
+--- a/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
++++ b/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
+@@ -20,6 +20,7 @@
+     Platform,
+     PlatformMetadata,
+ )
++from astrbot.core import astrbot_config
+ from astrbot.core.platform.astr_message_event import MessageSesion
+ 
+ from ...register import register_platform_adapter
+@@ -126,6 +127,26 @@
+         await super().send_by_session(session, message_chain)
+ 
+     async def convert_message(self, event: Event) -> AstrBotMessage | None:
++        # FishHome: discard unrelated QQ events before logging or conversion.
++        if (
++            event.get("post_type") != "message"
++            or event.get("message_type") != "private"
++            or event.get("sub_type") != "friend"
++        ):
++            return None
++
++        admins = astrbot_config.get("admins_id") or []
++        sender = event.get("sender")
++        if len(admins) != 1 or not isinstance(sender, dict):
++            return None
++        admin_id = str(admins[0]).strip()
++        if (
++            not admin_id
++            or str(event.get("user_id", "")) != admin_id
++            or str(sender.get("user_id", "")) != admin_id
++        ):
++            return None
++
+         logger.debug(f"[aiocqhttp] RawMessage {event}")
+ 
+         if event["post_type"] == "message":
