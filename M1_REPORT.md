@@ -11,20 +11,22 @@
 
 ## 本机启动与数据
 
+开发运行目录已迁到仓库外的 `D:\Share\code\FishHome\dev`。AstrBot 使用新建的 venv 和复制后的原数据，NapCat 使用重新解包的运行目录与保留的面板配置。两个实例迁移后均从新目录启动并在本机返回 HTTP 200。AstrBot 的 venv 以 `fish-home-dev` 提供基础 Python。旧实例保留作本次迁移的回退副本。
+
 在 PowerShell 里可以用下列方式重启已经建立的测试实例。第一条启动 AstrBot，另一窗口运行 NapCat。按 Ctrl+C 停止各自进程。
 
 ```powershell
-$astrbot = 'C:\Users\15800\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\FishHome\m1\astrbot-4.29.4'
+$astrbot = 'D:\Share\code\FishHome\dev\astrbot-4.29.4'
 $env:ASTRBOT_ROOT = $astrbot
 Set-Location -LiteralPath $astrbot
 & .\.venv\Scripts\python.exe -m astrbot.cli run
 ```
 
 ```powershell
-& 'C:\Users\15800\AppData\Local\FishHome\m1\napcat-4.18.38\napcat.bat'
+& 'D:\Share\code\FishHome\dev\napcat-4.18.38\napcat.bat'
 ```
 
-AstrBot 实例用官方 `python -m astrbot.cli init --yes` 初始化。其数据位于 `$astrbot\data`，包含配置、核心 SQLite 库、`plugins` 和 `plugin_data`。NapCat 使用独立解压目录下的 `napcat\config`。首次生成的本机面板凭据留在该实例的本地配置及启动日志。
+AstrBot 实例用官方 `python -m astrbot.cli init --yes` 初始化。其数据位于 `$astrbot\data`，包含配置、核心 SQLite 库、`plugins` 和 `plugin_data`。NapCat 使用独立解压目录下的 `napcat\config`。AstrBot 首次生成的本机面板密码保存在新目录 `first-start.log` 第 130 行。NapCat 的面板令牌位于其 `napcat/config/webui.json`。
 
 ## 模拟快照与恢复
 
