@@ -1,0 +1,9 @@
+- id: tool-web
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true
+- id: agent-instructions
+  config:
+    maxBytes: 65536
+    projectRootMarkers:
+      - .m3-root
