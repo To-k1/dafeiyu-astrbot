@@ -11,18 +11,38 @@ from .dsh_client import DshClient, DshError
 class RemoteDshClient(DshClient):
     """Reuse the Bridge task flow with DSH's authenticated Remote API."""
 
-    def __init__(self, launch_token: str, port: int = 59934):
+    def __init__(self, launch_token: str = "", port: int = 59934, *, session_cookie: str | None = None):
         super().__init__({"dsh_host": "127.0.0.1", "dsh_port": port})
         self._launch_token = launch_token
-        self._cookie = None
+        self._cookie = session_cookie
 
     async def discover(self, force=False, progress=None):
         return f"http://127.0.0.1:{self.port_override}"
+
+    async def ping(self):
+        listing = await self.call("session.list", timeout=5)
+        items = listing["items"]
+        return {"base": await self.discover(), "sessions": len(items),
+                "running": sum(bool(item.get("running")) for item in items)}
+
+    async def run_prompt(self, *args, **kwargs):
+        result = await super().run_prompt(*args, **kwargs)
+        history = await self.call("session.history", {"sessionId": result["sessionId"]})
+        for entry in reversed(history["events"]):
+            event = entry.get("event") or entry
+            if event.get("type") == "turn/end":
+                reason = event.get("data", {}).get("reason", {}).get("kind")
+                if reason == "completed":
+                    return result
+                raise DshError(f"DSH 回合结束状态为 {reason or 'unknown'}")
+        raise DshError("DSH 没有返回回合终态")
 
     async def _authenticate(self, base, session):
         async with self._discovery_lock:
             if self._cookie is not None:
                 return self._cookie
+            if not self._launch_token:
+                raise DshError("DSH 本机认证未配置")
             async with session.get(
                 f"{base}/connect",
                 params={"token": self._launch_token, "interactions": "none"},
