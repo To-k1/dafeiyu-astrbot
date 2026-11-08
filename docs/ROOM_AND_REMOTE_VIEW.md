@@ -33,10 +33,12 @@ ThinkBook Windows 11（正式鱼）
 台式机开发实例可通过 `--astrbot-root` 读取本机 LivingMemory 2.9.1。在仓库根目录运行下面的命令。
 
 ```powershell
-python -B -m deploy.memory_observatory.server --port 8767 --astrbot-root 'D:\Share\code\FishHome\dev\astrbot-4.29.4'
+$astrbotRoot = 'D:\Share\code\FishHome\dev\astrbot-4.29.4'
+python -B -m deploy.memory_observatory.server --port 8767 --astrbot-root $astrbotRoot `
+  --life-data-dir (Join-Path $astrbotRoot 'data\plugin_data\astrbot_plugin_bili_activity')
 ```
 
-星海入口为 <http://127.0.0.1:8767/>，小房间入口为 <http://127.0.0.1:8767/room>。本机活动账本准备好后可另加 `--life-data-dir` 指定目录。活动来源未配置时，小房间显示未知状态。
+星海入口为 <http://127.0.0.1:8767/>，小房间入口为 <http://127.0.0.1:8767/room>。开发活动账本由上游插件的存储代码初始化，活动关闭时房间显示关闭。活动来源未配置时，小房间显示未知状态。
 
 ## 参考
 

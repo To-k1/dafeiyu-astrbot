@@ -4,6 +4,16 @@
 看截图、读 UI、点击、启动应用。ADB 和 PhoneMCP **都不暴露公网端口**，
 只走 SSH 反向隧道。
 
+FishHome 台式机上，AstrBot 和模拟器同机运行，PhoneMCP 通过 `http://127.0.0.1:8009/Phone` 连接。开发环境使用雷电 14 自带的 ADB、PhoneMCP v0.5.0 源码和独立 Python venv。完成下文源码和依赖准备后，在仓库根目录启动本机服务。
+
+```powershell
+.\deploy\phone_mcp\start_phone_mcp.ps1 `
+  -PhoneMcpDir 'D:\Share\code\FishHome\dev\PhoneMCP' `
+  -AdbDir 'C:\leidian\LDPlayer14'
+```
+
+`-AdbDir` 填雷电安装目录中 `adb.exe` 所在的位置。ADB 显示多个设备时，验收调用显式传入雷电实例的 `device_id`。插件的 `phone_screen_width` 和 `phone_screen_height` 使用实际截图尺寸。本文的 SSH 隧道与 Docker 代理用于原版云端部署。
+
 ## 架构
 
 ```text
