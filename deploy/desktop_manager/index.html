@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FishHome 控制台</title>
+<style>
+:root{color-scheme:dark;--bg:#0d181b;--panel:#16262a;--line:#2c4146;--ink:#edf6f2;--muted:#a3b9b9;--accent:#9ae3bf;--warn:#f5ca8c}*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI","Microsoft YaHei",sans-serif}main{max-width:1000px;margin:auto;padding:44px 24px 56px}header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:20px;margin-bottom:24px}h1,h2,p{margin:0}h1{font-size:34px;letter-spacing:-.04em}h2{font-size:19px}small,.muted{color:var(--muted)}.tag{font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.12em}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin:16px 0;padding:18px 20px}.row{display:grid;grid-template-columns:minmax(150px,1fr) 160px auto;align-items:center;gap:12px;border-top:1px solid var(--line);padding:12px 0}.row:first-child{border:0}.actions{display:flex;flex-wrap:wrap;gap:6px}.row .actions{justify-content:flex-end}button,a.button{padding:6px 12px;min-height:34px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--ink);font:inherit;text-decoration:none;cursor:pointer}button:hover,a.button:hover{border-color:var(--accent)}button.primary{background:var(--accent);color:#13261d;border-color:var(--accent);font-weight:700}button:disabled{opacity:.38;cursor:default}.status{color:var(--muted);font-size:13px}.status[data-state=running]{color:var(--accent)}.status[data-state=starting],.status[data-state=unknown]{color:var(--warn)}#message{min-height:24px;color:var(--warn);white-space:pre-wrap}details summary{cursor:pointer;font-weight:700}form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}input{font:inherit;min-width:240px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}#keys{margin-top:8px;overflow-wrap:anywhere}.hint{margin:10px 0}.foot{font-size:12px;margin-top:24px}@media(max-width:660px){.row{grid-template-columns:1fr 1fr}.row .actions{grid-column:1/-1;justify-content:flex-start}}
+</style>
+<main>
+  <header><div><p class="tag">本机开发实例</p><h1>FishHome 控制台</h1><p class="muted" id="overview">正在读取本机状态</p></div>
+  <div class="actions"><button id="start" class="primary">启动全部</button><button id="stop">停止全部</button><button id="refresh">刷新</button></div></header>
+  <div id="message" role="status"></div>
+  <section class="panel" aria-label="服务列表"><div id="services"></div></section>
+  <details class="panel"><summary>本机凭据与计费接入</summary>
+    <p class="muted hint" id="setup">DeepSeek Key 仅加密保存在当前 Windows 账户中。</p>
+    <form id="official"><label for="key">DeepSeek API Key</label><input id="key" type="password" autocomplete="off" required placeholder="官方 API Key"><button>保存</button></form>
+    <form id="runner"><label for="password">FishHomeRunner</label><input id="password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
+    <p class="muted hint">保存 Key 后重启「人民币计费」。AstrBot 交互 Provider 使用 <code>http://127.0.0.1:6197/openai/interaction/v1</code> 和交互本机凭据。</p>
+    <button id="showkeys">显示本机 Provider 凭据</button><pre id="keys" hidden></pre>
+  </details>
+  <p class="muted foot">托盘菜单的「退出控制台」只关闭控制台。服务继续运行。端口被其他进程占用时，控制台保留该进程。</p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fragment = location.hash.slice(1);
+if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.replaceState(null, '', '/'); }
+const token = sessionStorage.getItem('fishhome-session') || '';
+let busy = false;
+async function api(path, method = 'GET', body) {
+  const response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store'});
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || '本机请求失败');
+  return result;
+}
+function node(tag, text, cls) { const n = document.createElement(tag); n.textContent = text; if (cls) n.className = cls; return n; }
+function button(text, fn, disabled) { const b = node('button', text); b.disabled = disabled; b.onclick = fn; return b; }
+async function refresh() {
+  try {
+    const {services, official_key, runner_password} = await api('/api/status');
+    $('overview').textContent = `${services.filter(s => s.state === 'running').length} / ${services.length} 个组件已运行`;
+    $('setup').textContent = `DeepSeek Key ${official_key ? '已加密保存' : '待填写，计费服务当前仅供查询'}。DSH 账户密码${runner_password ? '已保存' : '待填写'}。`;
+    const rows = services.map(s => {
+      const row = node('div', '', 'row'), info = node('div', '', ''), actions = node('div', '', 'actions');
+      info.append(node('strong', s.name), node('div', s.port ? '127.0.0.1:' + s.port : '本机图形应用 · 实例 0', 'muted'));
+      const unknown = s.state === 'running' && !s.recognized;
+      const label = unknown ? '端口占用 · 待识别' : s.state === 'running' ? (s.external ? '已运行 · 外部启动' : '已运行') : s.state === 'starting' ? '正在启动' : '已停止';
+      const status = node('span', label, 'status'); status.dataset.state = unknown ? 'unknown' : s.state;
+      actions.append(button('启动', () => act(s.id,'start'), busy || s.state !== 'stopped'), button('停止', () => act(s.id,'stop'), busy || !s.stoppable), button('重启', () => act(s.id,'restart'), busy || !s.stoppable));
+      if (s.recognized && s.url) { const link = node('a','打开','button'); link.href = s.url; link.target = '_blank'; link.rel = 'noreferrer'; actions.append(link); }
+      row.append(info,status,actions); return row;
+    });
+    $('services').replaceChildren(...rows);
+  } catch (error) { $('overview').textContent = error.message; }
+}
+async function act(name, mode) {
+  if (busy) return;
+  if (name === 'all' && mode === 'stop' && !confirm('停止全部已识别的 FishHome 服务？')) return;
+  busy = true; $('message').textContent = '正在执行…';
+  try {
+    const result = await api(`/api/services/${name}/${mode}`, 'POST');
+    $('message').textContent = result.message || Object.entries(result.results).map(([id,s])=>`${id} ${s}`).join(' · ');
+  } catch (error) { $('message').textContent = error.message; }
+  finally { busy = false; await refresh(); }
+}
+function setup(form, input, field) {
+  $(form).onsubmit = async e => { e.preventDefault(); const value = $(input).value; $(input).value = '';
+    try { $('message').textContent = (await api('/api/config','POST',{[field]:value})).message; await refresh(); }
+    catch (error) { $('message').textContent = error.message; }
+  };
+}
+setup('official','key','upstream_key'); setup('runner','password','runner_password');
+$('showkeys').onclick = async () => {
+  const panel = $('keys'); if (!panel.hidden) { panel.textContent=''; panel.hidden=true; return; }
+  try { const k = await api('/api/provider-keys'); panel.textContent = `交互 ${k.interaction_token}\n自主 ${k.autonomous_token}`; panel.hidden=false; }
+  catch (error) { $('message').textContent = error.message; }
+};
+$('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop'); $('refresh').onclick = refresh;
+refresh(); setInterval(() => { if (!busy) refresh(); }, 2500);
+</script>

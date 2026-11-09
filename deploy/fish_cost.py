@@ -112,10 +112,11 @@ def error(status, code, message):
                              status=status)
 
 
-def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL):
+def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False):
     """Bind credentials to ledgers, and reserve before making an upstream call."""
     if (set(tokens_by_bucket) != set(BUCKETS) or len(set(tokens_by_bucket.values())) != len(BUCKETS)
-            or not api_key or any(len(value) < 24 or value == api_key for value in tokens_by_bucket.values())):
+            or (not api_key and not offline)
+            or any(len(value) < 24 or value == api_key for value in tokens_by_bucket.values())):
         raise ValueError("supply separate local credentials and a DeepSeek API key")
 
     session_key = web.AppKey("upstream", ClientSession)
@@ -145,6 +146,8 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
         bucket, kind = request.match_info["bucket"], request.match_info["kind"]
         if bucket not in BUCKETS or not authorized(request, bucket):
             return error(401, "authentication_error", "账本凭据无效")
+        if offline:
+            return error(503, "fish_cost_offline", "计费入口可查询余额，请先在本机配置 DeepSeek API Key。")
         tool = kind in prices["tools"]
         try:
             body = await request.json()
@@ -213,6 +216,7 @@ def main():
     serve = commands.add_parser("serve")
     serve.add_argument("--port", type=int, default=6197)
     serve.add_argument("--prices", type=Path, default=PRICE_FILE)
+    serve.add_argument("--offline", action="store_true", help="Serve balances without forwarding paid requests")
     commands.add_parser("balance")
     adjust = commands.add_parser("adjust")
     adjust.add_argument("bucket", choices=BUCKETS)
@@ -222,7 +226,8 @@ def main():
     ledger = Ledger(args.db)
     if args.command == "serve":
         local_tokens = {bucket: os.environ["FISH_COST_" + bucket.upper() + "_TOKEN"] for bucket in BUCKETS}
-        app = create_app(ledger, load_prices(args.prices), local_tokens, os.environ["FISH_COST_UPSTREAM_KEY"])
+        key = None if args.offline else os.environ["FISH_COST_UPSTREAM_KEY"]
+        app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline)
         web.run_app(app, host="127.0.0.1", port=args.port, access_log=None)
     else:
         if args.command == "adjust":

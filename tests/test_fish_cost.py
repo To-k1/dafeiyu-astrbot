@@ -140,3 +140,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(path, model | {"model": "deepseek-v4-pro"})).status, 400)
         self.assertEqual((await self.post(path, model | {"tools": [{"type": "web_search"}]})).status, 400)
         self.assertEqual(len(self.calls), 2)
+
+    async def test_offline_setup_serves_balance_without_forwarding_or_reserving(self):
+        app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, None, offline=True)
+        async with TestClient(TestServer(app)) as client:
+            headers = {"Authorization": f"Bearer {self.keys['interaction']}"}
+            reply = await client.get("/balance", headers=headers)
+            self.assertEqual(reply.status, 200)
+            self.assertEqual((await reply.json())["ledgers"]["interaction"]["remaining"], "5")
+            rejected = await client.post("/openai/interaction/v1/chat/completions", json={}, headers=headers)
+            self.assertEqual(rejected.status, 503)
+            self.assertEqual(self.ledger.snapshot()["ledgers"]["interaction"]["reserved"], "0")

@@ -45,7 +45,8 @@ class Main(Star):
             return False
 
     async def cost_balance(self):
-        token = os.environ.get("FISH_COST_INTERACTION_TOKEN")
+        token = os.environ.get("FISH_COST_INTERACTION_TOKEN") or json.loads(
+            self.settings.read_text(encoding="utf-8")).get("budget_token")
         if not token:
             return None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
@@ -69,7 +70,7 @@ class Main(Star):
                 for key, label in (("interaction", "交互"), ("autonomous", "自主")):
                     entry = info["ledgers"][key]
                     reply += f"\n{label}剩 ¥{entry['remaining']} / ¥{entry['limit']}，预留 ¥{entry['reserved']}"
-        except (aiohttp.ClientError, TimeoutError, KeyError, ValueError):
+        except (aiohttp.ClientError, TimeoutError, OSError, KeyError, ValueError):
             reply = "暂时无法查询人民币账本。"
         await event.send(event.plain_result(reply))
 
@@ -82,7 +83,7 @@ class Main(Star):
             if info and Decimal(info["ledgers"]["interaction"]["remaining"]) < Decimal(info["flash_request_reserve"]):
                 event.stop_event()
                 await event.send(event.plain_result("交互额度不足以预留下一次 Flash 请求。发送 /额度 查看余额。"))
-        except (aiohttp.ClientError, TimeoutError, KeyError, ValueError, ArithmeticError):
+        except (aiohttp.ClientError, TimeoutError, OSError, KeyError, ValueError, ArithmeticError):
             return
 
     @filter.permission_type(filter.PermissionType.ADMIN)
