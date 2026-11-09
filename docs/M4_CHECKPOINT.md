@@ -1,6 +1,6 @@
-# M4 接入断点 · 2026-11-09
+# M4 接入与验收 · 2026-11-09
 
-M3 已收到管理员 QQ `/dsh ping` 的真实回执，见 [M3 验收记录](M3_ACCEPTANCE.md)。M4 已接通原版生活选择、DSH 会话恢复、目标检查点与原有记忆队列。真实 DSH 验证复用了 M3 已完成的会话，新增的文件任务仍待一次受控联调。
+M3 已收到管理员 QQ `/dsh ping` 的真实回执，见 [M3 验收记录](M3_ACCEPTANCE.md)。M4 已通过台式机受控验收。原版 LifePlanner 选中样例目标并投递给真实 DSH，产物经核对后回写原目标和记忆队列。
 
 ## 接线和数据位置
 
@@ -15,7 +15,20 @@ M3 已收到管理员 QQ `/dsh ping` 的真实回执，见 [M3 验收记录](M3_
 - 本机 DSH `0.2.2-rc.1` 使用原 M3 的 `FishHomeRunner` 标准账户、文件工具配置与 `127.0.0.1:59934`。实际读取原请求终态、两份产物、输入来源和 Token 用量，并由 M4 经原版生活入口写入临时目标与记忆队列。本次只开放查询调用，模型费用为零。
 - 恢复本机 DSH 后，原 QQ Bridge 的签名凭据返回 HTTP 401。更新开发实例内的凭据并通过本机 Bridge 探针复验。既有 QQ 回执见 M3 记录。
 
+## 单次真实投递
+
+使用 `fish-home-dev` 的 Python 3.12 调用原版 `run_activity("once")`。生活控制与数据库放在 `%LOCALAPPDATA%\Temp\FishHome-M4-Flash-20261109`，DSH 沿用 `FishHomeRunner` 私有工作区和文件工具配置。试验只允许一个 `session.prompt`，本地等待上限设为两分钟。活动完成用时约 10.5 秒。
+
+| 项目 | 实测结果 |
+| --- | --- |
+| 投递 | 选择官方 `deepseek-official / deepseek-flash`，原请求在 DSH 历史中出现一次，终态 `completed`。 |
+| 产物 | Markdown 报告与 JSON 来源均记录 `sample.csv` 共 3 行、合计 24 分钟。执行前后读取的原 CSV 内容一致。 |
+| 用量 | 未缓存输入 1,200、缓存命中输入 29,184、输出 1,123、缓存写入 0。归属为 2026-11-09 自主账本，记录的是 Token 用量。 |
+| 写回 | 原目标检查点字段保留，并加入报告、来源与经历引用。`episodes` 一条，`memories` 一条，记忆状态为 `pending`。原目标按既有流程保留为 `paused`。 |
+
+临时验收目录中的 `acceptance.json`、`report.md`、`sources.json` 和 `activity.sqlite3` 可用于复查。原产物留在 `FishHomeRunner` 的 `%LOCALAPPDATA%\FishHome\m3-file-check\output`，具体路径保存在目标检查点。
+
 ## 接续和回滚
 
-- 下一次在临时活动库创建样例研究目标，用既有只读 `sample.csv`、文件工具限定的 DSH 和管理员安排的一次运行验证真实 Flash 投递、产物和写回。现有 AstrBot 开发实例的活动与生活选择仍关闭，保持其既有 B 站单次验收前置条件。
-- 本轮只提交仓库代码。运行端可把 `dsh_life_task` 置为 `null` 停止接线。保留现有活动库与鱼账户下的 DSH 数据可供复查。M5 负责收费请求的硬门控，当前仍禁止无人值守的付费投递。
+- 现有 AstrBot 开发实例的活动与生活选择仍关闭，保持其既有 B 站单次验收前置条件。M5 负责人民币费用门控、峰谷调度和公共写入总开关。无人值守的付费投递继续关闭。
+- 运行端可把 `dsh_life_task` 置为 `null` 停止接线。保留现有活动库与鱼账户下的 DSH 数据可供复查。
