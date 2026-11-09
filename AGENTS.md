@@ -27,3 +27,7 @@
 - 每一阶段记录提交 SHA/第三方版本、运行命令、配置差异、真实/模拟测试、状态数据地图、剩余风险、可回滚路径，报告后停。用户明确允许的非破坏性 Git 提交/推送不需重复询问；生产数据覆盖、账户扫码、实名 API Key、公开发布与生产部署仍须明确执行授权。
 
 **首轮任务全文：`docs/CODEX_START_M0.md`。**
+
+## 上游编码规范
+
+维护上游模块时参考[原作者的仓库规则](https://github.com/whyever77/dafeiyu-astrbot/blob/main/AGENTS.md)和[编码流程](.agents/skills/dafeiyu-coding/SKILL.md)。Fish Home 的机器、权限与部署规则按本文执行。

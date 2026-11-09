@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 from zipfile import ZipFile
 
-from scripts.m6_data import preview_migration, sync_room
+from scripts.m6_data import preview_migration, room_activity, sync_room
 from scripts.native_archive import ACTIVITY, CHAT, LM, restore, snapshot, verify
 
 
@@ -53,6 +53,14 @@ class NativeArchiveTests(unittest.TestCase):
             archive.writestr("data/data_v4.db", "extra")
         with self.assertRaises(ValueError):
             verify(self.archive)
+
+    def test_room_snapshot_omits_private_affective_details(self):
+        projected = room_activity({"affect": {"state": "ready", "valence": -0.5,
+                                   "last_interaction_at": 1794200000,
+                                   "care_threads": [{"topic": "private conversation detail"}]}})
+        self.assertEqual(projected["affect"]["valence"], -0.5)
+        self.assertEqual(projected["affect"]["care_threads"], [])
+        self.assertNotIn("last_interaction_at", projected["affect"])
 
     def test_failed_room_sync_keeps_previous_snapshot_and_timestamp(self):
         destination = self.root / "room.json"

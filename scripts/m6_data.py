@@ -28,6 +28,10 @@ def sources(root):
 
 
 def room_activity(snapshot):
+    affect = snapshot.get("affect")
+    if isinstance(affect, dict):
+        snapshot["affect"] = {**affect, "care_threads": []}
+        snapshot["affect"].pop("last_interaction_at", None)
     for group, keys in (("goals", ("title", "why", "next_step")), ("decisions", ("reason", "topic")),
                         ("works", ("title",))):
         for row in snapshot.get(group, []):
