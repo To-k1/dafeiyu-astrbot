@@ -301,6 +301,17 @@ class FakeEvent:
         return value
 
 
+def configure_autonomous(plugin, config, provider=None):
+    provider = provider or types.SimpleNamespace(text_chat=AsyncMock())
+    provider.provider_config = {"id": "test-autonomous", "type": "openai_chat_completion",
+                                "api_base": "http://127.0.0.1:6197/openai/autonomous/v1"}
+    provider.get_model = lambda: "deepseek-flash"
+    plugin.context.get_provider_by_id = lambda ident: provider if ident == "test-autonomous" else None
+    config["autonomous_provider_id"] = "test-autonomous"
+    plugin.control.write_text(json.dumps(config))
+    return provider
+
+
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -308,7 +319,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.folder = Path(self.folder.name)
         self.plugin.store = core.Store(self.folder.name)
         self.plugin.control = Path(self.folder.name, "control.json")
-        self.config = main.DEFAULTS | {"owner_scope": SCOPE, "owner_id": "12345", "enabled": True, "dnd_ranges": []}
+        self.config = main.DEFAULTS | {"owner_scope": SCOPE, "owner_id": "12345", "enabled": True,
+                                       "dnd_ranges": [], "public_write_enabled": True}
         self.plugin.control.write_text(json.dumps(self.config))
         self.plugin.snapshots, self.plugin.run_videos = {}, {}
         self.plugin.live = None
@@ -686,11 +698,14 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             conversation_manager="real-conversation-manager",
             get_llm_tool_manager=lambda: types.SimpleNamespace(get_full_tool_set=lambda: ToolSet([allowed, forbidden])),
         )
+        metered = configure_autonomous(self.plugin, self.config)
 
         class Runner:
             state = "done"
 
             async def step_until_done(self, steps):
+                observed["provider"] = self.provider
+                observed["fallbacks"] = self.fallback_providers
                 calls.append("run")
                 observed["steps"] = steps
                 yield None
@@ -741,6 +756,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "安静结束")
         self.assertEqual(calls, ["waiting", "build", "request", "reset", "run"])
         self.assertEqual(observed["tool_names"], ["df_bili_read"])
+        self.assertIs(observed["provider"], metered)
+        self.assertEqual(observed["fallbacks"], [])
         self.assertIn("当前真实人格", observed["req"].system_prompt)
         self.assertIn("当前会话记忆", observed["req"].system_prompt)
         self.assertEqual(observed["req"].contexts[0]["content"], "最近聊天")

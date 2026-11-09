@@ -582,6 +582,7 @@ class ExpressionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         observed = {}
         tool = fixtures.FunctionTool(name=expression.TOOL, active=True)
         self.plugin.context = types.SimpleNamespace(get_config=lambda **kw: {})
+        fixtures.configure_autonomous(self.plugin, self.config)
 
         class Runner:
             state = "done"

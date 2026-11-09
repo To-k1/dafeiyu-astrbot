@@ -29,10 +29,13 @@ DEFAULTS = {
     "enabled": False,
     "periodic_enabled": False,
     "public_interactions": False,
+    "public_write_enabled": False,
     "collection_management": False,
     "screenshot_enabled": True,
     "life_enabled": False,
     "dsh_life_task": None,
+    "dsh_peak_token_limit": 24000,
+    "autonomous_provider_id": None,
     "life_decision_enabled": False,
     "life_repeat_cooldown_minutes": 180,
     "life_rhythm_enabled": False,
@@ -412,7 +415,7 @@ def main(argv=None):
     once = sub.add_parser("once")
     once.add_argument("--delay-seconds", type=int, default=180)
     switches = sub.add_parser("switch")
-    switches.add_argument("name", choices=["public_interactions", "engagement_actions", "collection_management", "screenshot_enabled", "life_enabled", "life_decision_enabled", "life_rhythm_enabled", "life_memory_enabled", "self_expression_enabled", "life_projects_enabled", "contact_coordination_enabled", "workshop_enabled", "methods_enabled", "reply_watch_enabled", "comment_learning_enabled", "auto_public"])
+    switches.add_argument("name", choices=["public_write_enabled", "public_interactions", "engagement_actions", "collection_management", "screenshot_enabled", "life_enabled", "life_decision_enabled", "life_rhythm_enabled", "life_memory_enabled", "self_expression_enabled", "life_projects_enabled", "contact_coordination_enabled", "workshop_enabled", "methods_enabled", "reply_watch_enabled", "comment_learning_enabled", "auto_public"])
     switches.add_argument("value", choices=["on", "off"])
     accepted = sub.add_parser("accept-one-shot")
     accepted.add_argument("--evidence", type=Path, required=True,

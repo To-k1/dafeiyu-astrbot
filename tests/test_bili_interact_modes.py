@@ -17,7 +17,8 @@ VIDEO = integration.VIDEO
 
 class ModePolicyTests(unittest.TestCase):
     def test_mode_switch_action_and_positive_limit_matrix(self):
-        base = main.DEFAULTS | {"public_interactions": True, "engagement_actions": True, "collection_management": True}
+        base = main.DEFAULTS | {"public_write_enabled": True, "public_interactions": True,
+                                "engagement_actions": True, "collection_management": True}
         for mode in ("approval", "auto_low_risk", "auto_public"):
             for flag in (False, True):
                 cfg = base | {"interaction_mode": mode, "auto_public": flag}
@@ -31,7 +32,7 @@ class ModePolicyTests(unittest.TestCase):
             self.assertFalse(auto_allowed("comment", {}, cfg | {key: False if type(cfg[key]) is bool else 0}))
 
     def test_allowlists_use_verified_video_owner_and_title(self):
-        cfg = main.DEFAULTS | {"public_interactions": True, "interaction_mode": "auto_public", "auto_public": True,
+        cfg = main.DEFAULTS | {"public_write_enabled": True, "public_interactions": True, "interaction_mode": "auto_public", "auto_public": True,
                                "allowed_uids": [5], "allowed_keywords": ["教程"]}
         target = {"owner": {"mid": 5}, "title": "Python教程"}
         self.assertTrue(auto_allowed("comment", target, cfg))

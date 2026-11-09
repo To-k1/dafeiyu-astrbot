@@ -282,7 +282,9 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
             sock = socket.socket()
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-            server = create_server(folder, port=port, api=api, phone=Phone())
+            control = Path(folder) / "control.json"
+            control.write_text('{"public_write_enabled":true,"public_interactions":true,"collection_management":true}')
+            server = create_server(folder, port=port, api=api, phone=Phone(), write_control=control)
             app = server.streamable_http_app()
             runner = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='critical', access_log=False))
             task = asyncio.create_task(runner.serve(sockets=[sock]))

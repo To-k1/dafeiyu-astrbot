@@ -669,8 +669,9 @@ class BiliAPI:
 
 class Executor:
     """Persistent operation ledger. Unknown POST outcomes are never retried."""
-    def __init__(self, api, state_path):
+    def __init__(self, api, state_path, before_write=None):
         self.api = api
+        self.before_write = before_write
         self.state_path = Path(state_path)
         with closing(self._connect()) as db:
             db.execute("CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,fingerprint TEXT,status TEXT,result TEXT)")
@@ -704,6 +705,8 @@ class Executor:
                             **(json.loads(row[2]) if row[2] else {"verified": False, "reason": "unknown previous outcome; no retry"})}
                 # Validation may fail safely before the durable execution reservation.
                 path, data, identity = await self.api.prepare_write(action, args)
+                if self.before_write is not None:
+                    self.before_write(action)
                 db.execute("INSERT INTO operations VALUES(?,?,?,NULL)", (operation_id, fingerprint, "executing"))
                 result = {"verified": False, "visibility": "unknown", "reason": "operation outcome unknown; no retry"}
                 response = None

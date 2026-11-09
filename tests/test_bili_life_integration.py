@@ -159,6 +159,31 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.plugin.agent.assert_not_awaited()
 
+    async def test_dsh_peak_defers_expensive_goal_and_reoffers_after_noon(self):
+        store = self.plugin.store
+        goal = store.life.create_goal(SCOPE, "文件研究", "保留出处", "汇总样例", "peak-goal")
+        plan = {"goal_id": goal["id"], "cwd": r"C:\FishHome\test-workspace", "source": "sample.csv",
+                "instruction": "汇总样例", "estimated_tokens": 32000}
+        self.config.update(life_decision_enabled=True, dnd_ranges=[], dsh_life_task=plan)
+        self.save_config()
+        self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))
+        client = types.SimpleNamespace(call=AsyncMock(side_effect=ConnectionError()), close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: lambda scope: client})
+        before = datetime.fromisoformat("2026-11-09T11:59:00+08:00").timestamp()
+        after = datetime.fromisoformat("2026-11-09T12:00:00+08:00").timestamp()
+        key = dsh_task.task_key(SCOPE, goal["id"])
+        with patch.object(main.time, "time", return_value=before), patch.object(dsh_task, "time", return_value=before):
+            await self.plugin.run_activity("once")
+        deferred = store.get_setting(key)
+        self.assertEqual((deferred["state"], deferred["resume_after"]), ("deferred", after))
+        client.call.assert_not_awaited()
+        with patch.object(main.time, "time", return_value=after), patch.object(dsh_task, "time", return_value=after):
+            await self.plugin.run_activity("periodic")
+            client.call.assert_not_awaited()
+            await self.plugin.run_activity("once")
+        client.call.assert_awaited_once_with("session.create", {"cwd": plan["cwd"]})
+        self.assertEqual(store.get_setting(key)["task_id"], deferred["task_id"])
+
     async def test_two_runs_keep_goal_checkpoint_interest_and_approval_once(self):
         self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))
         captured = {}

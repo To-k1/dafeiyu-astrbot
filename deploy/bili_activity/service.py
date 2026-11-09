@@ -63,14 +63,23 @@ def validated_args(action, args, account_uid, require_account=False):
 
 
 def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
-                  device_id="emulator-5554", allowed_hosts=(), api=None, phone=None):
+                  device_id="emulator-5554", allowed_hosts=(), write_control=None, api=None, phone=None):
     if not ipaddress.ip_address(host).is_loopback:
         raise ValueError("companion must bind a loopback address; use the SSH tunnel")
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
     api = api or BiliAPI(state / "cookies.json")
     phone = phone or PhoneVideo(adb_path=adb_path, device_id=device_id)
-    executor = Executor(api, state / "operations.sqlite3")
+    def require_write(action):
+        if write_control is None:
+            raise PermissionError("public writes are disabled")
+        control = json.loads(Path(write_control).read_text(encoding="utf-8"))
+        platform_switch = ("public_interactions" if action in {"comment", "reply", "danmaku"} else
+                           "engagement_actions" if action in {"like", "coin"} else "collection_management")
+        if control.get("public_write_enabled") is not True or control.get(platform_switch) is not True:
+            raise PermissionError("public writes are disabled")
+
+    executor = Executor(api, state / "operations.sqlite3", before_write=require_write)
     media_lock = asyncio.Lock()
     mcp = FastMCP(
         "dafeiyu-bili-local", host=host, port=port, log_level="WARNING",
@@ -133,6 +142,7 @@ def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
         the same id is rejected. This tool must not be exposed to a chat model.
         """
         async def execute():
+            require_write(action)
             value = validated_args(action, args, api.cookies().get("DedeUserID"), require_account=True)
             return await executor.execute(operation_id, action, value)
         return await safe(execute())
@@ -194,12 +204,13 @@ def main(argv=None):
     parser.add_argument("--adb-path")
     parser.add_argument("--device-id", default="emulator-5554")
     parser.add_argument("--allowed-host", action="append", default=[])
+    parser.add_argument("--write-control", type=Path, help="Administrator-controlled activity control.json")
     args = parser.parse_args(argv)
     # Tool arguments can contain a comment body; access logs are unnecessary.
     logging.getLogger("uvicorn.access").disabled = True
     create_server(args.state_dir, host=args.host, port=args.port,
                   adb_path=args.adb_path, device_id=args.device_id,
-                  allowed_hosts=args.allowed_host).run(transport="streamable-http")
+                  allowed_hosts=args.allowed_host, write_control=args.write_control).run(transport="streamable-http")
 
 
 if __name__ == "__main__":

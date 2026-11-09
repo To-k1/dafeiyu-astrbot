@@ -54,6 +54,8 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
                 test.provider_calls.append(kwargs)
                 return types.SimpleNamespace(completion_text="离线脚本返回")
 
+        fixtures.configure_autonomous(self.plugin, self.config, Provider())
+
         class Runner:
             state = "done"
             streaming = False
@@ -151,8 +153,10 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
         from deploy.memory_observatory.activity_reader import read_activity
         from deploy.bili_activity.life_observation import observe
 
+        get_provider = self.plugin.context.get_provider_by_id
         memory = memory_fixtures.MemoryIntegrationTests.mock_lm(self)
         self.plugin.context.get_config = lambda **kw: {}
+        self.plugin.context.get_provider_by_id = get_provider
         self.plugin.flush_memory = types.MethodType(main.BiliActivity.flush_memory, self.plugin)
         journey = {"goals": [], "works": [], "sources": []}
 

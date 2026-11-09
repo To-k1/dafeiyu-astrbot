@@ -1,0 +1,5 @@
+{
+  "peak": {"miss": 2000, "hit": 40, "output": 8000},
+  "off_peak": {"miss": 1000, "hit": 20, "output": 4000},
+  "tools": {"search": 5000000, "fetch": 5000000}
+}

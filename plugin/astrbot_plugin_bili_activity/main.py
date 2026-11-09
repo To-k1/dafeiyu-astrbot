@@ -74,6 +74,7 @@ DEFAULTS = {
     **DOUYIN_DEFAULTS,
     **KNOWLEDGE_DEFAULTS,
     "enabled": False, "periodic_enabled": False, "public_interactions": False,
+    "public_write_enabled": False,
     "collection_management": False, "screenshot_enabled": True,
     "owner_scope": "", "owner_id": "", "dnd_ranges": None,
     "phone_url": "http://172.18.0.1:8009/Phone",
@@ -85,6 +86,8 @@ DEFAULTS = {
     "phone_tool_calls_per_turn": 40, "phone_screenshots_per_turn": 8,
     "life_enabled": False, "daily_minutes": 30, "max_model_calls_per_run": 20,
     "dsh_life_task": None,
+    "dsh_peak_token_limit": 24000,
+    "autonomous_provider_id": None,
     "daily_model_calls": 60, "daily_shares": 3, "screenshots_per_run": 1,
     "chat_cooldown_seconds": 300, "workshop_enabled": False, "methods_enabled": False,
     "workshop_revisions_per_run": 3, "workshop_max_characters": 12000,
@@ -696,6 +699,12 @@ class BiliActivity(Star):
         value = json.loads(self.control.read_text(encoding="utf-8"))
         cfg = DEFAULTS | value
         validate_dsh_plan(cfg["dsh_life_task"])
+        if type(cfg["dsh_peak_token_limit"]) is not int or cfg["dsh_peak_token_limit"] <= 0:
+            raise ValueError("dsh_peak_token_limit 必须是正整数")
+        if cfg["autonomous_provider_id"] is not None and (
+            not isinstance(cfg["autonomous_provider_id"], str) or not cfg["autonomous_provider_id"].strip()
+        ):
+            raise ValueError("autonomous_provider_id 必须是提供商 ID 或 null")
         for key, low, high in (("check_minutes", 1, 1440), ("check_jitter_minutes", 0, 1440),
                                ("max_videos", 1, 10), ("max_minutes", 1, 30),
                                ("daily_minutes", 1, 240), ("max_model_calls_per_run", 1, 64),
@@ -704,7 +713,7 @@ class BiliActivity(Star):
                                ("phone_tool_calls_per_turn", 1, 200), ("phone_screenshots_per_turn", 0, 50),
                                ("workshop_revisions_per_run", 1, 10), ("workshop_max_characters", 500, 20000)):
             cfg[key] = min(high, max(low, int(cfg[key])))
-        for key in ("enabled", "periodic_enabled", "life_enabled", "workshop_enabled", "methods_enabled", "public_interactions",
+        for key in ("enabled", "periodic_enabled", "life_enabled", "workshop_enabled", "methods_enabled", "public_interactions", "public_write_enabled",
                     "collection_management", "screenshot_enabled", "one_shot_verified"):
             if not isinstance(cfg[key], bool):
                 raise ValueError(f"{key} 必须是布尔开关")
@@ -741,7 +750,8 @@ class BiliActivity(Star):
 
     def douyin_controller(self):
         if getattr(getattr(self, "_douyin", None), "store", None) is not self.store:
-            self._douyin = DouyinController(self.store, self.phone_agent(), self.folder / "douyin_drafts")
+            self._douyin = DouyinController(self.store, self.phone_agent(), self.folder / "douyin_drafts",
+                                            read_config=self.cfg)
         return self._douyin
 
     def knowledge_gate(self):
@@ -1556,6 +1566,15 @@ class BiliActivity(Star):
 
     async def agent(self, event, prompt, tools, image_urls=None, max_steps=32):
         """Use native request construction: live persona, conversation, provider and hooks."""
+        provider_id = self.cfg()["autonomous_provider_id"]
+        if not provider_id:
+            raise BudgetExceeded("自主模型尚未接入人民币计费入口")
+        provider = self.context.get_provider_by_id(provider_id)
+        if (provider is None or provider.get_model() != "deepseek-flash"
+                or provider.provider_config.get("type") != "openai_chat_completion"
+                or str(provider.provider_config.get("api_base", "")).rstrip("/")
+                != "http://127.0.0.1:6197/openai/autonomous/v1"):
+            raise BudgetExceeded("自主模型必须使用回环计费入口的 Flash 提供商")
         try:
             from astrbot.core.astr_main_agent import MainAgentBuildConfig, _get_session_conv, build_main_agent
             from astrbot.core.pipeline.context_utils import call_event_hook
@@ -1592,6 +1611,8 @@ class BiliActivity(Star):
             if missing:
                 raise RuntimeError("活动工具尚未注册: " + ",".join(sorted(missing)))
             await build.reset_coro
+            build.agent_runner.provider = provider
+            build.agent_runner.fallback_providers = []
             if self.is_life_run(event) or self.is_reply_run(event):
                 guard = instrument_runner(build.agent_runner, lambda: self.charge_model(event))
         except BaseException:
@@ -1621,6 +1642,8 @@ class BiliActivity(Star):
         writing = self.writing_candidate(cfg)
         reviewing = None
         choice = None
+        dsh_run = False
+        dsh_plan = cfg["dsh_life_task"]
         if life_mode and cfg["life_decision_enabled"]:
             if not cfg["enabled"] or cfg["dnd_ranges"] is None or quiet_now(cfg["dnd_ranges"]):
                 return
@@ -1630,6 +1653,11 @@ class BiliActivity(Star):
                 return
             writing = self.workshop_store().get(scope, choice["work_id"]) if choice["action"] == "writing" else None
             reviewing = choice if choice["action"] == "project_review" else None
+            if choice["action"] == "research" and dsh_plan and dsh_plan["goal_id"] == choice["goal_id"]:
+                saved = self.store.get_setting(dsh_task_key(scope, choice["goal_id"]), {})
+                dsh_run = saved.get("state") not in {"completed", "expired"}
+                if dsh_run and trigger != "once" and not saved.get("session_id"):
+                    return
         duration = cfg["max_minutes"] * 60
         if choice and choice.get("rhythm", {}).get("enabled"):
             rhythm = choice["rhythm"]
@@ -1660,7 +1688,6 @@ class BiliActivity(Star):
         status, summary = "failed", ""
         monitor = None
         method_resume = None
-        dsh_run = False
         try:
             self.store.db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", (run_id, scope, time.time(), None, "running", None))
             self.store.event(scope, "trigger", {"run_id": run_id, "trigger": trigger,
@@ -1679,14 +1706,7 @@ class BiliActivity(Star):
                 self.store.event(scope, "goal_selected", {"run_id": run_id, "goal_id": selected_goal,
                                                          "why": choice["reason"] if choice else "继续未完成的文字作品",
                                                          "work_id": writing["id"] if writing else None})
-                dsh_plan = cfg["dsh_life_task"]
-                if choice and choice["action"] == "research" and dsh_plan and dsh_plan["goal_id"] == selected_goal:
-                    saved = self.store.get_setting(dsh_task_key(scope, selected_goal), {})
-                    dsh_run = saved.get("state") != "completed"
                 if dsh_run:
-                    if trigger != "once" and not saved.get("session_id"):
-                        status, summary = "needs_review", "新 DSH 文件任务须由管理员安排单次运行。"
-                        return
                     factory = getattr(self.context, DSH_LIFE_BRIDGE, None)
                     if factory is None:
                         status, summary = "needs_review", "DSH 连接未配置，目标已保留。"
@@ -1699,7 +1719,9 @@ class BiliActivity(Star):
                     client = factory(scope)
                     try:
                         async with asyncio.timeout(duration):
-                            status, summary = await run_file_task(self.store, client, scope, selected_goal, run_id, dsh_plan)
+                            status, summary = await run_file_task(
+                                self.store, client, scope, selected_goal, run_id, dsh_plan,
+                                peak_token_limit=cfg["dsh_peak_token_limit"])
                     finally:
                         await client.close()
                     return
@@ -1814,7 +1836,7 @@ class BiliActivity(Star):
                     if cfg["phone_free_explore_enabled"] and not writing and not reviewing:
                         tool_names = tool_names | PHONE_EXPLORE_TOOLS
                         prompt += ("\n已开启虚拟手机自由操作（严格限定B站与抖音）：可用 df_phone_observe 观察当前界面/截图/音频，"
-                                   "用 df_phone_act 做允许范围内的打开应用(launch_app)、退回桌面(go_home)、点击/滑动/输入/返回；绝不可触碰支付、密码、系统设置。")
+                                   "用 df_phone_act 打开应用(launch_app)、定向滑动(swipe)、返回(go_back)或退回桌面(go_home)。")
                     if cfg["douyin_enabled"] and not writing and not reviewing:
                         tool_names = tool_names | DOUYIN_TOOLS
                         prompt += ("\n已开启抖音探索与创作：可用 df_douyin_feed 刷推荐/关注/搜索视频（含画面与声音理解），"
@@ -1937,7 +1959,7 @@ class BiliActivity(Star):
         if cfg.get("phone_free_explore_enabled"):
             parts.append(
                 "已开启手机自由操作：可用 df_phone_observe 查看当前前台应用/控件/截图/音频，"
-                "用 df_phone_act 执行 launch_app（打开B站/抖音）、go_home（退回手机桌面）、tap/tap_element/swipe/type_text/go_back。"
+                "用 df_phone_act 执行 launch_app（打开B站/抖音）、go_home（退回桌面）、定向 swipe 或 go_back。"
             )
         if cfg.get("douyin_enabled"):
             parts.append(
@@ -2226,6 +2248,9 @@ class BiliActivity(Star):
         result = {**identity, "requested_range": [start, end], "range": value.get("range"),
                   "subtitles": value.get("subtitles", []), "observations": [], "notes": value.get("notes", [])}
         self.record_video(event, result)
+        if run_id and self.cfg()["autonomous_provider_id"]:
+            result["notes"].append("计费入口只覆盖文本，已保留原字幕。")
+            return canonical(result)
         face = self.face_plugin()
         if not face:
             result["notes"].append("face_convert视觉/转写实现未加载")
@@ -3104,7 +3129,8 @@ class BiliActivity(Star):
             res = await agent.observe(
                 event.unified_msg_origin, cfg, owner=run_id, run_id=run_id,
                 goal_id=goal["id"] if goal else None,
-                include_screenshot=bool(include_screenshot), listen_seconds=int(listen_seconds or 0),
+                include_screenshot=bool(include_screenshot),
+                listen_seconds=0 if cfg["autonomous_provider_id"] else int(listen_seconds or 0),
             )
         else:
             async with self.gate.lease() as owner:
@@ -3120,8 +3146,8 @@ class BiliActivity(Star):
         """在允许的应用（严格限定B站与抖音）内执行安全的虚拟手机操作；遇支付/密码/系统设置自动拦截。
 
         Args:
-            action(string): launch_app/tap/tap_element/swipe/type_text/press_key/go_back/go_home/wait（退回手机桌面用 go_home）。
-            arguments(string): JSON对象；launch_app传app(bilibili/douyin)，go_home无需参数即可退回手机桌面，tap传x,y，tap_element传text或resource_id，swipe传direction(up/down/left/right)，type_text传text,submit。
+            action(string): launch_app/swipe/go_back/go_home/wait（退回手机桌面用 go_home）。
+            arguments(string): JSON对象；launch_app 传 app(bilibili/douyin)，swipe 传 direction(up/down/left/right)。
         """
         cfg = self.check_owner(event)
         if not cfg["phone_free_explore_enabled"]:
@@ -3133,6 +3159,10 @@ class BiliActivity(Star):
             await self.pause_background("主人请求操作虚拟手机")
             cfg = self.check_owner(event)
             self.check_foreground_phone_budget(event, "df_phone_act", cfg)
+        if action in {"tap", "tap_element", "type_text", "press_key"} or (
+            action == "swipe" and set(args) - {"direction"}
+        ):
+            raise PermissionError("请使用已定义的只读导航或平台写入工具")
         goal = self.active_goal(event)
         agent = self.phone_agent()
         if run_id:
@@ -3180,7 +3210,7 @@ class BiliActivity(Star):
         if run_id:
             res = await dy.feed(
                 event.unified_msg_origin, cfg, mode=mode, keyword=keyword,
-                count=int(count or 1), listen_seconds=int(listen_seconds or 0),
+                count=int(count or 1), listen_seconds=0 if cfg["autonomous_provider_id"] else int(listen_seconds or 0),
                 sample_comments=bool(sample_comments),
                 owner=run_id, run_id=run_id, goal_id=goal["id"] if goal else None,
             )

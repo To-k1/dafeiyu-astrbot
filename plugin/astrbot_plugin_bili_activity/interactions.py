@@ -55,7 +55,7 @@ def validate_config(cfg):
 
 
 def enabled(action, cfg):
-    return bool(cfg.get("public_interactions") if action in PUBLIC else
+    return cfg.get("public_write_enabled") is True and bool(cfg.get("public_interactions") if action in PUBLIC else
                 cfg.get("engagement_actions") if action in ENGAGEMENT else cfg.get("collection_management"))
 
 

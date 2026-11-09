@@ -2,11 +2,12 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+import math
 from pathlib import PurePosixPath, PureWindowsPath
 from time import time
 from uuid import uuid4
-from zoneinfo import ZoneInfo
+
+from .cost_window import budget_day, peak_end
 
 
 BRIDGE = "fishhome_dsh_life_client"
@@ -19,10 +20,16 @@ def task_key(scope, goal_id):
 def validate_plan(plan):
     if plan is None:
         return
-    if not isinstance(plan, dict) or set(plan) != {"goal_id", "cwd", "source", "instruction"}:
+    required = {"goal_id", "cwd", "source", "instruction"}
+    if not isinstance(plan, dict) or not required <= set(plan) <= required | {"estimated_tokens", "deadline"}:
         raise ValueError("invalid DSH file task plan")
-    if any(not isinstance(value, str) or not value.strip() for value in plan.values()):
+    if any(not isinstance(plan[key], str) or not plan[key].strip() for key in required):
         raise ValueError("invalid DSH file task fields")
+    if "estimated_tokens" in plan and (type(plan["estimated_tokens"]) is not int or plan["estimated_tokens"] <= 0):
+        raise ValueError("invalid token estimate")
+    if "deadline" in plan and (type(plan["deadline"]) not in {float, int}
+                               or not math.isfinite(plan["deadline"]) or plan["deadline"] <= 0):
+        raise ValueError("invalid DSH deadline")
     source = PurePosixPath(plan["source"])
     if (source.is_absolute() or ".." in source.parts or not source.name
             or any(c in plan["source"] for c in "\\:\r\n") or len(plan["source"]) > 200
@@ -58,7 +65,7 @@ async def _read_text(client, task, path):
     return text
 
 
-async def run_file_task(store, client, scope, goal_id, run_id, plan):
+async def run_file_task(store, client, scope, goal_id, run_id, plan, *, peak_token_limit=24000):
     key = task_key(scope, goal_id)
     goal = store.life.get_goal(scope, goal_id)
     if not goal or goal["status"] != "running" or goal["run_id"] != run_id:
@@ -66,13 +73,27 @@ async def run_file_task(store, client, scope, goal_id, run_id, plan):
     task = store.get_setting(key)
     if task and task["state"] == "completed":
         return "completed", task["summary"]
+    now = time()
     if not task:
         ident = uuid4().hex
-        day = datetime.fromtimestamp(time(), ZoneInfo("Asia/Shanghai")) - timedelta(hours=4)
         task = {**plan, "task_id": ident, "request_id": ident, "state": "prepared",
-                "billing": "autonomous", "origin_day": day.date().isoformat(),
+                "billing": "autonomous", "origin_day": budget_day(now),
                 "report": f"output/{ident}.md", "sources": f"output/{ident}.json"}
         store.setting(key, task)
+
+    if not task.get("session_id"):
+        deadline = task.get("deadline", float("inf"))
+        if now >= deadline:
+            store.setting(key, {**task, "state": "expired"})
+            return "expired", "DSH 文件任务已过期。"
+        end = peak_end(now)
+        if end and deadline > end and task.get("estimated_tokens", 32000) > peak_token_limit:
+            store.setting(key, {**task, "state": "deferred", "resume_after": end})
+            return "deferred", "预计用量超过高峰软阈值，已保留任务到低谷。"
+        if task["state"] == "deferred":
+            task = {**task, "state": "prepared"}
+            task.pop("resume_after", None)
+            store.setting(key, task)
 
     try:
         if task["state"] == "prepared":

@@ -84,6 +84,7 @@ class DouyinPolicyTests(unittest.TestCase):
     def test_douyin_post_never_auto_executes(self):
         for mode in ("approval", "auto_low_risk", "auto_public"):
             cfg = main.DEFAULTS | {
+                "public_write_enabled": True,
                 "douyin_enabled": True,
                 "douyin_engagement_actions": True,
                 "douyin_public_interactions": True,
@@ -119,6 +120,7 @@ class DouyinIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.live = None
         self.plugin.flush_memory = AsyncMock()
         self.config = main.DEFAULTS | {
+            "public_write_enabled": True,
             "owner_scope": SCOPE,
             "owner_id": "12345",
             "enabled": True,

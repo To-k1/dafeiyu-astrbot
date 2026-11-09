@@ -81,7 +81,6 @@ COORDS_720_1280 = {
     "album_first_item": (120, 280),
     "album_next_step": (620, 1210),
     "post_caption_box": (260, 340),
-    "post_publish_direct": (540, 1210),
 }
 
 ALLOWED_MEDIA_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".mp4"})
@@ -146,7 +145,7 @@ def normalize_action(action: str) -> str:
 
 def action_enabled(action: str, cfg: dict[str, Any]) -> bool:
     cfg = DEFAULTS | cfg
-    if not cfg["douyin_enabled"]:
+    if cfg.get("public_write_enabled") is not True or not cfg["douyin_enabled"]:
         return False
     act = normalize_action(action)
     if act in DOUYIN_ENGAGEMENT:
@@ -213,13 +212,22 @@ def _parse_feed_metadata(elements: list[dict[str, Any]]) -> dict[str, str]:
 class DouyinController:
     """Douyin browsing, engagement ledger, and post publishing over `PhoneAgent`."""
 
-    def __init__(self, store, phone_agent: PhoneAgent, draft_root: str | Path | None = None):
+    def __init__(self, store, phone_agent: PhoneAgent, draft_root: str | Path | None = None, *, read_config=None):
         self.store = store
         self.db = store.db
         self.phone = phone_agent
+        self.read_config = read_config
         self.draft_root = Path(draft_root or (Path(store.folder) / "douyin_drafts")).resolve()
         self.draft_root.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+    def require_write(self, scope, action, cfg):
+        if self.read_config is not None:
+            cfg = self.read_config()
+            if cfg["owner_scope"] != scope:
+                raise PermissionError("抖音写入归属已改变")
+        if not action_enabled(action, cfg):
+            raise PermissionError("抖音写入未授权")
 
     def _init_schema(self) -> None:
         self.db.executescript("""
@@ -431,6 +439,8 @@ class DouyinController:
     ) -> dict[str, Any]:
         """Execute a single approved or auto-allowed Douyin engagement/public action and verify screen diff."""
         act = normalize_action(action)
+        if not action_enabled(act, cfg):
+            raise PermissionError("抖音写入未授权")
         self.check_quota(scope, act, cfg)
 
         # Ensure Douyin is foreground
@@ -438,6 +448,7 @@ class DouyinController:
         before_obs = await self.phone.observe(
             scope, cfg, owner=owner, run_id=run_id, include_screenshot=True, listen_seconds=0
         )
+        self.require_write(scope, act, cfg)
         before_fp = (before_obs.get("snapshot") or {}).get("fingerprint") or ""
 
         target_fp = str(args.get("fingerprint") or before_fp or "current")
@@ -488,6 +499,7 @@ class DouyinController:
                 await self.phone._call("tap", {"x": ix, "y": iy}, owner=owner)
                 await self.phone._call("type_text", {"text": msg}, owner=owner)
                 sx, sy = COORDS_720_1280["comment_send_button"]
+                self.require_write(scope, act, cfg)
                 await self.phone._call("tap", {"x": sx, "y": sy}, owner=owner)
             else:
                 raise ValueError(f"动作 {act} 请走专用发布入口")
@@ -649,8 +661,8 @@ class DouyinController:
         or `'approved'` (set only after real owner QQ confirmation).
         """
         cfg = DEFAULTS | cfg
-        if not cfg["douyin_enabled"] or not cfg["douyin_publish_enabled"]:
-            raise PermissionError("抖音发布开关 douyin_publish_enabled 未开启")
+        if not action_enabled("douyin_post", cfg):
+            raise PermissionError("抖音发布未授权")
         self.check_quota(scope, "douyin_post", cfg)
 
         post = self.get_post(scope, post_id)
@@ -705,12 +717,8 @@ class DouyinController:
         await self.phone._call("tap", {"x": cx, "y": cy}, owner=owner)
         await self.phone._call("type_text", {"text": full_text}, owner=owner)
 
-        # Direct publish per owner configuration ("批准后直接点「发布」")
-        try:
-            await self.phone._call("tap_element", {"text": "发布"}, owner=owner)
-        except TransportError:
-            pub_x, pub_y = COORDS_720_1280["post_publish_direct"]
-            await self.phone._call("tap", {"x": pub_x, "y": pub_y}, owner=owner)
+        self.require_write(scope, "douyin_post", cfg)
+        await self.phone._call("tap_element", {"text": "发布"}, owner=owner)
 
         after_obs = await self.phone.observe(
             scope, cfg, owner=owner, run_id=run_id, include_screenshot=True, listen_seconds=0

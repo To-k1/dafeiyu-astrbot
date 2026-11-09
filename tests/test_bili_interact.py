@@ -190,7 +190,9 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.posts, [])
 
     async def test_risk_codes_survive_executor_and_service_without_body(self):
-        server = create_server(self.temp.name, api=self.api)
+        control = Path(self.temp.name) / "control.json"
+        control.write_text('{"public_write_enabled":true,"engagement_actions":true}')
+        server = create_server(self.temp.name, api=self.api, write_control=control)
         for code in (12014, -412, -352, -101):
             self.api.risk_code = code
             args = validated_args("like", VIDEO | {"like": 1}, "42")
@@ -200,6 +202,17 @@ class ActionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(value["verified"])
             self.assertNotIn("SESSDATA", json.dumps(value))
             self.assertNotIn("https", json.dumps(value))
+
+    async def test_companion_requires_global_and_platform_switches(self):
+        control = Path(self.temp.name) / "control.json"
+        server = create_server(self.temp.name, api=self.api, write_control=control)
+        args = validated_args("like", VIDEO | {"like": 1}, "42")
+        for settings in ({"engagement_actions": True}, {"public_write_enabled": True}):
+            control.write_text(json.dumps(settings))
+            result = await server._tool_manager.call_tool("bili_execute", {
+                "operation_id": "blocked-write", "action": "like", "args": args})
+            self.assertEqual(result["error"], "PermissionError")
+        self.assertEqual(self.api.posts, [])
 
     async def test_verify_failure_and_timeout_replay_never_post_again(self):
         for index, field in enumerate(("fail_verify", "timeout_post")):
@@ -353,7 +366,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
                            action_interval_ms=[0, 0])
         self.save()
         self.api = InteractAPI(self.folder.name)
-        self.server = create_server(self.folder.name, api=self.api)
+        self.server = create_server(self.folder.name, api=self.api, write_control=self.plugin.control)
         self.backend = AsyncMock()
         self.backend.json_call.side_effect = self.server._tool_manager.call_tool
         self.plugin.bili = lambda *args: self.backend
