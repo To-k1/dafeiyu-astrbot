@@ -25,6 +25,12 @@
 
 WebUI 只监听 `127.0.0.1:6196`，由托盘打开的浏览器会话可操作服务。DSH 仍在 `FishHomeRunner` 下运行，托盘启动后会更新签名票据。NapCat 复用原脚本的快登配置。正式 ThinkBook 的路径和启动策略另行验收。
 
+## 界面、图标和人格源码
+
+- **控制台 WebUI** 的 HTML、CSS 和 JavaScript 都在 [index.html](../deploy/desktop_manager/index.html)。修改页面后刷新控制台即可预览。服务 API 在 [manager.py](../deploy/desktop_manager/manager.py)。
+- **系统托盘图标** 在 [Tray.cs](../deploy/desktop_manager/Tray.cs#L80) 的 `NotifyIcon`，现在用 Windows 默认图标。生成 `FishHome.exe` 的编译入口在 [install.ps1](../deploy/desktop_manager/install.ps1#L27)。如果设计稿用于托盘及 EXE，使用 Windows `.ico`，并为托盘保留清楚的 16 像素版。
+- **大肥鱼人格稿** 在 [大肥鱼-人格.md](../persona/大肥鱼-人格.md)，首条分隔线之后是系统提示词。课程内容另放在 [课程记忆-模板.md](../persona/课程记忆-模板.md)。台式机的 AstrBot「人格」目前只有 `default`，用户新稿完成后可从 AstrBot 面板导入并选为对应会话使用的人格。
+
 ## 台式机实测
 
 - 已编译并安装 `FishHome.exe`，替换本机一键启动脚本。8 个组件均通过本机状态检测。重开托盘与重复一键启动保留了既有服务进程。单独停止和重启房间后重新收到 HTTP 200，空闲 DSH 经单项重启恢复并重新签发 Bridge 票据。雷电使用原图形启动入口后通过 `emulator-5554` 的 Android 开机探针。
