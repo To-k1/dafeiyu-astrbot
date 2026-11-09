@@ -1,6 +1,8 @@
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +12,7 @@ if os.name == "nt":
     from deploy.desktop_manager.manager import Manager, create_app, qq_owner
     from deploy.desktop_manager.windows import write_json
     from deploy.fish_cost_ledger import Ledger
+    from scripts.native_archive import LM, verify
 
 
 @unittest.skipUnless(os.name == "nt", "Windows desktop manager")
@@ -70,3 +73,20 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.post("/api/config", headers=self.auth, json={"public_write": True}) as result:
             self.assertEqual(result.status, 409)
         self.assertFalse(self.manager.configuration()["public_write"])
+
+    async def test_backup_route_creates_private_safe_archive_and_lists_it(self):
+        memory = self.manager.astro / LM / "livingmemory.db"
+        memory.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(memory)) as db, db:
+            db.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY)")
+        Ledger(self.manager.ledger)
+        async with self.client.get("/api/archives", headers={"Host": "127.0.0.1:6196"}) as result:
+            self.assertEqual(result.status, 401)
+        async with self.client.post("/api/archives/backup", headers=self.auth) as result:
+            self.assertEqual(result.status, 200)
+            name = (await result.json())["name"]
+        manifest = verify(self.manager.backups / name)
+        self.assertEqual(manifest["consistency"], "sqlite-online")
+        self.assertFalse(manifest["include_private_chat"])
+        async with self.client.get("/api/archives", headers=self.auth) as result:
+            self.assertEqual([row["name"] for row in (await result.json())["backups"]], [name])

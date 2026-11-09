@@ -11,6 +11,10 @@
 3. 在「人民币预算与凭据」保存 DSH 专用标准账户密码、DeepSeek 官方 Key，查看并调节两个账本。可选择只影响本预算日或修改默认额度。
 4. 「各模块设置与日志位置」可打开对应目录。AstrBot 的模型、LivingMemory、工具权限在 AstrBot 面板管理。活动插件、自主调度、DSH 文件权限使用各自的配置。
 
+「深海工作台」首页的「去看看肥鱼」打开原版房间，旁边可打开记忆星海、AstrBot、NapCat 和 DSH WebUI。右上可切换深海模式与黑夜模式。
+
+「备份与记忆」可在线生成本机 SQLite 归档、导出可读记忆并查看桌面备份历史。归档写到 `%FISH_HOME%\backups`，导出写到 `%FISH_HOME%\exports`。在线备份按数据库分别取一致性快照，排除向量索引和原始聊天库。需要含索引的停写归档和隔离恢复时使用 [fish.ps1](../scripts/README.md)。
+
 当前试跑配置只接收管理员 QQ 私聊。公共写入和自主活动处于关闭状态。公共写入总开关在「FishHome 本机设置」，平台开关、审批和额度仍在各模块。控制台启动的 B 站伴侣始终使用只读配置，当前试跑无需导入 Cookie。Ollama 使用当前 Windows 用户的持久模型目录 `%USERPROFILE%\.ollama\models`，通过本机 Vulkan 路径加载 `bge-m3`。
 
 ## 人民币计费
@@ -28,7 +32,7 @@ WebUI 只监听 `127.0.0.1:6196`，由托盘打开的浏览器会话可操作服
 ## 界面、图标和人格源码
 
 - **控制台 WebUI** 的 HTML、CSS 和 JavaScript 都在 [index.html](../deploy/desktop_manager/index.html)。修改页面后刷新控制台即可预览。服务 API 在 [manager.py](../deploy/desktop_manager/manager.py)。
-- **系统托盘图标** 在 [Tray.cs](../deploy/desktop_manager/Tray.cs#L80) 的 `NotifyIcon`，现在用 Windows 默认图标。生成 `FishHome.exe` 的编译入口在 [install.ps1](../deploy/desktop_manager/install.ps1#L27)。如果设计稿用于托盘及 EXE，使用 Windows `.ico`，并为托盘保留清楚的 16 像素版。
+- **鲸鱼图标** 使用用户提供的 PNG 派生 [网页图标](../deploy/desktop_manager/fishhome.png) 和 [Windows 多尺寸 ICO](../deploy/desktop_manager/fishhome.ico)。[install.ps1](../deploy/desktop_manager/install.ps1#L27) 将 ICO 编译到 EXE，[Tray.cs](../deploy/desktop_manager/Tray.cs#L81) 从 EXE 读取托盘图标。
 - **大肥鱼人格稿** 在 [大肥鱼-人格.md](../persona/大肥鱼-人格.md)，首条分隔线之后是系统提示词。课程内容另放在 [课程记忆-模板.md](../persona/课程记忆-模板.md)。台式机的 AstrBot「人格」目前只有 `default`，用户新稿完成后可从 AstrBot 面板导入并选为对应会话使用的人格。
 
 ## 台式机实测

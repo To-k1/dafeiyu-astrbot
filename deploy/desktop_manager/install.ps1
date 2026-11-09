@@ -25,7 +25,7 @@ if (-not (Test-Path -LiteralPath $settings) -and (Test-Path -LiteralPath $origin
 
 $output = Join-Path $dev 'FishHome.exe'
 & $csc /nologo /target:winexe /optimize+ /codepage:65001 /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    "/out:$output" (Join-Path $PSScriptRoot 'Tray.cs')
+    "/out:$output" "/win32icon:$(Join-Path $PSScriptRoot 'fishhome.ico')" (Join-Path $PSScriptRoot 'Tray.cs')
 if ($LASTEXITCODE -ne 0) { throw 'FishHome tray compilation failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-FishHome.cmd') -Destination $launcher -Force
 
