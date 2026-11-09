@@ -28,6 +28,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from .core import PUBLIC, WRITES, Store, canonical, decision, digest, quiet_now
 from .transport import MCPClient, PhoneGate, QQDelivery, ScreenCapture, TransportError
 from .budget import Budget, BudgetExceeded
+from .dsh_task import BRIDGE as DSH_LIFE_BRIDGE, run_file_task, task_key as dsh_task_key, validate_plan as validate_dsh_plan
 from .agent_budget import instrument_runner
 from .planner import DEFAULTS as PLANNER_DEFAULTS, LifePlanner, validate_config as validate_planner
 from .memory_policy import (DEFAULTS as MEMORY_DEFAULTS, PREFIX as MEMORY_PREFIX, MemoryPolicy,
@@ -83,6 +84,7 @@ DEFAULTS = {
     "phone_screen_width": 720, "phone_screen_height": 1280,
     "phone_tool_calls_per_turn": 40, "phone_screenshots_per_turn": 8,
     "life_enabled": False, "daily_minutes": 30, "max_model_calls_per_run": 20,
+    "dsh_life_task": None,
     "daily_model_calls": 60, "daily_shares": 3, "screenshots_per_run": 1,
     "chat_cooldown_seconds": 300, "workshop_enabled": False, "methods_enabled": False,
     "workshop_revisions_per_run": 3, "workshop_max_characters": 12000,
@@ -693,6 +695,7 @@ class BiliActivity(Star):
     def cfg(self):
         value = json.loads(self.control.read_text(encoding="utf-8"))
         cfg = DEFAULTS | value
+        validate_dsh_plan(cfg["dsh_life_task"])
         for key, low, high in (("check_minutes", 1, 1440), ("check_jitter_minutes", 0, 1440),
                                ("max_videos", 1, 10), ("max_minutes", 1, 30),
                                ("daily_minutes", 1, 240), ("max_model_calls_per_run", 1, 64),
@@ -1657,6 +1660,7 @@ class BiliActivity(Star):
         status, summary = "failed", ""
         monitor = None
         method_resume = None
+        dsh_run = False
         try:
             self.store.db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", (run_id, scope, time.time(), None, "running", None))
             self.store.event(scope, "trigger", {"run_id": run_id, "trigger": trigger,
@@ -1675,6 +1679,30 @@ class BiliActivity(Star):
                 self.store.event(scope, "goal_selected", {"run_id": run_id, "goal_id": selected_goal,
                                                          "why": choice["reason"] if choice else "继续未完成的文字作品",
                                                          "work_id": writing["id"] if writing else None})
+                dsh_plan = cfg["dsh_life_task"]
+                if choice and choice["action"] == "research" and dsh_plan and dsh_plan["goal_id"] == selected_goal:
+                    saved = self.store.get_setting(dsh_task_key(scope, selected_goal), {})
+                    dsh_run = saved.get("state") != "completed"
+                if dsh_run:
+                    if trigger != "once" and not saved.get("session_id"):
+                        status, summary = "needs_review", "新 DSH 文件任务须由管理员安排单次运行。"
+                        return
+                    factory = getattr(self.context, DSH_LIFE_BRIDGE, None)
+                    if factory is None:
+                        status, summary = "needs_review", "DSH 连接未配置，目标已保留。"
+                        return
+                    if choice.get("rhythm", {}).get("enabled"):
+                        duration = min(duration, choice["rhythm"]["active_until"] - time.time(),
+                                       choice["at"] + choice["rhythm"]["max_seconds"] - time.time())
+                    if duration <= 0:
+                        raise BudgetExceeded("本轮节律时间已结束，保留进度，下次再继续")
+                    client = factory(scope)
+                    try:
+                        async with asyncio.timeout(duration):
+                            status, summary = await run_file_task(self.store, client, scope, selected_goal, run_id, dsh_plan)
+                    finally:
+                        await client.close()
+                    return
                 method_resume = self.resume_method(event)
             async with (nullcontext() if writing or reviewing else self.gate.lease(run_id)):
                 if choice and choice.get("rhythm", {}).get("enabled"):
@@ -1834,9 +1862,9 @@ class BiliActivity(Star):
                     self.methods_store().pause_run(scope, run_id, status)
                 self.store.life.pause_run(scope, run_id, status)
             # A summary is explicitly an agent observation, never evidence of user preference.
-            if not memory_enabled(self.cfg()):
+            if not dsh_run and not memory_enabled(self.cfg()):
                 self.store.queue_memory(scope, "[大肥鱼自主活动；不代表主人喜好] " + summary, "run:" + run_id)
-            if status != "cancelled":
+            if not dsh_run and status != "cancelled":
                 try:
                     await asyncio.wait_for(self.flush_memory(await self.make_event(run_id)), 20)
                 except (Exception, asyncio.CancelledError):

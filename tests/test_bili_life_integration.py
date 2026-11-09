@@ -4,14 +4,17 @@ These tests do not assert live QQ delivery or a production deployment.
 """
 import asyncio
 import base64
+from datetime import datetime
+from importlib import import_module
 import json
+from pathlib import PureWindowsPath
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
 import test_bili_activity as fixtures
-
 main, core = fixtures.main, fixtures.core
+dsh_task = import_module(main.__package__ + ".dsh_task")
 SCOPE, OTHER_SCOPE, FakeEvent = fixtures.SCOPE, fixtures.OTHER_SCOPE, fixtures.FakeEvent
 
 
@@ -70,6 +73,91 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def watched(self, event):
         await self.plugin.watch(event, "BVexample", "1", 0, 20)
         return json.loads(await self.plugin.activity_note(event, "BVexample", "1", 20, "想再查合作机制"))
+
+    async def test_dsh_goal_recovers_accepted_request_and_writes_back_once(self):
+        store = self.plugin.store
+        goal = store.life.create_goal(SCOPE, "文件研究", "保留出处", "汇总样例", "file-goal")
+        goal_id = goal["id"]
+        store.life.update_goal(SCOPE, goal_id, checkpoint={"original_progress": 20})
+        key = dsh_task.task_key(SCOPE, goal_id)
+        cwd = r"C:\FishHome\test-workspace"
+        self.config.update(life_decision_enabled=True, dnd_ranges=[], dsh_life_task={
+            "goal_id": goal_id, "cwd": cwd, "source": "sample.csv", "instruction": "汇总样例"})
+        self.save_config()
+        self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))
+        self.plugin.agent = AsyncMock(side_effect=AssertionError("the phone agent must not run"))
+        network = "interrupt"
+        submitted = []
+
+        async def rpc(method, args):
+            if method == "session.create":
+                return {"sessionId": "session-local"}
+            if method == "session.selectModel":
+                return {"selected": {"provider": "deepseek-official", "model": "deepseek-flash"}}
+            if method == "session.prompt":
+                task = self.plugin.store.get_setting(key)
+                self.assertEqual(task["state"], "submitting")
+                self.assertEqual(task["request_id"], args["requestId"])
+                submitted.append(args["requestId"])
+                raise asyncio.CancelledError
+            if network == "offline":
+                raise ConnectionError("local mock disconnected")
+            if method == "session.state":
+                return {"running": False, "queue": [], "pendingInput": []}
+            if method == "session.history":
+                return {"events": [
+                    {"type": "user/message", "data": {"source": {"kind": "user", "rpcId": submitted[0]}}},
+                    {"type": "user/message", "data": {"source": {"kind": "runtime-context"}}},
+                    {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
+                ]}
+            if method == "workspaceFiles.read":
+                path = args["path"]
+                text = '{"source":"sample.csv"}' if path.endswith(".json") else "引用 sample.csv"
+                return {"absolutePath": str(PureWindowsPath(cwd) / path), "eof": True, "text": text}
+            if method == "session.projections":
+                return {"values": {"tokenUsage": {"outputTokens": 8}}}
+            raise AssertionError(method)
+
+        client = types.SimpleNamespace(call=AsyncMock(side_effect=rpc), close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: lambda scope: client})
+        before = datetime.fromisoformat("2026-11-09T03:59:50+08:00").timestamp()
+        with patch.object(main.time, "time", return_value=before - 1):
+            await self.plugin.run_activity("periodic")
+            client.call.assert_not_awaited()
+        with patch.object(main.time, "time", return_value=before), patch.object(dsh_task, "time", return_value=before):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin.run_activity("once")
+        first = store.get_setting(key)
+        self.assertEqual(first["origin_day"], "2026-11-08")
+        self.assertEqual(first["billing"], "autonomous")
+        store.close()
+        self.plugin.store = store = core.Store(self.plugin.folder)
+        self.plugin.budget = main.Budget(store)
+
+        # Give the original planner its normal retry cooldown between attempts.
+        retry_interval = self.plugin.cfg()["life_repeat_cooldown_minutes"] * 60 + 1
+        with patch.object(main.time, "time", return_value=before + retry_interval) as clock:
+            network = "offline"
+            await self.plugin.run_activity("once")
+            self.assertEqual(store.get_setting(key)["state"], "needs_review")
+            network = "online"
+            clock.return_value += retry_interval
+            with patch.object(store, "queue_memory", side_effect=RuntimeError("interrupted writeback")):
+                await self.plugin.run_activity("once")
+            self.assertEqual(store.get_setting(key)["state"], "needs_review")
+            clock.return_value += retry_interval
+            await self.plugin.run_activity("once")
+
+        task = store.get_setting(key)
+        self.assertEqual(task["state"], "completed")
+        self.assertEqual((task["task_id"], task["origin_day"], task["billing"]),
+                         (first["task_id"], first["origin_day"], first["billing"]))
+        self.assertEqual(submitted, [first["request_id"]])
+        self.assertEqual(store.life.get_goal(SCOPE, goal_id)["checkpoint"]["original_progress"], 20)
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM episodes WHERE kind='dsh_file'").fetchone()[0], 1)
+        self.assertEqual(store.db.execute("SELECT COUNT(*) FROM memories WHERE id LIKE 'dsh-file:%'").fetchone()[0], 1)
+        self.assertEqual(self.calls, [])
+        self.plugin.agent.assert_not_awaited()
 
     async def test_two_runs_keep_goal_checkpoint_interest_and_approval_once(self):
         self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))

@@ -60,6 +60,9 @@ class RemoteDshClient(DshClient):
             endpoint, args = "session/list", {"_request": request}
         elif method == "session.modelCatalog":
             endpoint, args = "session/modelCatalog", {}
+        elif method == "workspaceFiles.read":
+            endpoint, args = "workspaceFiles/read", {"workspaceFileScopeId": request["sessionId"],
+                "path": request["path"], "range": {"limit": 200}}
         elif method == "session.history":
             session_id = request.pop("sessionId")
             request["address"] = {"kind": "session", "sessionId": session_id}

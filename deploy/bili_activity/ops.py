@@ -32,6 +32,7 @@ DEFAULTS = {
     "collection_management": False,
     "screenshot_enabled": True,
     "life_enabled": False,
+    "dsh_life_task": None,
     "life_decision_enabled": False,
     "life_repeat_cooldown_minutes": 180,
     "life_rhythm_enabled": False,

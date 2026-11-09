@@ -9,11 +9,28 @@ from .dsh_client import DshError
 from .dsh_remote import RemoteDshClient
 
 
+LIFE_BRIDGE = "fishhome_dsh_life_client"
+
+
 @register("astrbot_plugin_dsh_bridge", "Fantasality / FishHome", "M3 DSH 连接验收", "1.0.0")
 class Main(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.settings = StarTools.get_data_dir("astrbot_plugin_dsh_bridge") / "m3.json"
+        self._life_client = self.life_client
+
+    async def initialize(self):
+        setattr(self.context, LIFE_BRIDGE, self._life_client)
+
+    async def terminate(self):
+        if getattr(self.context, LIFE_BRIDGE, None) is self._life_client:
+            delattr(self.context, LIFE_BRIDGE)
+
+    def life_client(self, scope):
+        cfg = json.loads(self.settings.read_text(encoding="utf-8"))
+        if not scope or scope != cfg["owner_scope"]:
+            raise PermissionError("DSH only serves the configured owner scope")
+        return RemoteDshClient(session_cookie=cfg["session_cookie"])
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("dsh")
