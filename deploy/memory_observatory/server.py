@@ -52,8 +52,8 @@ class ObservatoryServer(ThreadingHTTPServer):
         if activity_source is not None:
             try:
                 self.activity_snapshot = activity_source.load()
-                self.activity_loaded_at = time.monotonic()
-                self.activity_state = "ready"
+                self.activity_loaded_at = time.monotonic() - self.activity_snapshot.get("age_seconds", 0)
+                self.activity_state = self.activity_snapshot.get("connection", "ready")
             except ActivityError:
                 self.activity_state = "unavailable"
         if source is not None:
@@ -200,8 +200,8 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot = self.server.activity_source.load()
                     with self.server.lock:
                         self.server.activity_snapshot = snapshot
-                        self.server.activity_loaded_at = time.monotonic()
-                        self.server.activity_state = "ready"
+                        self.server.activity_loaded_at = time.monotonic() - snapshot.get("age_seconds", 0)
+                        self.server.activity_state = snapshot.get("connection", "ready")
                         view = self.server.room_view()
                 except ActivityError:
                     with self.server.lock:
@@ -260,6 +260,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="大肥鱼 · 本地记忆星海（演示或显式连接只读源）")
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--snapshot-file", type=Path, help="已同步的房间与记忆星海 JSON 缓存")
     memory = parser.add_mutually_exclusive_group()
     memory.add_argument("--livingmemory-ssh", action="store_true", help="使用现有 SSH 配置只读连接 LivingMemory")
     memory.add_argument("--astrbot-root", type=Path, help="只读连接指定 AstrBot 目录的本机 LivingMemory")
@@ -269,6 +270,12 @@ def main():
     args = parser.parse_args()
     source = None
     activity_source = None
+    if args.snapshot_file:
+        if args.astrbot_root or args.livingmemory_ssh or args.life_data_dir or args.life_ssh:
+            parser.error("--snapshot-file must be the only read source")
+        from .activity import FileActivitySource
+        from .livingmemory import FileMemorySource
+        source, activity_source = FileMemorySource(args.snapshot_file), FileActivitySource(args.snapshot_file)
     if args.life_data_dir:
         from .activity import LocalActivitySource
         activity_source = LocalActivitySource(args.life_data_dir)

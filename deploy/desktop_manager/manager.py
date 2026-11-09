@@ -7,15 +7,20 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote
+from uuid import uuid4
 
 import psutil
 import win32profile
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
+
+from deploy.bili_activity.ops import exclusive, save_control
+from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
 
 from .windows import Credentials, impersonate, run_as, write_json
 
@@ -24,6 +29,37 @@ PORT = 6196
 RUNNER = "FishHomeRunner"
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = Path(__file__).with_name("index.html")
+INTERACTION_BASE = "http://127.0.0.1:6197/openai/interaction/v1"
+
+
+def read_settings(path):
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except ValueError:
+        raise ValueError(f"{path.name} 不是有效的 JSON") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.name} 必须是 JSON 对象")
+    return value
+
+
+def qq_owner(config, owner):
+    qq = [item for item in config.get("platform", [])
+          if item.get("type") == "aiocqhttp" and item.get("enable") is True]
+    if len(qq) != 1 or not qq[0].get("id") or qq[0].get("ws_reverse_port") != 6199:
+        raise ValueError("请在 AstrBot 配置一个使用 6199 的 OneBot v11 反向连接")
+    scope = f"{qq[0]['id']}:FriendMessage:{owner}"
+    settings = config.get("platform_settings", {})
+    whitelist = {str(item).strip() for item in settings.get("id_whitelist", []) if str(item).strip()}
+    admins = [str(item).strip() for item in config.get("admins_id", [])]
+    qq_admins = [item for item in admins if re.fullmatch(r"[0-9]+", item)]
+    if (qq_admins != [owner]
+            or settings.get("enable_id_white_list") is not True or whitelist != {scope}
+            or settings.get("wl_ignore_admin_on_group") is not False
+            or settings.get("wl_ignore_admin_on_friend") is not False):
+        raise ValueError("在 AstrBot 保留唯一的主人私聊白名单，并关闭管理员群聊和私聊的白名单豁免")
+    return scope
 
 
 @dataclass
@@ -46,8 +82,8 @@ class Manager:
         for bucket in ("interaction", "autonomous"):
             self.creds.values.setdefault(bucket, secrets.token_urlsafe(32))
         self.creds.save()
-        options = state / "settings.json"
-        self.options = json.loads(options.read_text(encoding="utf-8-sig")) if options.is_file() else {}
+        self.options_path = state / "settings.json"
+        self.options = read_settings(self.options_path)
         self.launch_file = state / "processes.json"
         self.launches = json.loads(self.launch_file.read_text(encoding="utf-8")) if self.launch_file.is_file() else {}
         self.astro = dev / "astrbot-4.29.4"
@@ -55,6 +91,10 @@ class Manager:
         self.data = self.astro / "data/plugin_data"
         self.bridge_settings = self.data / "astrbot_plugin_dsh_bridge/m3.json"
         self.activity = self.data / "astrbot_plugin_bili_activity"
+        self.astrbot_settings = self.astro / "data/cmd_config.json"
+        self.control = self.activity / "control.json"
+        self.ledger = self.activity / "activity.sqlite3"
+        self.bili_state = state / "bili"
         self.tasks = set()
         self.lock = asyncio.Lock()
         self.emulator_requested = 0.0
@@ -62,7 +102,8 @@ class Manager:
     def specs(self):
         cat, phone, ollama = (self.dev / name for name in ("napcat-4.18.38", "PhoneMCP", "ollama-0.40.15"))
         dsh = self.dev / "dsh-0.2.2-rc.1"
-        emulator = Path(r"C:\leidian\LDPlayer14")
+        emulator = Path(self.options.get("emulator_dir", r"C:\leidian\LDPlayer14"))
+        bili = ROOT / "deploy/bili_activity/service.py"
         cmd = Path(os.environ["ComSpec"])
         qq = str(self.options.get("napcat_qq", ""))
         cat_args = ("-q", qq) if qq.isascii() and qq.isdigit() else ()
@@ -81,12 +122,15 @@ class Manager:
                 self.activity / "activity.sqlite3", "serve", *(() if key else ("--offline",))), 6197,
                 "deploy.fish_cost", env=cost_env),
             "ollama": Service("Ollama", ollama, (ollama / "ollama.exe", "serve"), 11434, "ollama.exe",
-                env={"OLLAMA_HOST": "127.0.0.1:11434", "OLLAMA_MODELS": str(self.dev / "ollama-models"),
+                env={"OLLAMA_HOST": "127.0.0.1:11434",
+                     "OLLAMA_MODELS": str(self.options.get("ollama_models", self.dev / "ollama-models")),
                      "OLLAMA_VULKAN": "1", "OLLAMA_NO_CLOUD": "1"}),
             "emulator": Service("雷电模拟器", emulator, (emulator / "ldconsole.exe",), 0, ""),
             "phone": Service("PhoneMCP", phone / "src", (phone / "venv/Scripts/python.exe", "main.py", "serve",
                 "--transport", "sse", "--host", "127.0.0.1", "--port", "8009", "--path", "/Phone"), 8009,
-                "main.py serve", env={"PATH": r"C:\leidian\LDPlayer14;" + os.environ["PATH"]}),
+                "main.py serve", env={"PATH": str(emulator) + ";" + os.environ["PATH"]}),
+            "bili": Service("B 站伴侣（只读）", ROOT, (self.python, "-B", bili, "--state-dir", self.bili_state,
+                "--adb-path", emulator / "adb.exe"), 8011, str(bili)),
             "dsh": Service("DeepSeek Harness", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-M3.cmd"),
                 59934, str(dsh / "node_modules/@deepseek-ai/dsh/lib/bin.js"), env=dsh_env, runner=True),
             "astrbot": Service("AstrBot", self.astro, (self.python, "-B", "-m", "astrbot.cli", "run"), 6185,
@@ -109,6 +153,204 @@ class Manager:
 
     def runner_password(self):
         return self.creds.values.get("runner_password")
+
+    def configuration(self):
+        specs = self.specs()
+        bridge = read_settings(self.bridge_settings)
+        control = read_settings(self.control)
+        return {
+            "napcat_qq": self.options.get("napcat_qq", ""), "owner_qq": str(bridge.get("owner_id", "")),
+            "emulator_dir": str(specs["emulator"].cwd), "public_write": control.get("public_write_enabled") is True,
+            "ollama_models": specs["ollama"].env["OLLAMA_MODELS"],
+            "metered_dsh": self.options.get("metered_dsh") is True,
+            "paths": {
+                "AstrBot · QQ 白名单和模型": str(self.astrbot_settings),
+                "LivingMemory · AstrBot 插件配置": str(self.astro / "data/config/astrbot_plugin_livingmemory_config.json"),
+                "NapCat · OneBot 与登录": str(specs["napcat"].cwd / "napcat/config"),
+                "DSH · 受控文件配置": str(specs["dsh"].cwd / "m5-file-only.yml"),
+                "Ollama · 模型目录": specs["ollama"].env["OLLAMA_MODELS"],
+                "PhoneMCP · 手机工具": str(specs["phone"].cwd),
+                "B站 / 抖音 / 自主活动 · 模块配置": str(self.control),
+                "B 站伴侣 · 本机状态": str(self.bili_state),
+                "FishHome · 启动配置与服务日志": str(self.state),
+            },
+        }
+
+    def set_config(self, name, value):
+        if name in {"napcat_qq", "owner_qq"}:
+            if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{4,11}", value):
+                raise ValueError("请填写有效的 QQ 号码")
+            if name == "owner_qq":
+                if value == self.options.get("napcat_qq"):
+                    raise ValueError("管理员 QQ 与机器人 QQ 应使用不同账户")
+                scope = qq_owner(read_settings(self.astrbot_settings), value)
+                self.bridge_settings.parent.mkdir(parents=True, exist_ok=True)
+                write_json(self.bridge_settings, read_settings(self.bridge_settings) | {"owner_id": value, "owner_scope": scope})
+                return "已保存 DSH Bridge 管理员。自检会检查自主活动的主人是否一致。"
+            if value == str(read_settings(self.bridge_settings).get("owner_id", "")):
+                raise ValueError("NapCat 快登请使用机器人 QQ 小号")
+            message = "已保存机器人 QQ。重启 NapCat 后生效，登录验证在 NapCat 完成。"
+        elif name == "emulator_dir":
+            folder = Path(value) if isinstance(value, str) else Path()
+            if not folder.is_absolute() or any(not (folder / exe).is_file() for exe in ("ldconsole.exe", "dnplayer.exe", "adb.exe")):
+                raise ValueError("请选择包含 ldconsole.exe、dnplayer.exe 和 adb.exe 的雷电目录")
+            value = str(folder.resolve())
+            message = "已保存雷电目录。请关闭旧目录的模拟器，再启动雷电并重启 PhoneMCP。"
+        elif name == "ollama_models":
+            folder = Path(value) if isinstance(value, str) else Path()
+            if not folder.is_absolute() or not folder.is_dir():
+                raise ValueError("请选择已存在的 Ollama 模型目录")
+            value = str(folder.resolve())
+            message = "已保存模型目录。重启 Ollama 后生效。"
+        elif name == "public_write" and type(value) is bool:
+            if not self.control.is_file():
+                raise ValueError("请先完成 B 站活动插件配置")
+            if value and not self.activity_has_gate():
+                raise ValueError("请先更新活动插件的公共写入接线")
+            with exclusive(self.activity):
+                control = read_settings(self.control)
+                if (control.get("public_write_enabled") is True) != value:
+                    save_control(self.activity, control | {"public_write_enabled": value})
+            return "已更新公共写入总开关。各平台仍使用原有开关、审批和额度。"
+        elif name == "metered_dsh" and value is True:
+            if not self.dsh_profile_ready():
+                raise ValueError("请先安装 DSH 的 FishHome 受控计费配置")
+            message = "已保存 DSH 计费接线。请重启 DSH 后生效。"
+        else:
+            raise ValueError("配置格式不正确")
+        updated = self.options | {name: value}
+        write_json(self.options_path, updated)
+        self.options = updated
+        return message
+
+    def dsh_profile_ready(self):
+        folder = self.specs()["dsh"].cwd
+        launcher = folder / "Start-DSH-M3.cmd"
+        return ((folder / "m5-file-only.yml").is_file() and launcher.is_file()
+                and "m5-file-only.yml" in launcher.read_text(encoding="utf-8-sig", errors="replace"))
+
+    def activity_has_gate(self):
+        plugin = self.astro / "data/plugins/astrbot_plugin_bili_activity"
+        return all(path.is_file() and "public_write_enabled" in path.read_text(encoding="utf-8")
+                   for path in (plugin / name for name in ("main.py", "interactions.py", "douyin.py")))
+
+    def verify_qq(self):
+        bridge = read_settings(self.bridge_settings)
+        owner = str(bridge.get("owner_id", ""))
+        if not owner:
+            raise ValueError("请先设置 DSH Bridge 的管理员 QQ")
+        if bridge.get("owner_scope") != qq_owner(read_settings(self.astrbot_settings), owner):
+            raise ValueError("请重新保存管理员 QQ，以匹配 AstrBot 的 OneBot 实例名称")
+        bot = str(self.options.get("napcat_qq", ""))
+        if not bot or bot == owner:
+            raise ValueError("请在控制台保存不同于管理员的机器人 QQ")
+        return bridge
+
+    def qq_ingress_ready(self):
+        adapter = self.astro / (".venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/"
+                                "aiocqhttp_platform_adapter.py")
+        return adapter.is_file() and "FishHome: discard unrelated QQ events" in adapter.read_text(encoding="utf-8")
+
+    async def diagnostics(self):
+        checks = []
+
+        def check(name, passed, ready, problem):
+            checks.append({"name": name, "ok": passed, "detail": ready if passed else problem})
+
+        specs = self.specs()
+        for key, service in specs.items():
+            launch_file = {"napcat": "index.js", "phone": "main.py", "dsh": "Start-DSH-M3.cmd",
+                           "bili": "deploy/bili_activity/service.py"}.get(key)
+            installed = service.cwd.is_dir() and service.command[0].is_file()
+            if launch_file:
+                installed = installed and (service.cwd / launch_file).is_file()
+            if not installed:
+                check(service.name, False, "", f"启动文件缺失，检查 {service.cwd}")
+
+        config = read_settings(self.astrbot_settings)
+        control = read_settings(self.control)
+        bridge = read_settings(self.bridge_settings)
+        try:
+            self.verify_qq()
+        except ValueError as exc:
+            check("QQ 接收规则", False, "", str(exc))
+        else:
+            check("QQ 接收规则", True, "仅放行配置的管理员私聊", "")
+        check("QQ 入口补丁", self.qq_ingress_ready(), "无关事件在转换与日志前拦截", "请重新应用本项目 OneBot 入口补丁")
+        check("OneBot 连接", any(row.status == psutil.CONN_ESTABLISHED and row.laddr.port == 6199
+                                 for row in psutil.net_connections("tcp") if row.laddr),
+              "NapCat 已连 AstrBot", "请在 NapCat 核对登录及反向 WebSocket")
+        check("活动主人", bool(bridge.get("owner_scope")) and control.get("owner_scope") == bridge["owner_scope"],
+              "活动插件与 Bridge 的主人一致", "在活动插件配置内核对 owner_scope")
+        providers = config.get("provider", [])
+        flash = any(row.get("enable") is True and row.get("model") == "deepseek-flash"
+                    and row.get("api_base", "").rstrip("/") == INTERACTION_BASE
+                    and "${FISHHOME_INTERACTION_TOKEN}" in str(row.get("key", "")) for row in providers)
+        check("交互计费配置", flash and bool(self.creds.values.get("upstream_key")),
+              "Flash 指向本机交互账本，官方 Key 已保存", "核对 AstrBot Flash 提供商或保存官方 Key")
+        lm_path = self.astro / "data/config/astrbot_plugin_livingmemory_config.json"
+        memory = read_settings(lm_path).get("provider_settings", {})
+        provider_ids = {row.get("id") for row in providers if row.get("enable") is True and row.get("id")}
+        check("LivingMemory 配置", {memory.get("llm_provider_id"), memory.get("embedding_provider_id")} <= provider_ids,
+              "总结和向量提供商已配置", "在 AstrBot 的 LivingMemory 插件中选择已启用的提供商")
+        check("DSH 计费配置", bool(self.runner_password()) and self.options.get("metered_dsh") is True
+              and self.dsh_profile_ready(), "专用账户与自主账本接线已配置", "检查 DSH 受控配置和账户凭据")
+        paused = not any(control.get(key) for key in ("enabled", "periodic_enabled", "once_at", "public_write_enabled"))
+        check("试跑范围", bool(control) and paused and self.activity_has_gate(), "自主活动、计划任务与公共写入关闭",
+              "检查活动插件版本、自主活动、计划任务和公共写入")
+
+        running = {row["id"] for row in self.statuses() if row["state"] == "running" and row["recognized"]}
+
+        async def get(service, path, *, headers=None, body=None):
+            if service not in running:
+                return {}
+            try:
+                async with client.request("POST" if body else "GET", f"http://127.0.0.1:{specs[service].port}{path}",
+                                          headers=headers, json=body, allow_redirects=False) as response:
+                    if response.status == 200:
+                        value = await response.json(content_type=None)
+                        if isinstance(value, dict):
+                            return value
+            except (ClientError, OSError, TimeoutError, ValueError):
+                pass
+            return {}
+
+        async def android():
+            if "emulator" not in running:
+                return False
+            device = control.get("device_id") or "emulator-5554"
+            child = await asyncio.create_subprocess_exec(str(specs["emulator"].cwd / "adb.exe"),
+                "-s", device, "shell", "getprop", "sys.boot_completed", stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                out, _ = await asyncio.wait_for(child.communicate(), 3)
+                return child.returncode == 0 and out.strip() == b"1"
+            except TimeoutError:
+                child.kill()
+                await child.wait()
+                return False
+
+        async with ClientSession(timeout=ClientTimeout(total=4)) as client:
+            budget, dsh, ollama, room, booted = await asyncio.gather(
+                get("budget", "/balance", headers={"Authorization": "Bearer " + self.creds.values["interaction"]}),
+                get("dsh", "/api/session/list", headers={"Cookie": bridge.get("session_cookie", "")}, body={
+                    "type": "client-request", "rpcId": str(uuid4()), "method": "session/list",
+                    "payload": {"args": {"_request": {}}}}),
+                get("ollama", "/api/tags"), get("room", "/api/snapshot"), android())
+        check("计费服务", "ledgers" in budget, "账本接口可读", "启动或重启人民币计费服务")
+        check("DSH Bridge", dsh.get("result", {}).get("ok") is True, "已认证，能读取会话列表", "启动或重启 DSH 更新本机票据")
+        embedder = next((row for row in providers if row.get("id") == memory.get("embedding_provider_id")), {})
+        model = embedder.get("embedding_model", "")
+        tags = {row.get("name") for row in ollama.get("models", [])}
+        check("Ollama 模型", bool(model) and (model in tags or model + ":latest" in tags),
+              f"本机已加载向量模型 {model}", "核对 Ollama 模型目录与 LivingMemory 配置的向量模型")
+        check("房间与记忆星海", room.get("demo") is False and room.get("connection", {}).get("state") == "ready",
+              "已读取真实 LivingMemory", "启动房间并查看 LivingMemory 连接状态")
+        check("PhoneMCP 与雷电", "phone" in running and booted, "PhoneMCP 已监听，Android 已就绪",
+              "启动 PhoneMCP 和雷电，等待 Android 完成开机")
+        check("B 站伴侣", "bili" in running and control.get("bili_url", "").rstrip("/") == "http://127.0.0.1:8011/mcp",
+              "本机只读服务已监听", "启动 B 站伴侣，在活动插件核对本机 MCP 地址")
+        return checks
 
     def matching_pid(self, service, pid):
         if not pid:
@@ -255,15 +497,28 @@ class Manager:
             if self.emulator_status(service) != "stopped":
                 return "已在运行或正在启动"
             return await self.emulator_action(service, "launch")
-        if self.listeners().get(service.port) or self.tracked_pid(name) or self.launching_pid(service):
+        pids = self.listeners().get(service.port, set())
+        if pids:
+            if not any(self.matching_pid(service, pid) for pid in pids):
+                raise ValueError(f"端口 {service.port} 被未识别的进程占用")
+            return "已在运行"
+        if self.tracked_pid(name) or self.launching_pid(service):
             return "已在运行或正在启动"
         argv = list(map(str, service.command))
         if not service.cwd.is_dir() or not Path(argv[0]).is_file():
             raise ValueError("组件安装目录或启动文件缺失")
+        if name == "napcat":
+            self.verify_qq()
+            if not self.qq_ingress_ready():
+                raise ValueError("请先应用本项目 OneBot 入口补丁")
+        if name == "bili" and not Path(argv[2]).is_file():
+            raise ValueError("B 站伴侣启动文件缺失")
         if name == "budget":
             self.activity.mkdir(parents=True, exist_ok=True)
             self.update_bridge(budget_token=self.creds.values["interaction"])
         if service.runner:
+            if self.options.get("metered_dsh") is not True or not self.dsh_profile_ready():
+                raise ValueError("请先在控制台设置 DSH 计费接线")
             password = self.runner_password()
             if not password:
                 raise ValueError("请在 WebUI 保存 FishHomeRunner 密码后启动 DSH")
@@ -350,7 +605,7 @@ def create_app(manager, token):
             return await handler(request)
         except (ValueError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=409)
-        except (OSError, psutil.Error) as exc:
+        except (OSError, psutil.Error, sqlite3.Error) as exc:
             return web.json_response({"error": f"Windows 操作失败（{type(exc).__name__}）"}, status=409)
 
     app = web.Application(middlewares=[local_only], client_max_size=8192)
@@ -393,17 +648,50 @@ def create_app(manager, token):
         if not isinstance(body, dict) or len(body) != 1:
             raise ValueError("一次只保存一项设置")
         name, value = next(iter(body.items()))
-        if name == "upstream_key" and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{12,250}", value):
-            manager.creds.values[name] = value
-            manager.creds.save()
-            return web.json_response({"message": "已加密保存 DeepSeek Key，请重启计费服务以启用。"})
-        if name == "runner_password" and isinstance(value, str) and 0 < len(value) <= 256:
-            with impersonate(RUNNER, value):
-                pass
-            manager.creds.values[name] = value
-            manager.creds.save()
-            return web.json_response({"message": "已验证并加密保存 DSH 账户密码。"})
-        raise ValueError("配置格式不正确")
+        async with manager.lock:
+            if name == "upstream_key" and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{12,250}", value):
+                manager.creds.values[name] = value
+                manager.creds.save()
+                message = "已加密保存 DeepSeek Key，请重启计费服务以启用。"
+            elif name == "runner_password" and isinstance(value, str) and 0 < len(value) <= 256:
+                with impersonate(RUNNER, value):
+                    pass
+                manager.creds.values[name] = value
+                manager.creds.save()
+                message = "已验证并加密保存 DSH 账户密码。"
+            else:
+                message = manager.set_config(name, value)
+        return web.json_response({"message": message})
+
+    async def configuration(_request):
+        return web.json_response(manager.configuration(), headers={"Cache-Control": "no-store"})
+
+    async def diagnostics(_request):
+        return web.json_response({"checks": await manager.diagnostics()}, headers={"Cache-Control": "no-store"})
+
+    async def location(request):
+        body = await request.json()
+        label = body.get("label") if isinstance(body, dict) else None
+        path = manager.configuration()["paths"].get(label) if isinstance(label, str) else None
+        if not path or not Path(path).exists():
+            raise ValueError("配置位置不存在")
+        path = Path(path)
+        subprocess.Popen([str(Path(os.environ["SystemRoot"]) / "explorer.exe"), str(path if path.is_dir() else path.parent)])
+        return web.json_response({"message": "已打开目录"})
+
+    async def budgets(request):
+        if not manager.ledger.is_file():
+            raise ValueError("请先启动人民币计费服务建立账本")
+        if request.method == "GET":
+            data = await asyncio.to_thread(lambda: Ledger(manager.ledger).snapshot())
+            return web.json_response(data, headers={"Cache-Control": "no-store"})
+        body = await request.json()
+        if (not isinstance(body, dict) or body.get("bucket") not in BUCKETS
+                or type(body.get("temporary")) is not bool or not isinstance(body.get("amount"), str)):
+            raise ValueError("请选择账本、金额和调额期限")
+        amount(body["amount"])
+        await asyncio.to_thread(lambda: Ledger(manager.ledger).adjust(body["bucket"], body["amount"], temporary=body["temporary"]))
+        return web.json_response({"message": "已调整当日额度。" if body["temporary"] else "已调整默认额度。"})
 
     async def setup_info(_request):
         return web.json_response({"interaction_token": manager.creds.values["interaction"],
@@ -415,6 +703,11 @@ def create_app(manager, token):
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
+    app.router.add_get("/api/config", configuration)
+    app.router.add_get("/api/diagnostics", diagnostics)
+    app.router.add_post("/api/location", location)
+    app.router.add_get("/api/budgets", budgets)
+    app.router.add_post("/api/budgets", budgets)
     app.router.add_post("/api/exit", exit_console)
     app.router.add_get("/api/provider-keys", setup_info)
     return app

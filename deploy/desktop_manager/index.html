@@ -7,17 +7,42 @@
 :root{color-scheme:dark;--bg:#0d181b;--panel:#16262a;--line:#2c4146;--ink:#edf6f2;--muted:#a3b9b9;--accent:#9ae3bf;--warn:#f5ca8c}*{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI","Microsoft YaHei",sans-serif}main{max-width:1000px;margin:auto;padding:44px 24px 56px}header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:20px;margin-bottom:24px}h1,h2,p{margin:0}h1{font-size:34px;letter-spacing:-.04em}h2{font-size:19px}small,.muted{color:var(--muted)}.tag{font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.12em}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin:16px 0;padding:18px 20px}.row{display:grid;grid-template-columns:minmax(150px,1fr) 160px auto;align-items:center;gap:12px;border-top:1px solid var(--line);padding:12px 0}.row:first-child{border:0}.actions{display:flex;flex-wrap:wrap;gap:6px}.row .actions{justify-content:flex-end}button,a.button{padding:6px 12px;min-height:34px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--ink);font:inherit;text-decoration:none;cursor:pointer}button:hover,a.button:hover{border-color:var(--accent)}button.primary{background:var(--accent);color:#13261d;border-color:var(--accent);font-weight:700}button:disabled{opacity:.38;cursor:default}.status{color:var(--muted);font-size:13px}.status[data-state=running]{color:var(--accent)}.status[data-state=starting],.status[data-state=unknown]{color:var(--warn)}#message{min-height:24px;color:var(--warn);white-space:pre-wrap}details summary{cursor:pointer;font-weight:700}form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}input{font:inherit;min-width:240px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}#keys{margin-top:8px;overflow-wrap:anywhere}.hint{margin:10px 0}.foot{font-size:12px;margin-top:24px}@media(max-width:660px){.row{grid-template-columns:1fr 1fr}.row .actions{grid-column:1/-1;justify-content:flex-start}}
 </style>
+<style>
+.checklist,.locations{list-style:none;margin:12px 0 0;padding:0}.checklist li,.locations li{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid var(--line);padding:8px 0}.locations code{display:block;overflow-wrap:anywhere;color:var(--muted)}.pass{color:var(--accent)}.warn{color:var(--warn)}select{font:inherit;color:var(--ink);background:var(--bg);padding:6px;border:1px solid var(--line);border-radius:6px}#budgets{white-space:pre-line}.panel-title{display:flex;justify-content:space-between;align-items:center;gap:12px}.paths{min-width:0}
+</style>
 <main>
-  <header><div><p class="tag">本机开发实例</p><h1>FishHome 控制台</h1><p class="muted" id="overview">正在读取本机状态</p></div>
+  <header><div><p class="tag">台式机试运行</p><h1>FishHome 控制台</h1><p class="muted" id="overview">正在读取本机状态</p></div>
   <div class="actions"><button id="start" class="primary">启动全部</button><button id="stop">停止全部</button><button id="refresh">刷新</button></div></header>
   <div id="message" role="status"></div>
   <section class="panel" aria-label="服务列表"><div id="services"></div></section>
-  <details class="panel"><summary>本机凭据与计费接入</summary>
+  <section class="panel" aria-labelledby="checks-title">
+    <div class="panel-title"><h2 id="checks-title">试运行自检</h2><button id="check">运行自检</button></div>
+    <p class="muted" id="check-summary">核对本机连接、启动配置与授权，不发送模型请求。</p><ul class="checklist" id="checks"></ul>
+  </section>
+  <details class="panel"><summary>FishHome 本机设置</summary>
+    <form id="bot"><label for="napcat_qq">NapCat 快登小号</label><input id="napcat_qq" inputmode="numeric" pattern="[1-9][0-9]{4,11}" required><button>保存</button></form>
+    <form id="owner"><label for="owner_qq">DSH Bridge 管理员 QQ</label><input id="owner_qq" inputmode="numeric" pattern="[1-9][0-9]{4,11}" required><button>保存</button></form>
+    <p class="muted hint">修改主人前，先在 AstrBot 配置相应的管理员私聊白名单。机器人登录验证仍在 NapCat 完成。</p>
+    <form id="emulator"><label for="emulator_dir">雷电安装目录</label><input id="emulator_dir" required><button>保存</button></form>
+    <form id="models"><label for="ollama_models">Ollama 模型目录</label><input id="ollama_models" required><button>保存</button></form>
+    <p class="muted hint" id="metered-label">DSH 计费状态待读取。</p><button id="metered" hidden>启用 DSH 计费接线</button>
+    <p class="muted hint" id="write-label">公共写入状态待读取。</p><button id="public" disabled>更改公共写入</button>
+    <p class="muted hint">控制台启动的 B 站伴侣使用只读模式。试跑无需导入 B 站 Cookie。</p>
+  </details>
+  <details class="panel"><summary>人民币预算与凭据</summary>
+    <p class="hint" id="budgets">正在读取账本…</p>
+    <form id="adjust"><label for="bucket">账本</label><select id="bucket"><option value="interaction">交互</option><option value="autonomous">自主</option></select>
+      <label for="amount">额度 ¥</label><input id="amount" type="number" min="0" max="100000" step="0.01" required>
+      <label for="duration">期限</label><select id="duration"><option value="day">本预算日</option><option value="default">默认额度</option></select><button>保存额度</button>
+    </form>
     <p class="muted hint" id="setup">DeepSeek Key 仅加密保存在当前 Windows 账户中。</p>
     <form id="official"><label for="key">DeepSeek API Key</label><input id="key" type="password" autocomplete="off" required placeholder="官方 API Key"><button>保存</button></form>
     <form id="runner"><label for="password">FishHomeRunner</label><input id="password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
     <p class="muted hint">保存 Key 后重启「人民币计费」。AstrBot 交互 Provider 使用 <code>http://127.0.0.1:6197/openai/interaction/v1</code> 和交互本机凭据。</p>
     <button id="showkeys">显示本机 Provider 凭据</button><pre id="keys" hidden></pre>
+  </details>
+  <details class="panel"><summary>各模块设置与日志位置</summary>
+    <p class="muted hint">AstrBot 和 NapCat 的面板在服务列表中打开。其余模块沿用各自的配置入口。</p><ul class="locations" id="locations"></ul>
   </details>
   <p class="muted foot">托盘菜单的「退出控制台」只关闭控制台。服务继续运行。端口被其他进程占用时，控制台保留该进程。</p>
 </main>
@@ -27,6 +52,7 @@ const fragment = location.hash.slice(1);
 if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.replaceState(null, '', '/'); }
 const token = sessionStorage.getItem('fishhome-session') || '';
 let busy = false;
+let config = {};
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store'});
   const result = await response.json();
@@ -38,7 +64,7 @@ function button(text, fn, disabled) { const b = node('button', text); b.disabled
 async function refresh() {
   try {
     const {services, official_key, runner_password} = await api('/api/status');
-    $('overview').textContent = `${services.filter(s => s.state === 'running').length} / ${services.length} 个组件已运行`;
+    $('overview').textContent = `${services.filter(s => s.state === 'running' && s.recognized).length} / ${services.length} 个组件已运行`;
     $('setup').textContent = `DeepSeek Key ${official_key ? '已加密保存' : '待填写，计费服务当前仅供查询'}。DSH 账户密码${runner_password ? '已保存' : '待填写'}。`;
     const rows = services.map(s => {
       const row = node('div', '', 'row'), info = node('div', '', ''), actions = node('div', '', 'actions');
@@ -61,20 +87,81 @@ async function act(name, mode) {
     const result = await api(`/api/services/${name}/${mode}`, 'POST');
     $('message').textContent = result.message || Object.entries(result.results).map(([id,s])=>`${id} ${s}`).join(' · ');
   } catch (error) { $('message').textContent = error.message; }
-  finally { busy = false; await refresh(); }
+  finally { busy = false; await refresh(); if (mode !== 'stop') runChecks(); }
+}
+async function configure(field, value) {
+  try {
+    $('message').textContent = (await api('/api/config','POST',{[field]:value})).message;
+    await Promise.all([refresh(), loadConfig()]);
+    runChecks();
+  } catch (error) { $('message').textContent = error.message; }
 }
 function setup(form, input, field) {
-  $(form).onsubmit = async e => { e.preventDefault(); const value = $(input).value; $(input).value = '';
-    try { $('message').textContent = (await api('/api/config','POST',{[field]:value})).message; await refresh(); }
-    catch (error) { $('message').textContent = error.message; }
+  $(form).onsubmit = e => { e.preventDefault(); const value = field === 'runner_password' ? $(input).value : $(input).value.trim();
+    if ($(input).type === 'password') $(input).value = '';
+    configure(field, value);
   };
 }
+async function loadConfig() {
+  try {
+    config = await api('/api/config');
+    for (const id of ['napcat_qq','owner_qq','emulator_dir','ollama_models']) $(id).value = config[id];
+    $('metered-label').textContent = config.metered_dsh ? 'DSH 已配置使用自主账本。' : 'DSH 尚未配置使用自主账本。';
+    $('metered').hidden = config.metered_dsh;
+    $('write-label').textContent = '公共写入总开关' + (config.public_write ? '已开启。' : '已关闭。');
+    $('public').textContent = config.public_write ? '关闭公共写入' : '允许公共写入';
+    $('public').disabled = false;
+    $('locations').replaceChildren(...Object.entries(config.paths).map(([label, path]) => {
+      const li = node('li', ''), info = node('div', '', 'paths');
+      info.append(node('strong', label), node('code', path));
+      li.append(info, button('打开目录', async () => {
+        try { await api('/api/location', 'POST', {label}); }
+        catch (error) { $('message').textContent = error.message; }
+      }));
+      return li;
+    }));
+  } catch (error) { $('message').textContent = error.message; }
+}
+async function loadBudgets() {
+  try {
+    const {day, ledgers} = await api('/api/budgets');
+    $('budgets').textContent = `预算日 ${day} · 北京时间 04:00 切换\n` + Object.entries(ledgers).map(([key, item]) =>
+      `${key === 'interaction' ? '交互' : '自主'}剩 ¥${item.remaining} / ¥${item.limit}，预留 ¥${item.reserved}`).join('\n');
+  } catch (error) { $('budgets').textContent = error.message; }
+}
+async function runChecks() {
+  if ($('check').disabled) return;
+  $('check').disabled = true;
+  $('check-summary').textContent = '正在核对本机连接和配置…';
+  try {
+    const {checks} = await api('/api/diagnostics');
+    $('check-summary').textContent = `${checks.filter(item => item.ok).length} / ${checks.length} 项通过`;
+    $('checks').replaceChildren(...checks.map(item => {
+      const li = node('li', ''); li.append(node('strong', item.name), node('span', item.detail, item.ok ? 'pass' : 'warn')); return li;
+    }));
+  } catch (error) { $('check-summary').textContent = error.message; }
+  finally { $('check').disabled = false; }
+}
 setup('official','key','upstream_key'); setup('runner','password','runner_password');
+setup('bot','napcat_qq','napcat_qq'); setup('owner','owner_qq','owner_qq'); setup('emulator','emulator_dir','emulator_dir');
+setup('models','ollama_models','ollama_models');
+$('metered').onclick = () => configure('metered_dsh', true);
+$('public').onclick = () => {
+  if (config.public_write || confirm('打开公共写入总开关？B 站和抖音仍按各自开关、审批与额度执行。')) configure('public_write', !config.public_write);
+};
+$('adjust').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    $('message').textContent = (await api('/api/budgets','POST',{bucket:$('bucket').value, amount:$('amount').value, temporary:$('duration').value === 'day'})).message;
+    await loadBudgets();
+  } catch (error) { $('message').textContent = error.message; }
+};
 $('showkeys').onclick = async () => {
   const panel = $('keys'); if (!panel.hidden) { panel.textContent=''; panel.hidden=true; return; }
   try { const k = await api('/api/provider-keys'); panel.textContent = `交互 ${k.interaction_token}\n自主 ${k.autonomous_token}`; panel.hidden=false; }
   catch (error) { $('message').textContent = error.message; }
 };
-$('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop'); $('refresh').onclick = refresh;
-refresh(); setInterval(() => { if (!busy) refresh(); }, 2500);
+$('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop');
+$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadBudgets(), runChecks()]);
+refresh(); loadConfig(); loadBudgets(); runChecks(); setInterval(() => { if (!busy) refresh(); }, 2500);
 </script>

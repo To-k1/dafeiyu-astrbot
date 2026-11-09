@@ -1,4 +1,4 @@
-param([switch]$InstallBudgetBridge)
+param([switch]$InstallBudgetBridge, [switch]$InstallActivity)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
@@ -43,5 +43,23 @@ if ($InstallBudgetBridge) {
     }
     Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\m3_qq.py') -Destination (Join-Path $plugin 'main.py') -Force
     Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\dsh_remote.py') -Destination $plugin -Force
+}
+if ($InstallActivity) {
+    if (Get-NetTCPConnection -State Listen -LocalPort 6185,6199 -ErrorAction SilentlyContinue) {
+        throw 'Stop AstrBot before updating the activity plugin.'
+    }
+    $name = 'astrbot_plugin_bili_activity'
+    $source = Join-Path $repo "plugin\$name"
+    $plugin = Join-Path $astro "data\plugins\$name"
+    $backup = Join-Path $state ('activity-before-trial-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssffffZ'))
+    if (Test-Path -LiteralPath $plugin) {
+        Copy-Item -LiteralPath $plugin -Destination $backup -Recurse
+    } else {
+        New-Item -ItemType Directory -Path $plugin | Out-Null
+    }
+    Get-ChildItem -LiteralPath $source -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $plugin -Force
+    }
+    if (Test-Path -LiteralPath $backup) { Write-Output $backup }
 }
 Write-Output $output

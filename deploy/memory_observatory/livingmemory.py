@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .livingmemory_reader import SourceError, read_snapshot, version_from_file
@@ -28,6 +29,36 @@ class LocalMemorySource:
             return snapshot, info
         except (OSError, ValueError, sqlite3.Error):
             raise SourceError("无法读取本机 LivingMemory；请检查路径、版本和表结构。") from None
+
+
+def read_room_bundle(path):
+    try:
+        if path.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError("room cache exceeds the size limit")
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+        if bundle.get("format") != "fishhome-room-v1" or bundle.get("connection") not in {"ready", "stale"}:
+            raise ValueError("unsupported room cache")
+        capture = datetime.fromisoformat(bundle["captured_at"])
+        age = (datetime.now(timezone.utc) - capture).total_seconds()
+        if age < -120:
+            raise ValueError("room cache clock is ahead")
+        state = "stale" if age > 180 or bundle["connection"] == "stale" else "ready"
+        return bundle, state, max(0, age)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise SourceError("无法读取已同步的房间缓存。") from None
+
+
+class FileMemorySource:
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def load(self):
+        bundle, state, _ = read_room_bundle(self.path)
+        try:
+            raw = bundle["memory"]
+            return normalize(raw, allow_empty=True), {**raw["source_info"], "enabled": True, "state": state}
+        except (KeyError, ValueError, TypeError):
+            raise SourceError("缓存中的记忆快照不可用。") from None
 
 
 class SSHMemorySource:

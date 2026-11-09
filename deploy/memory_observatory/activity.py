@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 
 from .activity_reader import ActivityError, read_activity
-from .livingmemory import SSHMemorySource
+from .livingmemory import SSHMemorySource, read_room_bundle
+from .livingmemory_reader import SourceError
 
 
 class LocalActivitySource:
@@ -13,6 +14,21 @@ class LocalActivitySource:
 
     def load(self):
         return read_activity(self.folder)
+
+
+class FileActivitySource:
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def load(self):
+        try:
+            bundle, state, age = read_room_bundle(self.path)
+            activity = bundle["activity"]
+            if activity.get("schema") != "dafeiyu-room/v1" or activity.get("mode") != "activity":
+                raise ValueError("invalid cached activity")
+            return {**activity, "connection": state, "age_seconds": age}
+        except (SourceError, ValueError, KeyError, TypeError, AttributeError):
+            raise ActivityError("缓存中的活动快照不可用。") from None
 
 
 class SSHActivitySource(SSHMemorySource):

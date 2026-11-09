@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,13 @@ def clean(value, limit):
     if not isinstance(value, str):
         return ""
     return "".join(c for c in value if ord(c) >= 32 or c in "\n\t").strip()[:limit]
+
+
+def limited_summary(value, limit=240):
+    value = clean(value, 1600)
+    value = re.sub(r"https?://\S+|(?:sk-|Bearer\s+)[A-Za-z0-9_.-]+|\d{5,}|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+                   "[已省略]", value, flags=re.I)
+    return value[:limit]
 
 
 def finite(value):
@@ -77,7 +85,7 @@ def version_from_file(path):
     raise SourceError("LivingMemory version missing")
 
 
-def read_snapshot(db_path, version, *, now=None):
+def read_snapshot(db_path, version, *, now=None, summaries_only=False, limit=MAX_RECORDS):
     if version not in SUPPORTED_VERSIONS:
         raise SourceError("LivingMemory version not supported; inspect schema before updating adapter")
     at = now or datetime.now(timezone.utc)
@@ -117,7 +125,7 @@ def read_snapshot(db_path, version, *, now=None):
             if not created or created > at or not clean(text, 4000):
                 counts["invalid_records"] += 1
                 return None
-            if len(records) >= MAX_RECORDS:
+            if limit is not None and len(records) >= limit:
                 counts["capacity_omitted"] += 1
                 return None
             accessed = epoch(accessed_value)
@@ -141,6 +149,11 @@ def read_snapshot(db_path, version, *, now=None):
                       "last_recalled_at": accessed.isoformat(), "importance": probability(meta.get("importance"), .5),
                       "confidence": probability(confidence), "pinned": False,
                       "source": "LivingMemory " + version + " / " + ident, "upstream": upstream}
+            if summaries_only:
+                summary = limited_summary(meta.get("persona_summary") or meta.get("canonical_summary"))
+                record.update(title=summary.splitlines()[0][:64] if summary else ident,
+                              text=summary or "原库有记录，观测端显示类型与来源。",
+                              gist=summary or "原库有记录，观测端显示类型与来源。", topics=[])
             records.append(record)
             scopes[scope] = {"label": "会话 " + scope[-6:] + (" · 未指定人格" if meta["persona_id"] is None else " · 独立人格"),
                              "records": scopes.get(scope, {}).get("records", 0) + 1}
@@ -182,7 +195,7 @@ def read_snapshot(db_path, version, *, now=None):
                               "label": "原库来源：文档 → 记忆原子", "weight": 1, "inferred": False})
         # Keep original entity relations as evidence on their source document.
         # Never misrepresent entity-to-entity edges as document-to-document ones.
-        for parent_id, (record, _) in parents.items():
+        for parent_id, (record, _) in (() if summaries_only else parents.items()):
             relations = db.execute("SELECT e.id, e.relation_type, s.node_value AS source, t.node_value AS target "
                                    "FROM graph_edges e JOIN graph_nodes s ON s.id=e.source_node_id "
                                    "JOIN graph_nodes t ON t.id=e.target_node_id "
