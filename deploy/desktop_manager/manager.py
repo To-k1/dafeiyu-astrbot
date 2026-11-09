@@ -228,25 +228,23 @@ class Manager:
 
     async def refresh_dsh_cookie(self):
         try:
-            for _ in range(40):
-                if 59934 in self.listeners():
-                    break
-                await asyncio.sleep(.5)
-            else:
-                return
             with impersonate(RUNNER, self.runner_password()) as token:
                 log = Path(win32profile.GetUserProfileDirectory(token)) / "AppData/Local/FishHome/DSH/web-start.log"
-                text = log.read_text(encoding="utf-8", errors="replace")
-            match = re.search(r"http://127\.0\.0\.1:59934/\?token=([A-Za-z0-9._~%-]+)", text)
-            if not match:
-                raise RuntimeError("DSH 启动日志没有连接票据")
             async with ClientSession(timeout=ClientTimeout(total=5)) as session:
-                async with session.get("http://127.0.0.1:59934/connect", allow_redirects=False,
-                        params={"token": unquote(match[1]), "interactions": "none"}) as response:
-                    if response.status != 302 or len(response.cookies) != 1:
-                        raise RuntimeError("DSH 连接票据无效")
-                    name, value = next(iter(response.cookies.items()))
-                    self.update_bridge(session_cookie=f"{name}={value.value}")
+                for _ in range(40):
+                    if 59934 in self.listeners():
+                        with impersonate(RUNNER, self.runner_password()):
+                            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+                        tickets = re.findall(r"http://127\.0\.0\.1:59934/\?token=([A-Za-z0-9._~%-]+)", text)
+                        if tickets:
+                            async with session.get("http://127.0.0.1:59934/connect", allow_redirects=False,
+                                    params={"token": unquote(tickets[-1]), "interactions": "none"}) as response:
+                                if response.status == 302 and len(response.cookies) == 1:
+                                    name, value = next(iter(response.cookies.items()))
+                                    self.update_bridge(session_cookie=f"{name}={value.value}")
+                                    return
+                    await asyncio.sleep(.5)
+            raise RuntimeError("DSH 启动后未取得有效连接票据")
         except Exception as exc:
             with (self.state / "manager.log").open("a", encoding="utf-8") as log:
                 log.write(f"DSH Bridge 票据刷新失败：{type(exc).__name__}\n")

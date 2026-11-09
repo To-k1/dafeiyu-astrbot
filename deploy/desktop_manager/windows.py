@@ -78,6 +78,10 @@ def run_as(username, password, argv, *, wait=False, env=None):
     if env:
         with impersonate(username, password) as token:
             variables = win32profile.CreateEnvironmentBlock(token, False)
+            profile = win32profile.GetUserProfileDirectory(token)
+        variables.setdefault("USERPROFILE", profile)
+        variables.setdefault("LOCALAPPDATA", os.path.join(profile, "AppData", "Local"))
+        variables.setdefault("APPDATA", os.path.join(profile, "AppData", "Roaming"))
         variables.update(env)
         entries = (f"{name}={variables[name]}" for name in sorted(variables, key=str.casefold))
         block = ct.create_unicode_buffer("\0".join(entries) + "\0\0")

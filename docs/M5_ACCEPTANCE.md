@@ -32,5 +32,6 @@ python -B -m deploy.fish_cost --db $activityDb adjust autonomous 5
 
 - 本机临时环境用 DSH `0.2.2-rc.1` 和 AstrBot `4.29.4` 的实际 Provider 连接网关，后端使用回环模拟服务和假凭据。DSH 的标题请求和主请求分别过账；自主余额调为 ¥0 后，后续任务报错且模拟上游请求数保持不变。AstrBot 正常收到回复，交互余额调为 ¥0 后收到 HTTP 402，模拟上游同样没有新增请求。
 - `test_fish_cost.py` 覆盖两种流式用量、Search/Fetch、并发预留、未知结果和 04:00 结算。B 站套件覆盖两层开关、伴侣拦截和高峰延期后重新安排。用 `python -B -m unittest discover -s tests -p <模式>` 分别运行 `test_bili_*.py`、`test_fish_cost.py`、`test_douyin_activity.py` 和 `test_phone_agent.py`，共 660 项通过、15 项跳过。Windows 运行回归需要 `PYTHONUTF8=1` 与 Git Bash 在 `PATH`。
-- 本次未切换现有 AstrBot、QQ 或 DSH 的真实配置。运行端仍保持自主和公开写入关闭。实际覆盖范围限于流经计费入口的请求。现有 DSH 直连凭据、其他供应商、未接入的搜索路径、记忆钩子及前台多媒体调用需要单独核对后再开放无人值守。QQ 查询及余额通知已接代码，待部署后私聊验收。任意 Shell、ADB 或浏览器操作仍须执行权限限制，公共写入总开关只约束已接入的执行路径。
+- 台式机开发实例已切换 AstrBot 交互与 DSH 自主两条 Flash 路径。实测 DSH 的实际模型循环与 AstrBot 原生 Provider 在各自额度为 ¥0 时收到 HTTP 402，两本账的已用额与预留额均无新增。恢复原额度后，QQ OneBot 和 DSH Bridge 已重新连通。管理员 QQ `/额度` 已实收；本次真实实例验收范围为零额度拦截。
+- 自主活动和公共写入保持关闭。实际覆盖范围限于流经计费入口的请求，其他供应商、未接入的搜索、记忆钩子及前台多媒体需要单独核对后再开放无人值守。任意 Shell、ADB 或浏览器操作仍须执行权限限制，公共写入总开关只约束已接入的执行路径。
 - 回退时停止本机网关并把活动 `autonomous_provider_id` 置空，保留 SQLite 账本与任务检查点。价表保留已核验版本，后续年度更新 `cost_window.py` 的节假日表。
