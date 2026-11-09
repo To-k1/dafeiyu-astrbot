@@ -1,0 +1,4 @@
+- id: llm-deepseek-api-key
+  config:
+    baseURL: http://127.0.0.1:6197/anthropic/autonomous
+    apiKeyEnv: FISHHOME_DSH_GATEWAY_TOKEN

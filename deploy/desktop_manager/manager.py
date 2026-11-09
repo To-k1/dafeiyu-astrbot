@@ -71,6 +71,11 @@ class Manager:
                     "FISH_COST_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}
         if key:
             cost_env["FISH_COST_UPSTREAM_KEY"] = key
+        dsh_env = {}
+        if self.options.get("metered_dsh") is True:
+            dsh_env = {"DEEPSEEK_BASE_URL": "http://127.0.0.1:6197/anthropic/autonomous",
+                       "FISHHOME_DSH_GATEWAY_TOKEN": self.creds.values["autonomous"],
+                       "DEEPSEEK_API_KEY": self.creds.values["autonomous"]}
         return {
             "budget": Service("人民币计费", ROOT, (self.python, "-B", "-m", "deploy.fish_cost", "--db",
                 self.activity / "activity.sqlite3", "serve", *(() if key else ("--offline",))), 6197,
@@ -83,9 +88,10 @@ class Manager:
                 "--transport", "sse", "--host", "127.0.0.1", "--port", "8009", "--path", "/Phone"), 8009,
                 "main.py serve", env={"PATH": r"C:\leidian\LDPlayer14;" + os.environ["PATH"]}),
             "dsh": Service("DeepSeek Harness", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-M3.cmd"),
-                59934, str(dsh / "node_modules/@deepseek-ai/dsh/lib/bin.js"), runner=True),
+                59934, str(dsh / "node_modules/@deepseek-ai/dsh/lib/bin.js"), env=dsh_env, runner=True),
             "astrbot": Service("AstrBot", self.astro, (self.python, "-B", "-m", "astrbot.cli", "run"), 6185,
-                "astrbot.cli run", "http://127.0.0.1:6185/"),
+                "astrbot.cli run", "http://127.0.0.1:6185/",
+                env={"FISHHOME_INTERACTION_TOKEN": self.creds.values["interaction"]}),
             "napcat": Service("NapCat", cat, (cat / "node.exe", cat / "index.js", *cat_args), 6099,
                 str(cat / "index.js"), "http://127.0.0.1:6099/"),
             "room": Service("房间与记忆星海", ROOT, (self.python, "-B", "-m", "deploy.memory_observatory.server",
@@ -263,14 +269,15 @@ class Manager:
             password = self.runner_password()
             if not password:
                 raise ValueError("请在 WebUI 保存 FishHomeRunner 密码后启动 DSH")
-            pid = run_as(RUNNER, password, argv)
+            pid = run_as(RUNNER, password, argv, env=service.env)
             with impersonate(RUNNER, password):
                 started = psutil.Process(pid).create_time()
             task = asyncio.create_task(self.refresh_dsh_cookie())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         else:
-            env = {key: val for key, val in os.environ.items() if not key.startswith(("FISH_COST_", "FISH_MANAGER_"))}
+            env = {key: val for key, val in os.environ.items()
+                   if not key.startswith(("FISH_COST_", "FISH_MANAGER_", "FISHHOME_INTERACTION_TOKEN"))}
             with (self.state / f"{name}.log").open("ab") as log:
                 child = subprocess.Popen(argv, cwd=service.cwd, stdout=log, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,

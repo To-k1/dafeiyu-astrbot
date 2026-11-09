@@ -9,6 +9,7 @@ from ctypes import wintypes as w
 
 import win32con
 import win32crypt
+import win32profile
 import win32security
 
 
@@ -60,7 +61,7 @@ def impersonate(username, password):
         token.Close()
 
 
-def run_as(username, password, argv, *, wait=False):
+def run_as(username, password, argv, *, wait=False, env=None):
     adv = ct.WinDLL("advapi32", use_last_error=True)
     kernel = ct.WinDLL("kernel32", use_last_error=True)
     create = adv.CreateProcessWithLogonW
@@ -72,8 +73,17 @@ def run_as(username, password, argv, *, wait=False):
     kernel.GetExitCodeProcess.argtypes = [w.HANDLE, ct.POINTER(w.DWORD)]
     startup, process = Startup(size=ct.sizeof(Startup)), ProcessInfo()
     command = ct.create_unicode_buffer(subprocess.list2cmdline(argv))
+    block = None
+    flags = subprocess.CREATE_NO_WINDOW
+    if env:
+        with impersonate(username, password) as token:
+            variables = win32profile.CreateEnvironmentBlock(token, False)
+        variables.update(env)
+        entries = (f"{name}={variables[name]}" for name in sorted(variables, key=str.casefold))
+        block = ct.create_unicode_buffer("\0".join(entries) + "\0\0")
+        flags |= 0x400  # CREATE_UNICODE_ENVIRONMENT
     if not create(username, os.environ["COMPUTERNAME"], password, 1, argv[0], command,
-                  subprocess.CREATE_NO_WINDOW, None, os.environ["SystemRoot"], ct.byref(startup), ct.byref(process)):
+                  flags, block, os.environ["SystemRoot"], ct.byref(startup), ct.byref(process)):
         raise ct.WinError(ct.get_last_error())
     try:
         if wait:
