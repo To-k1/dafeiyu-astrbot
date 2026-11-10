@@ -2,6 +2,22 @@
 
 > 每一次值得说的进化都会记在这里。
 
+## 未发布 · 分泡：成对符号内不再拆泡（2026-11-10）
+
+- `chat_layout` 新增 `has_unclosed_pair` / `merge_unclosed_pairs`：分段器在成对符号（书名号《》、引号“”、括号（）、【】、[] 等）内部遇到问号/句号不再拆成两条消息；核心分段（`stage.py`）和主动消息分段（`proactive_chat/sender_service.py`）共用，`group_bubbles` 也加了一层兜底。
+- 新增 `tests/test_chat_layout.py` 回归：成对符号检测、只合并符号内分段、气泡分组不拆标题。
+
+## 未发布 · macOS 本机 Docker 套件（2026-11-09）
+
+- 新增 `deploy-macos/`（issue #32 方案 A）：与 `deploy/` 云上套件互相独立的 macOS 本机部署。全部相对路径 + `.env`（时区 / 端口 / QQ 小号）；`start.sh` 依次做环境检查、目录与 `.env` 初始化、构建、起容器、等面板就绪；`stop.sh` 提供停 / 删容器 / 清数据三档。
+- 复用 `../deploy/Dockerfile` 与 `../deploy/patches/` 的四个核心补丁，不复制第二份，避免两处漂移；镜像 tag 用 `dafeiyu-astrbot:macos`，与云端 `:latest` 互不覆盖。NapCat 用 `MODE=astrbot` 自动写好反向 WS，`.env` 填了小号即快速登录；面板（6185）与 WebUI（6099）都只绑 `127.0.0.1`。
+- 明确 macOS 边界：不支持 PhoneMCP（雷电模拟器 + ADB）、现场听（loopback 录音）、`powercfg` 合盖不睡。
+- `deploy/heal_ws.py` 去绝对路径（原 P2 提前做）：配置按「脚本目录 → `../deploy-macos` → `/opt/dafeiyu` → 当前目录」自动找，容器名按 compose label `...service=astrbot` 查（`astrbot` 与 `dafeiyu-macos-astrbot-1` 都认），WebUI 端口读套件 `.env` 的 `NAPCAT_PORT`，支持 `DAFEIYU_NAPCAT_CONFIG` / `DAFEIYU_CONTAINER` / `DAFEIYU_NAPCAT_BASE` 覆盖；macOS 本机可直接 `python3 ../deploy/heal_ws.py` 自愈 WS。
+- 新增 `tests/test_deploy_macos.py`（16 项）：相对路径、`.env` 变量覆盖、补丁复用、脚本语法、`--purge` 删除范围；新增 `tests/test_heal_ws.py` 的路径/容器探测与错误分支用例。
+- 真机验证（macOS 27.3 / arm64 / colima + Docker 29.5）：`deploy-macos/start.sh` 全流程通过——构建镜像、起 `dafeiyu-macos-astrbot-1` + `dafeiyu-macos-napcat-1`、面板 200、NapCat WebUI 可达、端口仅绑 127.0.0.1、四个补丁挂载、`host.docker.internal` 可解析、初始密码日志可 grep；`heal_ws.py` 自动识别本套件配置路径与容器名。
+- `deploy/heal_ws.py` 对 NapCat WebUI 的非 0 响应（典型：QQ 未登录返回 `Not Login`）不再抛 `KeyError: 'data'`，改为打印原因并以 1 退出；`_login` 拿不到 Credential 同样走友好报错。
+- 仍未验证：扫码登录、真实 QQ 收发、TTS/语音、宿主 Ollama 实际连通性——需要真实 QQ 小号。
+
 ## v3.1.0 · 心境中枢 M1/M2/M3：情感动力学、表达桥与观测台接线（2026-11-08，插件 v3.0.3 / affective core v0.1.0）
 
 - **M1 心境中枢插件**：新增 `plugin/astrbot_plugin_affective_core`：独立 SQLite 情感状态/牵挂账本、三层连续动力学、回复前 2.5s 共情评估（超时/坏 JSON/异常回退确定性快筛）、软心门控、跨天牵挂、群聊/访客隔离、旧 EmotionAI 只读迁移、出站泄漏清洗与主人 `/心情`。
