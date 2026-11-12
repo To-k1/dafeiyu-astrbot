@@ -44,13 +44,16 @@ $archive = Join-Path $work 'native.zip'
 
 [AstrBot 4.29.4 OneBot 补丁](../deploy/patches/astrbot_4.29.4_qq_admin_ingress.patch) 用于 FishHome 独立实例。它在事件转换和日志之前读取 `admins_id` 中的数字 QQ 号，仅让唯一 QQ 管理员的好友私聊进入后续处理。内置 WebChat 管理员 `astrbot` 仍可保留。请求、通知、群聊、其他账号及缺少唯一 QQ 管理员的配置均在入口拦截。
 
-当前开发环境已应用补丁，下次启动 AstrBot 时加载。重建固定版 venv 时，使用以下 PowerShell 命令。
+原管理员入口补丁已用于开发实例。v1.1 的后续补丁在同一入口丢弃缺失或无效的 OneBot 消息 ID，并只记录固定诊断，不生成 ID。重建固定版 venv 时按以下顺序停机应用。
 
 ```powershell
 $packages = Join-Path $env:FISH_HOME 'dev\astrbot-4.29.4\.venv\Lib\site-packages'
 $patch = Join-Path $env:FISH_HOME 'repo\deploy\patches\astrbot_4.29.4_qq_admin_ingress.patch'
+$idPatch = Join-Path $env:FISH_HOME 'repo\deploy\patches\astrbot_4.29.4_qq_message_id.patch'
 git -C $packages apply --check $patch
 git -C $packages apply $patch
+git -C $packages apply --check $idPatch
+git -C $packages apply $idPatch
 ```
 
-若需撤回补丁，对同一路径执行 `git -C $packages apply -R $patch`，再重启 AstrBot。
+已应用管理员入口的实例只需检查并应用 `$idPatch`。回退 v1.1 时先停 AstrBot，对同一路径执行 `git -C $packages apply -R $idPatch`。如需撤回管理员入口，先撤回 ID 补丁，再执行 `git -C $packages apply -R $patch`。

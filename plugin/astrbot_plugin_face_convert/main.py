@@ -1123,6 +1123,7 @@ class FaceConvertPlugin(Star):
         changed = 0
         stripped = 0
         dropped_faces = 0
+        fallback_face = None
         per_msg = 0
         for comp in result.chain:
             if not isinstance(comp, Plain) or not comp.text:
@@ -1152,13 +1153,10 @@ class FaceConvertPlugin(Star):
                     self.cfg.get("face_cooldown_minutes", 10)
                 ) * 60
                 hist[:] = [t for t in hist if t[1] >= _cutoff]
-                if suppress_cheerful and name in CHEERFUL_FACE_NAMES:
-                    if m.start() > pos:
-                        new_chain.append(Plain(text[pos : m.start()]))
-                    pos = m.end()
-                    dropped_faces += 1
-                    continue
-                if per_msg >= max_allowed_faces or fid in [t[0] for t in hist[-2:]]:
+                if ((suppress_cheerful and name in CHEERFUL_FACE_NAMES)
+                        or per_msg >= max_allowed_faces or fid in [t[0] for t in hist[-2:]]):
+                    if fallback_face is None:
+                        fallback_face = fid
                     if m.start() > pos:
                         new_chain.append(Plain(text[pos : m.start()]))
                     pos = m.end()
@@ -1175,6 +1173,16 @@ class FaceConvertPlugin(Star):
             if pos < len(text):
                 new_chain.append(Plain(text[pos:]))
 
+        if fallback_face is not None and max_allowed_faces > 0 and not any(
+            not isinstance(comp, Plain) or (comp.text or "").strip() for comp in new_chain
+        ):
+            # Stylistic filtering can omit a decoration, but must not erase the whole reply.
+            new_chain = [Face(id=fallback_face)]
+            hist = self._face_history[event.unified_msg_origin]
+            hist.append((fallback_face, time.time()))
+            del hist[:-8]
+            changed += 1
+            dropped_faces -= 1
         if changed or stripped or dropped_faces:
             result.chain = new_chain
             logger.info(

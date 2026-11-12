@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from .contact_bridge import coordinated_send, before_dispatch
+from .contact_bridge import StopContact, before_dispatch, coordinated_send
 
 from astrbot.api import logger
 from astrbot.core.message.components import Plain, Record
@@ -347,8 +347,7 @@ class SenderService:
     async def send_chain_direct(self, session_id: str, components: list) -> bool:
         """直接通过平台实例发送消息链（不经过事件）。
 
-        优先定位 UMO 对应的平台实例直发；平台缺失、未运行或发送异常时
-        回退到核心发送 API，确保尽力送达。
+        平台找不到时可改走核心 API。已经尝试投递后不切换通道重发。
         """
         plugin = self.plugin
         if not components:
@@ -379,6 +378,7 @@ class SenderService:
 
         try:
             session_obj = MS(platform_name=p_id, message_type=m_type, session_id=t_id)
+            before_dispatch(plugin, session_id)
             await target_platform.send_by_session(session_obj, chain)
             logger.debug(f"[主动消息] 消息将通过平台 {p_id} 送达喵")
             await self.persist_proactive_message_to_platform_history(session_id, chain)
@@ -395,7 +395,7 @@ class SenderService:
                         )
                     )
                 )
-            return await self.send_chain_via_core_api(session_id, chain)
+            raise StopContact() from e
 
     async def send_chain_via_core_api(
         self, session_id: str, chain: MessageChain
@@ -406,10 +406,11 @@ class SenderService:
         """
         plugin = self.plugin
         try:
+            before_dispatch(plugin, session_id)
             result = await plugin.context.send_message(session_id, chain)
         except Exception as e:
             logger.error(f"[主动消息] 核心 API 发送失败喵: {e}")
-            return False
+            raise StopContact() from e
 
         if result is False:
             logger.error(
@@ -429,26 +430,21 @@ class SenderService:
         """发送一条消息链（优先走事件，事件不可用时回退平台直发）。
 
         事件返回 None 视为“已接管发送”，此时需补写平台流水；
-        返回 False 视为失败，回退直发并标记事件状态。
+        返回 False 视为失败并标记事件状态。
         """
         if not components:
             return False
-
-        before_dispatch(self.plugin, session_id)
 
         chain = MessageChain(list(components))
 
         if event is not None:
             try:
+                before_dispatch(self.plugin, session_id)
                 sent = await event.send(chain)
             except Exception as e:
-                logger.error(f"[主动消息] 事件发送异常喵，回退平台直发: {e}")
-                sent_direct = await self.send_chain_direct(session_id, components)
-                if sent_direct:
-                    self._mark_event_sent(event)
-                else:
-                    self._mark_event_send_failed(event)
-                return sent_direct
+                logger.error(f"[主动消息] 事件投递结果不明，停止后续发送: {e}")
+                self._mark_event_send_failed(event)
+                raise StopContact() from e
 
             if sent is True:
                 return True

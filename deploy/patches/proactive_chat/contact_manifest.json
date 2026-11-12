@@ -4,5 +4,13 @@
     "core/services/sender_service.py": "3e33be4bd19d4747d08cd4b6db66689a51d67b78923f003fb76af7e4c27c64bf",
     "core/services/llm_service.py": "226f348f3a218bf7190b55866bd9861bd2166b1b2c1545a5ff345fb1931cd65c"
   },
+  "previous_patch_sha256": {
+    "core/services/sender_service.py": ["df59db8d86b02b85ea10f5c23b87ba1b4927b9e62284af50c2ca3af24614943a"],
+    "core/services/llm_service.py": ["0fcf7c7e632cd06c53a11aa54560a70a7b5989b4619f584881ced4ac7d6fcf89"],
+    "core/services/contact_bridge.py": [
+      "b0deba9d92a6283ae91304805bc7133b9e8afc9fb5e527532c0ff93704f1b579",
+      "47bd1589ade7890439ce721b4da07d4c34d31ef05b8e42a9f463d6f1ee069507"
+    ]
+  },
   "required_provider_sha256": "3f8da40959c7f3ee249c3b454bf71ee0977206e0f9f33340ed82736c049bc599"
 }

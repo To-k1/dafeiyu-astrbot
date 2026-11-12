@@ -80,7 +80,11 @@ def tokens(kind, usage):
 
 async def stream_usage(request, upstream, kind):
     response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
-    await response.prepare(request)
+    forwarding = True
+    try:
+        await response.prepare(request)
+    except ConnectionError:
+        forwarding = False
     usage, complete = {}, False
     try:
         async for line in upstream.content:
@@ -100,10 +104,17 @@ async def stream_usage(request, upstream, kind):
                             usage.update(event["usage"])
                     except (ValueError, TypeError, AttributeError):
                         pass
-            await response.write(line)
-        await response.write_eof()
+            if forwarding:
+                try:
+                    await response.write(line)
+                except ConnectionError:
+                    # The upstream may still finish and report billable usage.
+                    forwarding = False
+        if forwarding:
+            await response.write_eof()
     except (ClientError, ConnectionError, TimeoutError, ValueError):
-        return response, None
+        if not complete:
+            return response, None
     return response, usage if complete else None
 
 

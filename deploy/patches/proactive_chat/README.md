@@ -28,13 +28,18 @@
 
 ## 联系协调 v0.1
 
-`contact_bridge.py` 连接生活插件的共享账本，默认关闭；`llm_service.py` 生成前预检，
+`contact_bridge.py` 连接生活插件的共享账本；协调关闭、缺失或会话不匹配时跳过主动生成和发送。`llm_service.py` 生成前预检，
 `sender_service.py` 在整次发送前预留、每次派发前复查。TTS/分段只算一次联系。
-结果只记社区发送器报告，不冒充独立 QQ 回读。原内部传输兜底逻辑保留。
+结果只记社区发送器报告。没有尝试投递时可以选择可用通道，尝试后结果不明则停止后续分段和通道回退。
 配置、状态语义、限制和真实 smoke 见 [CONTACT_V01.md](../../bili_activity/CONTACT_V01.md)。
 
+主动消息生成与 LifePlanner 共用活动插件的 `autonomous_provider_id` 校验。该模型必须为
+`deepseek-flash`，并指向 `http://127.0.0.1:6197/openai/autonomous/v1`。初次请求和工具续轮
+使用同一提供商。未配置自主模型、联系条件不满足或协调器仍为旧版时，主动生成会停止。
+FishHome 台式机的 `fishhome-autonomous/deepseek-flash` 由活动插件创建，供两条自主路径使用。
+
 sender 源码固定于[上游提交 2dab585](https://github.com/Pancakes-Labs/astrbot_plugin_proactive_chat/tree/2dab58514e0a2055400ed3bf7b3907ae684c0c54)。
-安装器要求 sender 符合该原始文件，LLM/provider 已有本仓库旧联网补丁（或文件已是本次版本）。
+安装器接受该原始 sender 或本仓库上一版协调补丁。LLM/provider 仍须匹配已知联网补丁。
 这是指定基线的增量安装器，不是适配任意社区版本的新装器。
 
 ## 安装 / 升级后检查
@@ -51,7 +56,7 @@ python install_contact.py --plugin-dir <现有社区插件目录> --apply
 安装器只改三个 services 文件，原 provider 不覆盖但会校验；先保存时间戳备份，复制失败恢复原文件。
 不重启、不启用配置、不访问网络。首次安装/升级到其他源码基线需人工复核并更新受测补丁，不能沿用旧 cp 指令。
 本次 llm_service 已依赖 contact_bridge，不能只复制一个文件。
-恢复时先关闭协调、停 AstrBot，把备份里的两个旧 services 文件还原，再移除新 contact_bridge。
+恢复时先停止主动发送、关闭协调并停 AstrBot。按备份 `restore.json` 还原已有文件，只移除该记录标明原本不存在的文件。
 插件升级可能覆盖补丁；重新检查后再开启共享协调。
 
 来源：https://github.com/Pancakes-Labs/astrbot_plugin_proactive_chat

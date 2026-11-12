@@ -20,7 +20,9 @@ from .mock_backup import check_database, checksum, read_only, staged_directory
 FORMAT = "fishhome-native-v1"
 LM = "data/plugin_data/astrbot_plugin_livingmemory"
 ACTIVITY = "data/plugin_data/astrbot_plugin_bili_activity/activity.sqlite3"
-SQLITE = {f"{LM}/livingmemory.db", f"{LM}/livingmemory_graph_documents.db", ACTIVITY}
+AFFECTIVE = "data/plugin_data/astrbot_plugin_affective_core/affective.db"
+RUNTIME_SQLITE = {ACTIVITY, AFFECTIVE}
+SQLITE = {f"{LM}/livingmemory.db", f"{LM}/livingmemory_graph_documents.db"} | RUNTIME_SQLITE
 # AstrBot's core DB also stores API keys and trusted-device credentials.
 CHAT = {f"{LM}/conversations.db"}
 COMPANIONS = {f"{LM}/livingmemory.index", f"{LM}/livingmemory_graph.index", f"{LM}/decay_state.json"}
@@ -103,7 +105,7 @@ def verify(archive):
                 raise ValueError("duplicate archive path")
             names.add(name.casefold())
             expected.add(name)
-            allowed = (name in SQLITE and (manifest["profile"] == "runtime" or name != ACTIVITY)
+            allowed = (name in SQLITE and (manifest["profile"] == "runtime" or name not in RUNTIME_SQLITE)
                        or (manifest["include_private_chat"] and name in CHAT))
             if manifest["consistency"] == "writers-stopped":
                 allowed = allowed or name in COMPANIONS
@@ -136,7 +138,7 @@ def snapshot(root, archive, *, environment, revision, include_private_chat=False
         raise ValueError("workspace files require a selected root, filenames and stopped writers")
     root = root.resolve(strict=True)
     sources = {}
-    databases = SQLITE if profile == "runtime" else SQLITE - {ACTIVITY}
+    databases = SQLITE if profile == "runtime" else SQLITE - RUNTIME_SQLITE
     for name in sorted(databases | (CHAT if include_private_chat else set()) | (COMPANIONS if writers_stopped else set())):
         parts = path_parts(name)
         if root.joinpath(*parts).exists():

@@ -4,6 +4,7 @@ import importlib
 import json
 import tempfile
 import time
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -429,8 +430,11 @@ class PlannerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
 
     async def test_exhausted_budget_does_not_plan_or_execute(self):
-        self.plugin.activity_budget().start_run(SCOPE, "used", 30 * 60, self.config)
-        await self.plugin.run_activity("periodic")
+        # Keep the entire reservation in one Shanghai budget day.
+        now = datetime(2026, 11, 11, 4, tzinfo=timezone.utc).timestamp()
+        with patch.object(main.time, "time", return_value=now):
+            self.plugin.activity_budget().start_run(SCOPE, "used", 30 * 60, self.config)
+            await self.plugin.run_activity("periodic")
         self.assertEqual(self.plugin.life_planner().recent(SCOPE), [])
         self.plugin.agent.assert_not_called()
         self.assertEqual(self.calls, [])

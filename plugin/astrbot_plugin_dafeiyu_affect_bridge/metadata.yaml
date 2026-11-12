@@ -1,0 +1,5 @@
+name: astrbot_plugin_dafeiyu_affect_bridge
+display_name: FishAffectBridge
+desc: Connect verified FishHome activity and optional chat context to the existing Affective Core.
+version: 0.1.0
+author: FishHome

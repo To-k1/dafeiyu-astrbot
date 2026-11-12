@@ -6,11 +6,13 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from deploy.fish_cost import OUTPUT_LIMIT, PRICE_FILE, create_app, load_prices
+from deploy.fish_cost import OUTPUT_LIMIT, PRICE_FILE, create_app, load_prices, stream_usage
 from deploy.fish_cost_ledger import CostLimit, Ledger, amount
 from plugin.astrbot_plugin_bili_activity.cost_window import peak_end
 
@@ -20,16 +22,19 @@ def beijing(at):
 
 
 class LedgerTests(unittest.TestCase):
-    def test_budget_day_changes_at_four_and_settlement_stays_on_original_day(self):
-        clock = [beijing("2026-11-09T03:59:59")]
+    def test_budget_day_changes_at_midnight_and_settlement_stays_on_original_day(self):
+        clock = [beijing("2026-11-08T23:59:59")]
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "activity.sqlite3"
             ledger = Ledger(path, lambda: clock[0])
             ledger.adjust("autonomous", "4.25", temporary=False)
             ledger.adjust("autonomous", "1", temporary=True)
             previous = ledger.reserve("autonomous", "anthropic", amount("1"), clock[0])
+            ledger.adjust("interaction", "0", temporary=True)
             with self.assertRaises(CostLimit):
                 ledger.reserve("autonomous", "anthropic", amount("0.01"), clock[0])
+            with self.assertRaises(CostLimit):
+                ledger.reserve("interaction", "openai", amount("0.01"), clock[0])
             self.assertEqual(ledger.snapshot()["day"], "2026-11-08")
             clock[0] += 1
             ledger = Ledger(path, lambda: clock[0])
@@ -37,9 +42,11 @@ class LedgerTests(unittest.TestCase):
             ledger.settle(previous, amount("0.30"))
             self.assertEqual(ledger.snapshot()["day"], "2026-11-09")
             self.assertEqual(ledger.snapshot()["ledgers"]["autonomous"]["remaining"], "4.25")
-            clock[0] -= 1
-            self.assertEqual(ledger.snapshot()["ledgers"]["autonomous"]["used"], "0.1")
+            clock[0] += 1
             self.assertEqual(ledger.snapshot()["ledgers"]["interaction"]["remaining"], "5")
+            clock[0] -= 2
+            self.assertEqual(ledger.snapshot()["ledgers"]["autonomous"]["used"], "0.1")
+            self.assertEqual(ledger.snapshot()["ledgers"]["interaction"]["remaining"], "0")
 
     def test_peak_cutoffs_and_holidays(self):
         self.assertEqual(peak_end(beijing("2026-11-09T10:00:00")), beijing("2026-11-09T12:00:00"))
@@ -50,6 +57,26 @@ class LedgerTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnected_dsh_keeps_usage_only_after_upstream_completion(self):
+        usage = {"input_tokens": 10, "output_tokens": 4}
+
+        async def upstream_lines(complete):
+            yield b'data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n'
+            yield b'data: {"type":"message_delta","usage":{"output_tokens":4}}\n'
+            if complete:
+                yield b'data: {"type":"message_stop"}\n'
+
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                response = SimpleNamespace(prepare=AsyncMock(), write_eof=AsyncMock(),
+                                           write=AsyncMock(side_effect=ConnectionResetError))
+                with patch("deploy.fish_cost.web.StreamResponse", return_value=response):
+                    _, captured = await stream_usage(object(), SimpleNamespace(content=upstream_lines(complete)),
+                                                     "anthropic")
+                self.assertEqual(captured, usage if complete else None)
+                response.write.assert_awaited_once()
+                response.write_eof.assert_not_awaited()
+
     async def asyncSetUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

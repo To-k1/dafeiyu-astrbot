@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from scripts.m6_data import preview_migration, room_activity, sync_room
-from scripts.native_archive import ACTIVITY, CHAT, LM, restore, snapshot, verify
+from scripts.native_archive import ACTIVITY, AFFECTIVE, CHAT, LM, restore, snapshot, verify
 
 
 class NativeArchiveTests(unittest.TestCase):
@@ -53,6 +53,25 @@ class NativeArchiveTests(unittest.TestCase):
             archive.writestr("data/data_v4.db", "extra")
         with self.assertRaises(ValueError):
             verify(self.archive)
+
+    def test_runtime_archive_restores_committed_affective_state(self):
+        source = self.data / AFFECTIVE
+        source.parent.mkdir()
+        with closing(sqlite3.connect(source)) as live:
+            live.execute("PRAGMA journal_mode=WAL")
+            with live:
+                live.execute("CREATE TABLE affect_states (scope TEXT PRIMARY KEY, longing REAL)")
+                live.execute("INSERT INTO affect_states VALUES ('owner', 0.25)")
+            live.execute("UPDATE affect_states SET longing=0.75")
+            self.create()
+        destination = self.root / "restored"
+        manifest = restore(self.archive, destination, apply=True)
+        self.assertIn(AFFECTIVE, {row["path"] for row in manifest["files"] if row["kind"] == "sqlite"})
+        with closing(sqlite3.connect(destination / AFFECTIVE)) as restored:
+            self.assertEqual(restored.execute("SELECT * FROM affect_states").fetchall(), [("owner", 0.25)])
+        self.archive = self.root / "memory-only.zip"
+        manifest = self.create(profile="memory")
+        self.assertNotIn(AFFECTIVE, {row["path"] for row in manifest["files"]})
 
     def test_room_snapshot_omits_private_affective_details(self):
         projected = room_activity({"affect": {"state": "ready", "valence": -0.5,

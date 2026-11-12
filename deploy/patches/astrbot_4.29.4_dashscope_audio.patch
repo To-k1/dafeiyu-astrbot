@@ -1,0 +1,8 @@
+--- a/astrbot/core/provider/sources/dashscope_tts.py
++++ b/astrbot/core/provider/sources/dashscope_tts.py
+@@ -167,3 +167,5 @@
+     def _is_qwen_tts_model(self, model: str) -> bool:
+         model_lower = model.lower()
++        if model_lower.startswith("qwen-audio-"):
++            return False  # Qwen-Audio uses the tts_v2 WebSocket adapter.
+         return "tts" in model_lower and model_lower.startswith("qwen")

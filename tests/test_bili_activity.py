@@ -313,6 +313,24 @@ def configure_autonomous(plugin, config, provider=None):
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fishhome_autonomous_provider_stays_outside_the_chat_registry(self):
+        self.config["autonomous_provider_id"] = "fishhome-autonomous/deepseek-flash"
+        self.plugin.control.write_text(json.dumps(self.config))
+        self.plugin.context = types.SimpleNamespace(
+            get_provider_by_id=Mock(side_effect=AssertionError("chat registry accessed"))
+        )
+        provider = types.SimpleNamespace(terminate=AsyncMock())
+        factory = Mock(return_value=provider)
+        name = "astrbot.core.provider.sources.openai_source"
+        with patch.dict(sys.modules, {name: types.SimpleNamespace(ProviderOpenAIOfficial=factory)}):
+            with patch.dict("os.environ", {"FISHHOME_AUTONOMOUS_TOKEN": "test-token"}):
+                self.assertIs(self.plugin.autonomous_provider(), provider)
+                self.assertIs(self.plugin.autonomous_provider(), provider)
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.args[0]["api_base"], "http://127.0.0.1:6197/openai/autonomous/v1")
+        self.assertEqual(factory.call_args.args[0]["model"], "deepseek-flash")
+        self.plugin.context.get_provider_by_id.assert_not_called()
+
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.plugin = main.BiliActivity.__new__(main.BiliActivity)
@@ -601,6 +619,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("df_douyin_feed", owner_req.system_prompt)
         self.assertIn("df_phone_observe", owner_req.system_prompt)
         self.assertIn("df_learn_evaluate", owner_req.system_prompt)
+        self.assertIn("df_bili_read 读取接口资料", owner_req.system_prompt)
+        self.assertIn("投递结果不明时不要重发", owner_req.system_prompt)
+        self.assertNotIn("listen_audio", owner_req.system_prompt)
 
         other_req = types.SimpleNamespace(system_prompt="基础人格", func_tool=ToolSet(), contexts=[])
         await self.plugin.guard_phone(FakeEvent(scope=OTHER_SCOPE), other_req)

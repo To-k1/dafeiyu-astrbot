@@ -11,8 +11,9 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 from uuid import uuid4
 
 import psutil
@@ -21,6 +22,8 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from deploy.bili_activity.ops import exclusive, save_control
 from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
+from scripts.m6_data import export_memory
+from scripts.native_archive import snapshot
 
 from .windows import Credentials, impersonate, run_as, write_json
 
@@ -29,6 +32,7 @@ PORT = 6196
 RUNNER = "FishHomeRunner"
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = Path(__file__).with_name("index.html")
+ICON = PAGE.with_name("fishhome.png")
 INTERACTION_BASE = "http://127.0.0.1:6197/openai/interaction/v1"
 
 
@@ -95,8 +99,11 @@ class Manager:
         self.control = self.activity / "control.json"
         self.ledger = self.activity / "activity.sqlite3"
         self.bili_state = state / "bili"
+        self.backups = dev.parent / "backups"
+        self.exports = dev.parent / "exports"
         self.tasks = set()
         self.lock = asyncio.Lock()
+        self.archive_lock = asyncio.Lock()
         self.emulator_requested = 0.0
 
     def specs(self):
@@ -117,6 +124,16 @@ class Manager:
             dsh_env = {"DEEPSEEK_BASE_URL": "http://127.0.0.1:6197/anthropic/autonomous",
                        "FISHHOME_DSH_GATEWAY_TOKEN": self.creds.values["autonomous"],
                        "DEEPSEEK_API_KEY": self.creds.values["autonomous"]}
+        commission = {}
+        if (dsh / "Start-DSH-Commission.cmd").is_file():
+            interaction_env = {
+                "DEEPSEEK_BASE_URL": "http://127.0.0.1:6197/anthropic/interaction",
+                "FISHHOME_DSH_GATEWAY_TOKEN": self.creds.values["interaction"],
+                "DEEPSEEK_API_KEY": self.creds.values["interaction"],
+            }
+            commission["dsh_commission"] = Service(
+                "DeepSeek Harness（受托文件）", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-Commission.cmd"),
+                59935, str(dsh / "m5-commission.yml"), env=interaction_env, runner=True)
         return {
             "budget": Service("人民币计费", ROOT, (self.python, "-B", "-m", "deploy.fish_cost", "--db",
                 self.activity / "activity.sqlite3", "serve", *(() if key else ("--offline",))), 6197,
@@ -132,12 +149,14 @@ class Manager:
             "bili": Service("B 站伴侣（只读）", ROOT, (self.python, "-B", bili, "--state-dir", self.bili_state,
                 "--adb-path", emulator / "adb.exe"), 8011, str(bili)),
             "dsh": Service("DeepSeek Harness", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-M3.cmd"),
-                59934, str(dsh / "node_modules/@deepseek-ai/dsh/lib/bin.js"), env=dsh_env, runner=True),
+                59934, str(dsh / "m5-file-only.yml"), env=dsh_env, runner=True),
+            **commission,
             "astrbot": Service("AstrBot", self.astro, (self.python, "-B", "-m", "astrbot.cli", "run"), 6185,
                 "astrbot.cli run", "http://127.0.0.1:6185/",
-                env={"FISHHOME_INTERACTION_TOKEN": self.creds.values["interaction"]}),
+                env={"FISHHOME_INTERACTION_TOKEN": self.creds.values["interaction"],
+                     "FISHHOME_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}),
             "napcat": Service("NapCat", cat, (cat / "node.exe", cat / "index.js", *cat_args), 6099,
-                str(cat / "index.js"), "http://127.0.0.1:6099/"),
+                str(cat / "index.js"), "http://127.0.0.1:6099/webui/"),
             "room": Service("房间与记忆星海", ROOT, (self.python, "-B", "-m", "deploy.memory_observatory.server",
                 "--port", "8767", "--astrbot-root", self.astro, "--life-data-dir", self.activity), 8767,
                 "deploy.memory_observatory.server", "http://127.0.0.1:8767/room"),
@@ -172,9 +191,34 @@ class Manager:
                 "PhoneMCP · 手机工具": str(specs["phone"].cwd),
                 "B站 / 抖音 / 自主活动 · 模块配置": str(self.control),
                 "B 站伴侣 · 本机状态": str(self.bili_state),
+                "FishHome · 历史备份": str(self.backups),
+                "FishHome · 记忆导出": str(self.exports),
                 "FishHome · 启动配置与服务日志": str(self.state),
             },
         }
+
+    def archive_history(self):
+        rows = []
+        for path in self.backups.glob("desktop-*.zip"):
+            if not re.fullmatch(r"desktop-(?:backup|test-memory)-\d{8}T\d{6}(?:\.\d+)?Z\.zip", path.name):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            info = path.stat()
+            rows.append({"name": path.name, "bytes": info.st_size, "modified": info.st_mtime})
+        return sorted(rows, key=lambda row: row["modified"], reverse=True)
+
+    def create_archive(self, kind):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        if kind == "export":
+            destination = self.exports / f"desktop-memory-export-{stamp}"
+            export_memory(self.astro, destination)
+            return destination.name
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+                                           timeout=5, creationflags=subprocess.CREATE_NO_WINDOW).strip()
+        destination = self.backups / f"desktop-backup-{stamp}.zip"
+        snapshot(self.astro, destination, environment="dev", revision=revision)
+        return destination.name
 
     def set_config(self, name, value):
         if name in {"napcat_qq", "owner_qq"}:
@@ -468,22 +512,30 @@ class Manager:
         if any(current.get(key) != value for key, value in fields.items()):
             write_json(self.bridge_settings, current | fields)
 
-    async def refresh_dsh_cookie(self):
+    def dsh_launch_token(self, port=59934):
+        password = self.runner_password()
+        if not password:
+            return ""
+        with impersonate(RUNNER, password) as token:
+            state = "DSH-Commission" if port == 59935 else "DSH"
+            log = Path(win32profile.GetUserProfileDirectory(token)) / "AppData/Local/FishHome" / state / "web-start.log"
+            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+        tickets = re.findall(rf"http://127\.0\.0\.1:{port}/\?token=([A-Za-z0-9._~%-]+)", text)
+        return unquote(tickets[-1]) if tickets else ""
+
+    async def refresh_dsh_cookie(self, port=59934):
         try:
-            with impersonate(RUNNER, self.runner_password()) as token:
-                log = Path(win32profile.GetUserProfileDirectory(token)) / "AppData/Local/FishHome/DSH/web-start.log"
             async with ClientSession(timeout=ClientTimeout(total=5)) as session:
                 for _ in range(40):
-                    if 59934 in self.listeners():
-                        with impersonate(RUNNER, self.runner_password()):
-                            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
-                        tickets = re.findall(r"http://127\.0\.0\.1:59934/\?token=([A-Za-z0-9._~%-]+)", text)
-                        if tickets:
-                            async with session.get("http://127.0.0.1:59934/connect", allow_redirects=False,
-                                    params={"token": unquote(tickets[-1]), "interactions": "none"}) as response:
+                    if port in self.listeners():
+                        ticket = self.dsh_launch_token(port)
+                        if ticket:
+                            async with session.get(f"http://127.0.0.1:{port}/connect", allow_redirects=False,
+                                    params={"token": ticket, "interactions": "none"}) as response:
                                 if response.status == 302 and len(response.cookies) == 1:
                                     name, value = next(iter(response.cookies.items()))
-                                    self.update_bridge(session_cookie=f"{name}={value.value}")
+                                    field = "commission_cookie" if port == 59935 else "session_cookie"
+                                    self.update_bridge(**{field: f"{name}={value.value}"})
                                     return
                     await asyncio.sleep(.5)
             raise RuntimeError("DSH 启动后未取得有效连接票据")
@@ -522,15 +574,25 @@ class Manager:
             password = self.runner_password()
             if not password:
                 raise ValueError("请在 WebUI 保存 FishHomeRunner 密码后启动 DSH")
+            if name == "dsh_commission":
+                if not service.cwd.joinpath("m5-commission.yml").is_file():
+                    raise ValueError("受托文件执行配置缺失")
+                with impersonate(RUNNER, password) as token:
+                    root = (Path(win32profile.GetUserProfileDirectory(token))
+                            / "AppData/Local/FishHome/commission-files")
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / "output").mkdir(exist_ok=True)
+                self.update_bridge(commission_workspace=str(root), commission_cookie="")
             pid = run_as(RUNNER, password, argv, env=service.env)
             with impersonate(RUNNER, password):
                 started = psutil.Process(pid).create_time()
-            task = asyncio.create_task(self.refresh_dsh_cookie())
+            task = asyncio.create_task(self.refresh_dsh_cookie(service.port))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         else:
             env = {key: val for key, val in os.environ.items()
-                   if not key.startswith(("FISH_COST_", "FISH_MANAGER_", "FISHHOME_INTERACTION_TOKEN"))}
+                   if not key.startswith(("FISH_COST_", "FISH_MANAGER_", "FISHHOME_INTERACTION_TOKEN",
+                                          "FISHHOME_AUTONOMOUS_TOKEN"))}
             with (self.state / f"{name}.log").open("ab") as log:
                 child = subprocess.Popen(argv, cwd=service.cwd, stdout=log, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW,
@@ -557,6 +619,8 @@ class Manager:
         if not pid:
             if pids:
                 raise ValueError("端口上有未确认归属的进程")
+            if name == "dsh_commission":
+                self.update_bridge(commission_cookie="")
             return "已停止"
         argv = [str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"), "/PID", str(pid), "/T", "/F"]
         if service.runner:
@@ -569,6 +633,8 @@ class Manager:
             code = await child.wait()
         if code and psutil.pid_exists(pid):
             raise RuntimeError("Windows 未能停止该进程")
+        if name == "dsh_commission":
+            self.update_bridge(commission_cookie="")
         self.launches.pop(name, None)
         write_json(self.launch_file, self.launches)
         return "已请求停止"
@@ -597,7 +663,7 @@ def create_app(manager, token):
     async def local_only(request, handler):
         if request.host != f"127.0.0.1:{PORT}":
             return web.json_response({"error": "只允许本机访问"}, status=403)
-        if request.path != "/" and not hmac.compare_digest(
+        if request.path not in {"/", "/icon.png"} and not hmac.compare_digest(
             request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()
         ):
             return web.json_response({"error": "请从系统托盘打开 WebUI"}, status=401)
@@ -605,7 +671,7 @@ def create_app(manager, token):
             return await handler(request)
         except (ValueError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=409)
-        except (OSError, psutil.Error, sqlite3.Error) as exc:
+        except (OSError, psutil.Error, sqlite3.Error, subprocess.SubprocessError) as exc:
             return web.json_response({"error": f"Windows 操作失败（{type(exc).__name__}）"}, status=409)
 
     app = web.Application(middlewares=[local_only], client_max_size=8192)
@@ -613,7 +679,10 @@ def create_app(manager, token):
     async def home(_request):
         return web.Response(text=PAGE.read_text(encoding="utf-8"), content_type="text/html",
             headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
-                     "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'"})
+                     "Content-Security-Policy": "default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'"})
+
+    async def icon(_request):
+        return web.FileResponse(ICON)
 
     async def status(_request):
         return web.json_response({"services": manager.statuses(), "official_key": bool(manager.creds.values.get("upstream_key")),
@@ -669,6 +738,29 @@ def create_app(manager, token):
     async def diagnostics(_request):
         return web.json_response({"checks": await manager.diagnostics()}, headers={"Cache-Control": "no-store"})
 
+    async def dsh_ui(_request):
+        service = manager.specs()["dsh"]
+        if not any(manager.matching_pid(service, pid) for pid in manager.listeners().get(service.port, ())):
+            raise ValueError("请先启动 DeepSeek Harness")
+        ticket = manager.dsh_launch_token()
+        if not ticket:
+            raise ValueError("DSH 登录票据尚未就绪，请重试或重启 DSH")
+        return web.json_response({"url": "http://127.0.0.1:59934/?" + urlencode({"token": ticket})},
+                                 headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    async def archive_history(_request):
+        return web.json_response({"backups": await asyncio.to_thread(manager.archive_history)})
+
+    async def archive(request):
+        kind = request.match_info["kind"]
+        if kind not in {"backup", "export"}:
+            raise ValueError("未知归档操作")
+        if manager.archive_lock.locked():
+            raise ValueError("已有备份或导出正在执行")
+        async with manager.archive_lock:
+            name = await asyncio.to_thread(manager.create_archive, kind)
+        return web.json_response({"name": name})
+
     async def location(request):
         body = await request.json()
         label = body.get("label") if isinstance(body, dict) else None
@@ -699,12 +791,16 @@ def create_app(manager, token):
                                  headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/", home)
+    app.router.add_get("/icon.png", icon)
     app.router.add_get("/api/ping", ping)
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
     app.router.add_get("/api/config", configuration)
     app.router.add_get("/api/diagnostics", diagnostics)
+    app.router.add_post("/api/ui/dsh", dsh_ui)
+    app.router.add_get("/api/archives", archive_history)
+    app.router.add_post("/api/archives/{kind}", archive)
     app.router.add_post("/api/location", location)
     app.router.add_get("/api/budgets", budgets)
     app.router.add_post("/api/budgets", budgets)

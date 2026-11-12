@@ -120,7 +120,7 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         client = types.SimpleNamespace(call=AsyncMock(side_effect=rpc), close=AsyncMock())
         self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: lambda scope: client})
-        before = datetime.fromisoformat("2026-11-09T03:59:50+08:00").timestamp()
+        before = datetime.fromisoformat("2026-11-08T23:59:50+08:00").timestamp()
         with patch.object(main.time, "time", return_value=before - 1):
             await self.plugin.run_activity("periodic")
             client.call.assert_not_awaited()
@@ -194,7 +194,8 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(main.LIFE_TOOLS <= tools)
             captured["goal"] = await self.create(event)
             note = await self.watched(event)
-            await self.plugin.interest(event, note["episode_id"], "合作建造", thought="这段配合挺有意思")
+            await self.plugin.interest(event, note["episode_id"], "合作建造", polarity=1,
+                                       thought="这段配合挺有意思")
             proposal = json.loads(await self.plugin.propose(event, "follow", '{"uid":99}', "想继续看演示"))
             captured["proposal_id"] = proposal["proposal_id"]
             return "已看演示，等待主人答复是否关注。"

@@ -233,7 +233,7 @@ def read_affect(root, scope, at, cfg):
                 )
 
             if not row:
-                return fallback | {"state": "ready", "care_threads": care_threads}
+                return fallback | {"state": "ready", "has_saved_state": False, "care_threads": care_threads}
 
             return {
                 "state": "ready",

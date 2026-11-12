@@ -13,6 +13,7 @@ internal sealed class FishHomeTray : ApplicationContext
     private const string Address = "http://127.0.0.1:6196";
     private const string Instance = @"Local\FishHome.DesktopManager";
     private readonly NotifyIcon icon;
+    private readonly Icon appIcon;
     private readonly System.Windows.Forms.Timer timer;
     private readonly EventWaitHandle openEvent;
     private readonly EventWaitHandle startEvent;
@@ -77,7 +78,8 @@ internal sealed class FishHomeTray : ApplicationContext
         menu.Items.Add("启动全部服务", null, delegate { startPending = true; });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出控制台", null, delegate { ExitThread(); });
-        icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "FishHome 正在启动", Visible = true, ContextMenuStrip = menu };
+        appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        icon = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "FishHome 正在启动", Visible = true, ContextMenuStrip = menu };
         icon.DoubleClick += delegate { OpenPage(); };
         timer = new System.Windows.Forms.Timer { Interval = 600 };
         timer.Tick += Tick;
@@ -137,6 +139,7 @@ internal sealed class FishHomeTray : ApplicationContext
         timer.Dispose();
         icon.Visible = false;
         icon.Dispose();
+        if (appIcon != null) appIcon.Dispose();
         if (!backend.HasExited)
         {
             try { Request("/api/exit", "POST", 5000); }

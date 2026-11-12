@@ -304,6 +304,32 @@ asyncio.run(plugin.inbound_face_to_text(ev))
 check("identity-tag: private-empty", ev.message_str == "", repr(ev.message_str))
 
 print()
+class _FaceResultEvent(_Event):
+    unified_msg_origin = "fixture:FriendMessage:12345"
+
+    def __init__(self, text):
+        self.result = types.SimpleNamespace(chain=[_Plain(text)], is_llm_result=lambda: True)
+
+    def get_result(self):
+        return self.result
+
+
+quiet_faces = mod.FaceConvertPlugin(types.SimpleNamespace(_dafeiyu_affective_bridge=types.SimpleNamespace(
+    expression_profile=lambda **_: {"max_faces": 1, "suppress_cheerful_faces": True}
+)))
+single_face = _FaceResultEvent("[旺柴]")
+asyncio.run(quiet_faces.convert_faces(single_face))
+check("keep the only reply when it is a filtered face",
+      len(single_face.result.chain) == 1 and isinstance(single_face.result.chain[0], _Face)
+      and single_face.result.chain[0].id == 277)
+decorated = _FaceResultEvent("知道了。[旺柴]")
+asyncio.run(quiet_faces.convert_faces(decorated))
+check("decorative face still obeys mood and cooldown",
+      len(decorated.result.chain) == 1 and getattr(decorated.result.chain[0], "text", "") == "知道了。")
+silent = _FaceResultEvent("[NO_REPLY]")
+asyncio.run(quiet_faces.convert_faces(silent))
+check("explicit silence remains silent", not silent.result.chain)
+
 if failures:
     print("结果：%d 项失败" % len(failures))
     sys.exit(1)

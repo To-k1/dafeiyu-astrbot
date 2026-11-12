@@ -73,18 +73,19 @@ function renderContent(){
   $('#journal-title').textContent=titles[zone];$('#journal-index').textContent=`0${['desk','shelf','window','rest'].indexOf(zone)+1} / 04`;
   $$('button[data-zone]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.zone===zone)));$$('[data-art]').forEach(g=>g.classList.toggle('selected',g.dataset.art===zone));
   const aff=s.affect,pill=$('#room-affect-pill'),card=$('#journal-affect-card');
-  if(aff&&aff.state!=='unavailable'){
+  if(aff&&aff.state!=='unavailable'&&aff.has_saved_state!==false){
     if(pill){
       pill.hidden=false;const tag=aff.dominant_tag||'平常陪伴';$('#room-affect-tag').textContent=tag;
       const dot=$('#room-affect-dot'),moodKind=(aff.pout>0.3)?'pout':(aff.valence>0.3&&aff.arousal>0.5)?'joy':(aff.valence>0.1)?'calm':(aff.arousal<0.35)?'tender':'calm';
       dot.dataset.mood=moodKind;const hasCares=aff.care_threads&&aff.care_threads.length>0;$('#room-care-badge').hidden=!hasCares;
       if(hasCares)$('#room-care-badge').setAttribute('aria-label',`牵挂事项：${aff.care_threads.length} 件`);
-      pill.title=`心境：${tag} · 愉悦 ${Math.round(aff.valence*100)}% · 精力 ${Math.round(aff.arousal*100)}%`+(hasCares?` · 惦记着 ${aff.care_threads.length} 件事`:'');
+      pill.title=`最后保存的心境：${tag} · 愉悦 ${Math.round(aff.valence*100)}% · 精力 ${Math.round(aff.arousal*100)}%`+(hasCares?` · 惦记着 ${aff.care_threads.length} 件事`:'');
     }
     if(card){
       card.hidden=false;const moodText=(aff.pout>0.3)?'傲娇别扭 · 嘴硬心软':(aff.valence>0.35&&aff.arousal>0.55)?'欢快雀跃 · 精神百倍':(aff.valence>0.15)?'温和恬静 · 平常相伴':(aff.arousal<0.3)?'轻柔安静 · 适合小憩':'平稳陪伴';
+      card.querySelector('.affect-card-label').textContent=demo?'演示心境':'最后保存的心境';
       $('#card-affect-tag').textContent=(aff.dominant_tag?`${aff.dominant_tag} · `:'')+moodText;
-      const desc=(aff.softened_mode&&aff.softened_mode!=='none')?'刚刚被哄好/正在专注帮忙，心软下来认真对待。':(aff.pout>0.3)?'前头等了主人好一阵子，嘴上哼哼着嘴硬，其实哄一下就软啦。':(aff.valence>0.3)?'心情轻快温热，说话带着点想献宝的雀跃劲儿。':(aff.arousal<0.3)?'夜色渐深或是有点困倦，声音也跟着放轻放慢。':'小天地里安安静静，生活继续按自己的步调走着。';
+      const desc=(aff.softened_mode&&aff.softened_mode!=='none')?'保存时记录到专注、关切或心软的倾向。':(aff.pout>0.3)?'保存时有一点别扭。':(aff.valence>0.3)?'保存时心情轻快。':(aff.arousal<0.3)?'保存时精力偏低。':'保存时心境平稳。';
       $('#card-affect-desc').textContent=desc;
       const cares=aff.care_threads||[],caresBox=$('#card-affect-cares'),careList=$('#card-care-list');
       if(caresBox&&careList){if(cares.length>0){caresBox.hidden=false;careList.replaceChildren();for(const c of cares)careList.append(node('li','',c.topic));}else caresBox.hidden=true;}

@@ -1,0 +1,39 @@
+--- a/astrbot/core/pipeline/result_decorate/stage.py
++++ b/astrbot/core/pipeline/result_decorate/stage.py
+@@ -17,2 +17,3 @@
++from ..chat_layout import make_tts_text, merge_unclosed_pairs
+ from ..context import PipelineContext
+ from ..stage import Stage, register_stage, registered_stages
+@@ -247,6 +248,7 @@
+                             if not split_response:
+                                 new_chain.append(comp)
+                                 continue
++                            cleaned_segments = []
+                             for seg in split_response:
+                                 if self.content_cleanup_rule:
+                                     try:
+@@ -260,7 +262,9 @@
+                                         self.content_cleanup_rule = None
+                                 seg = seg.strip()
+                                 if seg:
+-                                    new_chain.append(Plain(seg))
++                                    cleaned_segments.append(seg)
++                            for seg in merge_unclosed_pairs(cleaned_segments):
++                                new_chain.append(Plain(seg))
+                         else:
+                             # 非 Plain 类型的消息段不分段
+                             new_chain.append(comp)
+@@ -317,10 +321,11 @@
+             if should_tts and tts_provider:
+                 new_chain = []
+                 for comp in result.chain:
+-                    if isinstance(comp, Plain) and len(comp.text) > 1:
++                    speech_text = make_tts_text(comp.text) if isinstance(comp, Plain) else ""
++                    if speech_text:
+                         try:
+                             logger.info(f"TTS request: {comp.text}")
+-                            audio_path = await tts_provider.get_audio(comp.text)
++                            audio_path = await tts_provider.get_audio(speech_text)
+                             logger.info(f"TTS result: {audio_path}")
+                             if not audio_path:
+                                 logger.error(

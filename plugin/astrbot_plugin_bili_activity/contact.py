@@ -10,6 +10,7 @@ from .core import digest, quiet_now
 
 DEFAULTS = {
     "contact_coordination_enabled": False,
+    "contact_coordination_required": False,
     "contact_daily_limit": 3,
     "contact_cooldown_minutes": 90,
     "contact_owner_quiet_minutes": 5,
@@ -25,8 +26,9 @@ class ContactBlocked(PermissionError):
 
 
 def validate_config(cfg):
-    if not isinstance(cfg["contact_coordination_enabled"], bool):
-        raise ValueError("contact_coordination_enabled 必须是布尔开关")
+    for key in ("contact_coordination_enabled", "contact_coordination_required"):
+        if not isinstance(cfg.get(key, False), bool):
+            raise ValueError(f"{key} 必须是布尔开关")
     for name, (low, high) in LIMITS.items():
         value = cfg[name]
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -39,6 +41,11 @@ def content_hash(text):
 
 def day(now):
     return datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai")).date().isoformat()
+
+
+def contact_paused(store, scope, now):
+    state = store.get_setting("contact_pause:" + scope)
+    return isinstance(state, dict) and (state.get("day") is None or state["day"] == day(now))
 
 
 class ContactLedger:
@@ -57,9 +64,16 @@ class ContactLedger:
         """)
 
     def owner_message(self, scope, event_id, now=None):
-        if event_id:
-            self.db.execute("INSERT OR IGNORE INTO contact_owner_events VALUES(?,?,?)",
-                            (scope, str(event_id), time.time() if now is None else now))
+        if not event_id:
+            return False
+        return self.db.execute("INSERT OR IGNORE INTO contact_owner_events VALUES(?,?,?)",
+                               (scope, str(event_id), time.time() if now is None else now)).rowcount == 1
+
+    def set_pause(self, scope, mode, now=None):
+        now = time.time() if now is None else now
+        self.store.setting("contact_pause:" + scope, None if mode == "resume" else {
+            "day": day(now) if mode == "today" else None,
+        })
 
     def owner_time(self, scope):
         return self.db.execute("SELECT coalesce(max(received),0) FROM contact_owner_events WHERE scope=?",
@@ -79,6 +93,8 @@ class ContactLedger:
         if (scope != cfg["owner_scope"] or not re.fullmatch(r"[^:]+:FriendMessage:\d+", scope)
                 or scope.rsplit(":", 1)[-1] != str(cfg["owner_id"])):
             raise ContactBlocked("主动联系仅用于已配置的主人私聊")
+        if contact_paused(self.store, scope, now):
+            raise ContactBlocked("主人已暂停主动联系")
         if cfg["dnd_ranges"] is None or quiet_now(cfg["dnd_ranges"], datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai"))):
             raise ContactBlocked("现在是免打扰时间")
         aff_profile = None
@@ -116,7 +132,7 @@ class ContactLedger:
 
     def reserve(self, scope, source, key, kind, fingerprint, cfg, now=None):
         now = time.time() if now is None else now
-        if source not in {"life", "proactive_chat"} or kind not in {"thought", "screenshot", "work", "proposal", "chat"}:
+        if source not in {"life", "proactive_chat"} or kind not in {"thought", "screenshot", "work", "proposal", "chat", "notice"}:
             raise ValueError("unknown contact source or kind")
         if not isinstance(key, str) or not 1 <= len(key) <= 300 or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
             raise ValueError("invalid contact key or fingerprint")
@@ -186,6 +202,7 @@ class ContactLedger:
                                (scope, day(now))).fetchone()[0]
         return {"enabled": cfg["contact_coordination_enabled"], "day": day(now), "used": used,
                 "limit": cfg["contact_daily_limit"], "last_owner_message": self.owner_time(scope), "recent": rows[:8],
+                "paused": contact_paused(self.store, scope, now),
                 "meaning": "sent有消息ID；reported仅是社区发送器报告；uncertain不自动重发。"}
 
 
@@ -203,6 +220,10 @@ class ContactAPI:
 
     def check(self, scope):
         self.ledger().check(scope, self.plugin.cfg())
+
+    def generation_provider(self, scope):
+        self.check(scope)
+        return self.plugin.autonomous_provider()
 
     def reserve(self, scope, key, text):
         return self.ledger().reserve(scope, "proactive_chat", key, "chat", content_hash(text), self.plugin.cfg())

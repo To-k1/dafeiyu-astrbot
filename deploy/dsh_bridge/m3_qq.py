@@ -14,6 +14,8 @@ from .dsh_remote import RemoteDshClient
 
 
 LIFE_BRIDGE = "fishhome_dsh_life_client"
+COMMISSION_BRIDGE = "fishhome_dsh_commission_client"
+COMMISSION_PORT = 59935
 
 
 @register("astrbot_plugin_dsh_bridge", "Fantasality / FishHome", "M3 DSH 连接验收", "1.0.0")
@@ -22,19 +24,35 @@ class Main(Star):
         super().__init__(context)
         self.settings = StarTools.get_data_dir("astrbot_plugin_dsh_bridge") / "m3.json"
         self._life_client = self.life_client
+        self._commission_client = self.commission_client
 
     async def initialize(self):
         setattr(self.context, LIFE_BRIDGE, self._life_client)
+        setattr(self.context, COMMISSION_BRIDGE, self._commission_client)
 
     async def terminate(self):
         if getattr(self.context, LIFE_BRIDGE, None) is self._life_client:
             delattr(self.context, LIFE_BRIDGE)
+        if getattr(self.context, COMMISSION_BRIDGE, None) is self._commission_client:
+            delattr(self.context, COMMISSION_BRIDGE)
 
     def life_client(self, scope):
         cfg = json.loads(self.settings.read_text(encoding="utf-8"))
         if not scope or scope != cfg["owner_scope"]:
             raise PermissionError("DSH only serves the configured owner scope")
         return RemoteDshClient(session_cookie=cfg["session_cookie"])
+
+    def commission_client(self, scope, source=None):
+        cfg = json.loads(self.settings.read_text(encoding="utf-8"))
+        if not scope or scope != cfg["owner_scope"]:
+            raise PermissionError("DSH only serves the configured owner scope")
+        if not cfg.get("commission_cookie") or not cfg.get("commission_workspace"):
+            raise ValueError("交互文件执行服务尚未启用。")
+        if source is not None:
+            if source not in cfg.get("commission_sources", []):
+                raise ValueError("该文件未加入台式机的受托任务范围。")
+            return cfg["commission_workspace"]
+        return RemoteDshClient(port=COMMISSION_PORT, session_cookie=cfg["commission_cookie"])
 
     def owner_event(self, event):
         try:
@@ -66,7 +84,7 @@ class Main(Star):
             info = await self.cost_balance()
             reply = "人民币计费入口尚未配置。"
             if info:
-                reply = f"预算日 {info['day']}（北京时间 04:00 切换）"
+                reply = f"预算日 {info['day']}（北京时间 00:00 切换）"
                 for key, label in (("interaction", "交互"), ("autonomous", "自主")):
                     entry = info["ledgers"][key]
                     reply += f"\n{label}剩 ¥{entry['remaining']} / ¥{entry['limit']}，预留 ¥{entry['reserved']}"

@@ -109,7 +109,7 @@ class MemoryPolicy:
         result = {"kind": row["kind"], "source": refs}
         if isinstance(thought, str) and thought.strip():
             result["agent_interpretation_not_fact"] = thought[:160]
-        if isinstance(interest, dict):
+        if isinstance(interest, dict) and opinion.get("explicit_polarity") is not False:
             result["attributed_interest"] = {k: interest[k] for k in ("topic", "polarity") if k in interest}
         felt_tone = row.get("felt_tone") or opinion.get("felt_tone")
         if not felt_tone and isinstance(opinion.get("affect_tag"), dict):
@@ -151,7 +151,10 @@ class MemoryPolicy:
         for row in self._recent(scope):
             if row["kind"] != "interest" or row["subject_kind"] != "agent" or not _known_time(row["occurred_at"], now):
                 continue
-            interest = row["interpretation"].get("interest")
+            appraisal = row["interpretation"]
+            if appraisal.get("explicit_polarity") is False:
+                continue
+            interest = appraisal.get("interest")
             if not isinstance(interest, dict):
                 continue
             topic, polarity = interest.get("topic"), interest.get("polarity")

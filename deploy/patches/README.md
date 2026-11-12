@@ -13,6 +13,14 @@
 ⚠️ **升级 AstrBot 版本时**，请在新版对应文件上**重新打补丁**，不要直接沿用本目录文件
 （版本不匹配可能引入行为差异）。仓库钉的已验证组合见 `../Dockerfile` 与 `../compose.yaml`。
 
+## Windows AstrBot 4.29.4 聊天分段
+
+停 AstrBot 后，将本目录的 `chat_layout.py` 复制到该虚拟环境的
+`Lib/site-packages/astrbot/core/pipeline/chat_layout.py`。在 `Lib/site-packages` 下先用
+`git apply --check` 校验 `astrbot_4.29.4_chat_media.patch`，再用 `git apply` 安装。
+补丁复用上游成对符号合并逻辑，并在已有 TTS 调用前清理表情标记。AstrBot 的分段和语音仍由各自设置控制。
+停机后可用 `git apply --reverse` 回退，再移出此前不存在的 `chat_layout.py`。
+
 ## tts_emotion_router 插件补丁
 
 `tts_emotion_router_native_speak.diff` 把社区插件 `astrbot_plugin_tts_emotion_router`

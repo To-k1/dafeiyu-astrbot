@@ -1,0 +1,16 @@
+--- a/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
++++ b/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
+@@ -146,6 +146,13 @@
+         ):
+             return None
+
++        # FishHome: require the real OneBot message ID before conversion.
++        raw_id = event.get("message_id")
++        digits = str(raw_id).removeprefix("-") if type(raw_id) in (int, str) else ""
++        if not digits.isascii() or not digits.isdecimal():
++            logger.warning("FishHome: rejected owner QQ message without a valid OneBot ID")
++            return None
++
+         logger.debug(f"[aiocqhttp] RawMessage {event}")
+
+         if event["post_type"] == "message":

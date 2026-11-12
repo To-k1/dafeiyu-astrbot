@@ -8,7 +8,7 @@ import time
 import types
 import unittest
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import test_bili_activity as fixtures
@@ -411,8 +411,11 @@ class ProjectIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.store.setting("life_paused:"+SCOPE, True)
         await self.plugin.run_activity("periodic")
         self.plugin.store.setting("life_paused:"+SCOPE, False)
-        self.plugin.activity_budget().start_run(SCOPE, "exhausted", 30*60, self.config)
-        await self.plugin.run_activity("periodic")
+        # Keep the entire reservation in one Shanghai budget day.
+        now = datetime(2026, 11, 11, 4, tzinfo=timezone.utc).timestamp()
+        with patch.object(main.time, "time", return_value=now):
+            self.plugin.activity_budget().start_run(SCOPE, "exhausted", 30 * 60, self.config)
+            await self.plugin.run_activity("periodic")
         self.plugin.agent.assert_not_called()
         self.assertEqual(self.calls, [])
 

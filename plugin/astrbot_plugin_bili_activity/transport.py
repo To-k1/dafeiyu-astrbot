@@ -12,6 +12,7 @@ import re
 import time
 import uuid
 import warnings
+import wave
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -337,7 +338,12 @@ class QQDelivery:
             raise PermissionError("截图和主动消息仅允许发送到配置的主人私聊")
         return pieces[0], int(pieces[2])
 
-    async def send(self, scope: str, text: str, image_path=None):
+    def ready(self, scope):
+        platform_id, _ = self._target(scope)
+        bot = getattr(self.context.get_platform_inst(platform_id), "bot", None)
+        return bool(getattr(bot, "_wsr_api_clients", None))
+
+    async def send(self, scope: str, text: str, image_path=None, *, record_path=None):
         platform_id, target = self._target(scope)
         platform = self.context.get_platform_inst(platform_id)
         bot = getattr(platform, "bot", None)
@@ -361,6 +367,18 @@ class QQDelivery:
                 "type": "image",
                 "data": {"file": "base64://" + base64.b64encode(raw).decode("ascii")},
             })
+        if record_path is not None:
+            path = Path(record_path)
+            if not path.is_absolute() or not path.is_file() or path.stat().st_size > 2_000_000:
+                raise TransportError("语音文件无效或超过发送大小限制")
+            raw = await asyncio.to_thread(path.read_bytes)
+            try:
+                with wave.open(io.BytesIO(raw)) as audio:
+                    if not audio.getnframes():
+                        raise wave.Error("empty WAV")
+            except (wave.Error, EOFError):
+                raise TransportError("语音文件不是有效的 WAV") from None
+            message.append({"type": "record", "data": {"file": "base64://" + base64.b64encode(raw).decode("ascii")}})
         if not message:
             raise ValueError("empty message")
 
@@ -407,13 +425,20 @@ class QQDelivery:
                     receipt["readback_error"] = "recipient_mismatch"
                     break
                 receipt["image_readback"] = _image_present(readback.get("message"))
+                if record_path is not None:
+                    segments = readback.get("message")
+                    receipt["record_readback"] = (
+                        any(isinstance(item, dict) and item.get("type") == "record" for item in segments)
+                        if isinstance(segments, list) else "[CQ:record," in str(segments)
+                    )
                 receipt["readback_verified"] = (
-                    image_path is None or receipt["image_readback"]
+                    (image_path is None or receipt["image_readback"])
+                    and (record_path is None or receipt["record_readback"])
                 )
                 receipt["verified"] = receipt["readback_verified"]
                 receipt["readback_target_verified"] = destination is not None
                 if not receipt["verified"]:
-                    receipt["readback_error"] = "image_segment_missing"
+                    receipt["readback_error"] = "media_segment_missing" if record_path is not None else "image_segment_missing"
                 break
             except asyncio.CancelledError:
                 raise

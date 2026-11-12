@@ -66,6 +66,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.session_cfg = {"tts_settings": {"enable_tts": False}, "segmented_reply_settings": {"enable": False}}
         self.event = types.SimpleNamespace(send=AsyncMock(return_value=True), clear_result=Mock())
         namespace = {"coordinated_send": bridge.coordinated_send, "before_dispatch": bridge.before_dispatch,
+            "StopContact": bridge.StopContact,
             "Plain": Plain, "Record": Record, "MessageChain": lambda c: types.SimpleNamespace(chain=c),
             "logger": Mock(), "EventType": None, "is_group_umo": lambda s: False,
             "merge_unclosed_pairs": lambda segments: list(segments or ()),
@@ -124,7 +125,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.sender.send_proactive_message(fixtures.SCOPE, "只发一次", self.event))
         self.assertEqual(self.event.send.await_count, 1)
 
-    async def test_missing_or_reloading_coordinator_blocks_and_disabled_keeps_legacy(self):
+    async def test_missing_reloading_or_disabled_coordinator_blocks(self):
         self.setup_bridge()
         self.plugin.context.dafeiyu_contact_v1.active = False
         self.assertFalse(await self.sender.send_proactive_message(fixtures.SCOPE, "协调器停了", self.event))
@@ -133,13 +134,30 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.event.send.assert_not_awaited()
         self.config["contact_coordination_enabled"] = False
         self.save_config()
-        self.assertTrue(await self.sender.send_proactive_message(fixtures.SCOPE, "保持旧行为", self.event))
-        self.event.send.assert_awaited_once()
+        self.assertFalse(await self.sender.send_proactive_message(fixtures.SCOPE, "不走旧入口", self.event))
+        self.event.send.assert_not_awaited()
 
     async def test_other_scope_does_not_consume_owner_capacity(self):
         self.setup_bridge()
-        self.assertTrue(await self.sender.send_proactive_message("qq:FriendMessage:999", "其他会话", self.event))
+        self.assertFalse(await self.sender.send_proactive_message("qq:FriendMessage:999", "其他会话", self.event))
+        self.event.send.assert_not_awaited()
         self.assertEqual(self.status()["used"], 0)
+
+    async def test_missing_contact_file_denies_send(self):
+        self.setup_bridge()
+        self.plugin.control.unlink()
+        self.assertFalse(await self.sender.send_proactive_message(fixtures.SCOPE, "控制文件缺失", self.event))
+        self.event.send.assert_not_awaited()
+
+    async def test_unknown_event_delivery_stops_segments_without_fallback(self):
+        self.setup_bridge()
+        self.session_cfg["segmented_reply_settings"] = {"enable": True, "split_mode": "words", "split_words": ["。"]}
+        self.event.send.side_effect = TimeoutError()
+        self.sender.send_chain_direct = AsyncMock()
+        self.assertFalse(await self.sender.send_proactive_message(fixtures.SCOPE, "第一句。第二句。", self.event))
+        self.event.send.assert_awaited_once()
+        self.sender.send_chain_direct.assert_not_awaited()
+        self.assertEqual(self.status()["recent"][0]["status"], "uncertain")
 
     async def test_tts_and_text_share_one_reservation(self):
         self.setup_bridge()
@@ -157,6 +175,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         # This minimal plugin has no provider; reaching generation would raise.
         self.assertEqual(await llm.generate_llm_response(fixtures.SCOPE, {}, [], "hello", 0), (None, ""))
         self.event.send.assert_not_awaited()
+
+    async def test_generation_uses_only_the_validated_autonomous_provider(self):
+        self.setup_bridge()
+        provider = fixtures.configure_autonomous(self.plugin, self.config)
+        self.save_config()
+        context = self.plugin.context
+        context.get_current_chat_provider_id = AsyncMock(return_value="interaction")
+        context.get_using_provider = Mock(return_value=object())
+        self.community.context_service = types.SimpleNamespace(sanitize_history_content=list)
+        self.community.telemetry = None
+        response = types.SimpleNamespace(completion_text="近况")
+        invoke = AsyncMock(return_value=response)
+        llm = actual_class("llm_service.py", "LlmService", {
+            "preflight": bridge.preflight,
+            "format_current_time": lambda _: "12:00",
+            "logger": Mock(),
+            "build_provider_request": lambda **kwargs: types.SimpleNamespace(**kwargs),
+            "invoke_provider": invoke,
+        })(self.community)
+        self.community.timezone = None
+        llm.build_extra_content_parts = Mock(return_value=[])
+        llm.attach_web_search_tools = AsyncMock()
+        llm.dispatch_llm_request_hooks = AsyncMock(return_value=False)
+        llm.dispatch_llm_response_hooks = AsyncMock(return_value=False)
+        llm.run_tool_loop = AsyncMock(return_value=response)
+        args = (fixtures.SCOPE, {"proactive_prompt": "近况"}, [], "hello", 0)
+
+        self.assertEqual(await llm.generate_llm_response(*args), (response, "近况"))
+        self.assertIs(invoke.await_args.args[0], provider)
+        self.assertIs(llm.run_tool_loop.await_args.args[0], provider)
+        invoke.reset_mock()
+        for base in ("http://127.0.0.1:6197/openai/interaction/v1", "https://api.deepseek.com/v1"):
+            with self.subTest(base=base):
+                provider.provider_config["api_base"] = base
+                self.assertEqual(await llm.generate_llm_response(*args), (None, ""))
+        context.get_provider_by_id = Mock(return_value=None)
+        self.assertEqual(await llm.generate_llm_response(*args), (None, ""))
+        invoke.assert_not_awaited()
+        context.get_current_chat_provider_id.assert_not_awaited()
+        context.get_using_provider.assert_not_called()
 
     async def test_concurrent_sources_reserve_before_first_await(self):
         self.setup_bridge()
@@ -197,18 +255,21 @@ class InstallTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "plugin"
         (self.root / "core/services").mkdir(parents=True)
         (self.root / "core/adapters").mkdir()
+        release = Path(self.temp.name) / "patch"
+        release.mkdir()
+        for src in installer.FILES.values():
+            (release / src).write_bytes((PATCH / src).read_bytes())
+        manifest = json.loads((PATCH / "contact_manifest.json").read_text(encoding="utf-8"))
         for rel, src in installer.FILES.items():
             if src == "contact_bridge.py":
                 continue
-            text = (PATCH / src).read_text(encoding="utf-8")
-            if src == "sender_service.py":
-                # 分泡修复后，剥离 contact 行不再等于上游基线；这里直接使用
-                # 当前补丁源，让 installer.check 看到 "current"（幂等）。
-                pass
-            else:
-                text = text.replace("from .contact_bridge import preflight\n", "")
-                text = text.replace('        if not preflight(plugin, session_id):\n            return None, ""\n', "")
+            text = f"# {src} from the pinned installation fixture.\n"
             (self.root / rel).write_text(text, encoding="utf-8")
+            manifest["expected_base_sha256"][rel] = installer.signature(self.root / rel)
+        (release / "contact_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        override = patch.object(installer, "HERE", release)
+        override.start()
+        self.addCleanup(override.stop)
         (self.root / "core/adapters/astrbot_provider.py").write_bytes((PATCH / "astrbot_provider.py").read_bytes())
 
     def tearDown(self):
@@ -217,7 +278,7 @@ class InstallTests(unittest.TestCase):
     def test_pinned_hashes_check_without_writes_install_backup_and_idempotency(self):
         before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*.py")}
         _, plan = installer.check(self.root)
-        self.assertEqual([p["state"] for p in plan], ["current", "install", "install"])
+        self.assertEqual([p["state"] for p in plan], ["install"] * 3)
         self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*.py")})
         backup = Path(installer.install(self.root))
         changed = {Path(p["path"]) for p in plan if p["state"] != "current"}
@@ -225,6 +286,16 @@ class InstallTests(unittest.TestCase):
             if rel in before:
                 self.assertEqual((backup / rel).read_bytes(), before[rel])
         self.assertIsNone(installer.install(self.root))
+
+    def test_current_sender_is_left_in_place_while_other_files_install(self):
+        rel = "core/services/sender_service.py"
+        current = (PATCH / "sender_service.py").read_bytes()
+        (self.root / rel).write_bytes(current)
+        _, plan = installer.check(self.root)
+        self.assertEqual([p["state"] for p in plan], ["current", "install", "install"])
+        backup = Path(installer.install(self.root))
+        self.assertEqual((self.root / rel).read_bytes(), current)
+        self.assertFalse((backup / rel).exists())
 
     def test_unrecognized_source_is_refused_without_backup_or_overwrite(self):
         target = self.root / "core/services/sender_service.py"

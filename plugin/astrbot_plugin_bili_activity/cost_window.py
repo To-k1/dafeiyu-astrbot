@@ -1,6 +1,6 @@
 """Beijing billing days and peak windows shared by dispatch and accounting."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
@@ -14,7 +14,7 @@ HOLIDAYS_2026 = (
 
 
 def budget_day(now):
-    return (datetime.fromtimestamp(now, SHANGHAI) - timedelta(hours=4)).date().isoformat()
+    return datetime.fromtimestamp(now, SHANGHAI).date().isoformat()
 
 
 def peak_end(now, holidays=HOLIDAYS_2026):

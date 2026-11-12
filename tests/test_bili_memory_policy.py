@@ -207,6 +207,50 @@ class MemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def flush(self, event=None):
         await main.BiliActivity.flush_memory(self.plugin, event or fixtures.FakeEvent())
 
+    async def test_dsh_candidate_requires_selection_in_owner_chat(self):
+        self.enable()
+        tool = self.mock_lm()
+        candidate = "dsh-file:" + "a" * 32
+        self.plugin.store.queue_memory(SCOPE, "报告 output/test.md，来源 sample.csv", candidate)
+        await self.flush()
+        tool.call.assert_not_awaited()
+
+        def qq_event(**kwargs):
+            event = fixtures.FakeEvent(**kwargs)
+            event.message_obj.raw_message = {"post_type": "message", "message_type": "private", "sub_type": "friend"}
+            event.get_platform_name = lambda: "aiocqhttp"
+            return event
+
+        owner = qq_event()
+        owner.set_extra = owner._extra.__setitem__
+        result = json.loads(await self.plugin.memory_candidate(owner, "list"))
+        self.assertEqual(result["candidates"], [{"id": candidate, "summary": "报告 output/test.md，来源 sample.csv"}])
+        for event in (qq_event(scope=OTHER), qq_event(user="98765"),
+                      qq_event(run_id="background"), fixtures.FakeEvent()):
+            with self.assertRaises(PermissionError):
+                await self.plugin.memory_candidate(event, "save", candidate)
+
+        tool.name, tool.description, tool.parameters = "memorize_long_term_memory", "", {}
+        request = types.SimpleNamespace(system_prompt="", func_tool=fixtures.ToolSet([tool]), contexts=[])
+        await self.plugin.guard_phone(owner, request)
+        generic = request.func_tool.tools[0]
+        ctx = types.SimpleNamespace(context=types.SimpleNamespace(event=owner))
+        await generic.call(ctx, memory="另存 " + candidate)
+        await generic.call(ctx, memory=f"另存 output\\{'a' * 32}.md")
+        tool.call.assert_not_awaited()
+        await generic.call(ctx, memory="普通记忆")
+        tool.call.assert_awaited_once()
+        tool.call.reset_mock()
+
+        result = json.loads(await self.plugin.memory_candidate(owner, "save", candidate))
+        self.assertEqual(result, {"status": "saved", "livingmemory_id": "fake-memory"})
+        await self.plugin.memory_candidate(owner, "save", candidate)
+        await generic.call(ctx, memory="再另记一次刚保存的候选")
+        await self.flush()
+        tool.call.assert_awaited_once()
+        self.assertIn("sample.csv", tool.call.await_args.kwargs["memory"])
+        self.assertEqual(tool.call.await_args.kwargs["reason"], candidate)
+
     def sources(self):
         first = interest(self.plugin.store, "BV1")
         interest(self.plugin.store, "BV2")

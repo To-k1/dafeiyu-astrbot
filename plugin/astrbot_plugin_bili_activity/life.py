@@ -806,7 +806,10 @@ class LifeState:
         now = time.time()
         for raw in rows:
             row = self._episode(raw)
-            interest = row["interpretation"].get("interest")
+            appraisal = row["interpretation"]
+            if appraisal.get("explicit_polarity") is False:
+                continue
+            interest = appraisal.get("interest")
             if not isinstance(interest, dict):
                 continue
             topic, polarity = interest.get("topic"), interest.get("polarity")

@@ -12,6 +12,7 @@ import socket
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -135,6 +136,26 @@ class ImageTests(unittest.TestCase):
 
 
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_voice_delivery_has_a_record_segment_and_readback(self):
+        bot = FakeBot(readback={
+            "message_id": 42, "message_type": "private", "target_id": 123,
+            "message": [{"type": "record", "data": {"file": "clip.amr"}}],
+        })
+        with tempfile.TemporaryDirectory() as folder:
+            clip = Path(folder, "clip.wav")
+            with wave.open(str(clip), "wb") as audio:
+                audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\x00\x00" * 240)
+            receipt = await delivery(bot).send("qq:FriendMessage:123", "", record_path=clip)
+            action, request = bot.calls[0]
+            self.assertEqual((action, request["user_id"]), ("send_private_msg", 123))
+            segment, = request["message"]
+            self.assertEqual(segment["type"], "record")
+            self.assertEqual(base64.b64decode(segment["data"]["file"].split("://")[1]), clip.read_bytes())
+        self.assertEqual(receipt["message_id"], "42")
+        self.assertTrue(receipt["record_readback"])
+        self.assertEqual(sum(action == "send_private_msg" for action, _ in bot.calls), 1)
+
     async def test_real_sse_and_streamable_http_mcp_lifecycle(self):
         # A protocol server on loopback exercises initialize/call/teardown,
         # including the supported MCP SDK's actual timeout parameter types.

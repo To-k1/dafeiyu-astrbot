@@ -11,11 +11,15 @@
 3. 在「人民币预算与凭据」保存 DSH 专用标准账户密码、DeepSeek 官方 Key，查看并调节两个账本。可选择只影响本预算日或修改默认额度。
 4. 「各模块设置与日志位置」可打开对应目录。AstrBot 的模型、LivingMemory、工具权限在 AstrBot 面板管理。活动插件、自主调度、DSH 文件权限使用各自的配置。
 
+「深海工作台」首页的「去看看肥鱼」打开原版房间，旁边可打开记忆星海、AstrBot、NapCat 和 DSH WebUI。右上可切换深海模式与黑夜模式。
+
+「备份与记忆」可在线生成本机 SQLite 归档、导出可读记忆并查看桌面备份历史。归档写到 `%FISH_HOME%\backups`，导出写到 `%FISH_HOME%\exports`。在线备份分别对长期记忆、活动账本和已安装心境中枢的 `affective.db` 取一致性快照，排除向量索引和原始聊天库。需要含索引的停写归档和隔离恢复时使用 [fish.ps1](../scripts/README.md)。
+
 当前试跑配置只接收管理员 QQ 私聊。公共写入和自主活动处于关闭状态。公共写入总开关在「FishHome 本机设置」，平台开关、审批和额度仍在各模块。控制台启动的 B 站伴侣始终使用只读配置，当前试跑无需导入 Cookie。Ollama 使用当前 Windows 用户的持久模型目录 `%USERPROFILE%\.ollama\models`，通过本机 Vulkan 路径加载 `bge-m3`。
 
 ## 人民币计费
 
-- 管理员 QQ 私聊发送 `/额度`，可查看交互与自主两本人民币账，默认各 ¥5，北京时间 04:00 换日。
+- 管理员 QQ 私聊发送 `/额度`，可查看交互与自主两本人民币账，默认各 ¥5，北京时间 00:00 换日。
 - 更新官方 DeepSeek API Key 时，在「本机凭据与计费接入」保存后重启「人民币计费」。Key 由 Windows DPAPI 加密保存。待填写期间可查询账本，收费请求在本机返回 503。
 - 台式机 AstrBot 的 Flash 请求进入交互账本，DSH 的 Flash 请求进入自主账本。两条路径依赖托盘启动时注入的进程环境。更多配置见 [M5 验收记录](M5_ACCEPTANCE.md)。
 
@@ -24,6 +28,12 @@
 开发源在 `deploy/desktop_manager`。从仓库运行 `powershell -File deploy/desktop_manager/install.ps1`，使用 Windows 自带 .NET Framework 编译器生成 `%FISH_HOME%\dev\FishHome.exe`。运行时复用开发实例的 AstrBot Python 环境。覆盖 EXE 前先退出托盘控制台。安装保留旧启动脚本 `Start-FishHome.before-tray.cmd`。`-InstallBudgetBridge` 更新计费 Bridge 并备份原源码。`-InstallActivity` 在 AstrBot 停止时更新活动插件源码并保留原插件副本。运行配置和账本仍在 `data\plugin_data`。本机日志、进程识别记录和加密凭据都在 `%LOCALAPPDATA%\FishHome\manager`。
 
 WebUI 只监听 `127.0.0.1:6196`，由托盘打开的浏览器会话可操作服务。DSH 仍在 `FishHomeRunner` 下运行，托盘启动后会更新签名票据。NapCat 复用原脚本的快登配置。正式 ThinkBook 的路径和启动策略另行验收。
+
+## 界面、图标和人格源码
+
+- **控制台 WebUI** 的 HTML、CSS 和 JavaScript 都在 [index.html](../deploy/desktop_manager/index.html)。修改页面后刷新控制台即可预览。服务 API 在 [manager.py](../deploy/desktop_manager/manager.py)。
+- **鲸鱼图标** 使用用户提供的 PNG 派生 [网页图标](../deploy/desktop_manager/fishhome.png) 和 [Windows 多尺寸 ICO](../deploy/desktop_manager/fishhome.ico)。[install.ps1](../deploy/desktop_manager/install.ps1#L27) 将 ICO 编译到 EXE，[Tray.cs](../deploy/desktop_manager/Tray.cs#L81) 从 EXE 读取托盘图标。
+- **大肥鱼人格** 的当前版本与回退操作见 [人格目录](../persona/README.md)。课程内容另放在 [课程记忆-模板.md](../persona/课程记忆-模板.md)。
 
 ## 台式机实测
 

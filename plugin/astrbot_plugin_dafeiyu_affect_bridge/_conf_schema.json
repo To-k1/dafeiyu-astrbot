@@ -1,0 +1,22 @@
+{
+  "owner_scope": {
+    "description": "授权的 OneBot 主人好友私聊 UMO",
+    "type": "string",
+    "default": ""
+  },
+  "owner_id": {
+    "description": "授权的主人 QQ ID",
+    "type": "string",
+    "default": ""
+  },
+  "chat_background_enabled": {
+    "description": "在原版心境处理后注入一段可选背景",
+    "type": "bool",
+    "default": false
+  },
+  "life_events_enabled": {
+    "description": "接收经过活动插件验证的评价事件",
+    "type": "bool",
+    "default": false
+  }
+}

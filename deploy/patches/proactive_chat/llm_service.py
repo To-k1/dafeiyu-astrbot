@@ -109,31 +109,6 @@ class LlmService:
     # ------------------------------------------------------------------
     # Provider 解析
     # ------------------------------------------------------------------
-    async def resolve_chat_provider(self, session_id: str) -> Any:
-        """解析用于本轮请求的 Provider 实例。"""
-        plugin = self.plugin
-        provider_id = None
-        try:
-            provider_id = await plugin.context.get_current_chat_provider_id(session_id)
-        except Exception as e:
-            logger.warning(f"[主动消息] 获取当前对话 Provider 失败喵: {e}")
-
-        if provider_id:
-            try:
-                provider = await plugin.context.provider_manager.get_provider_by_id(
-                    provider_id
-                )
-                if provider:
-                    return provider
-            except Exception as e:
-                logger.warning(f"[主动消息] 按 ID 获取 Provider 失败喵: {e}")
-
-        try:
-            return plugin.context.get_using_provider(umo=session_id)
-        except Exception as e:
-            logger.warning(f"[主动消息] 回退获取 Provider 失败喵: {e}")
-            return None
-
     # ------------------------------------------------------------------
     # 工具调用（主动消息补丁：让主动开口也能联网搜索）
     # ------------------------------------------------------------------
@@ -312,7 +287,8 @@ class LlmService:
     ) -> tuple[Any | None, str]:
         """统一 LLM 调用入口。"""
         plugin = self.plugin
-        if not preflight(plugin, session_id):
+        provider = preflight(plugin, session_id)
+        if provider is None:
             return None, ""
         motivation_template = session_config.get("proactive_prompt", "") or ""
         now_str = format_current_time(plugin.timezone)
@@ -331,11 +307,6 @@ class LlmService:
             unanswered_count=unanswered_count,
             session_config=session_config,
         )
-
-        provider = await self.resolve_chat_provider(session_id)
-        if not provider:
-            logger.warning("[主动消息] 未找到 LLM Provider，放弃并重新调度喵。")
-            return None, final_user_simulation_prompt
 
         req = build_provider_request(
             prompt=final_user_simulation_prompt,

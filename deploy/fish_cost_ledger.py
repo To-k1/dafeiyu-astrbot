@@ -79,7 +79,7 @@ class Ledger:
         with self.transaction() as db:
             cap, settled, reserved = self.totals(db, bucket, day)
             if settled + reserved + maximum > cap:
-                raise CostLimit("剩余额度不足以预留本次请求。预算日于北京时间 04:00 切换。")
+                raise CostLimit("剩余额度不足以预留本次请求。预算日于北京时间 00:00 切换。")
             db.execute("INSERT INTO fish_cost_calls VALUES (?, ?, ?, ?, ?, NULL)",
                        (ident, bucket, day, kind, maximum))
         return ident

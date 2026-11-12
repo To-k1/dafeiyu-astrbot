@@ -426,6 +426,7 @@ class ReaderTests(unittest.TestCase):
 
         res2 = self.read()
         self.assertEqual(res2["affect"]["state"], "ready")
+        self.assertIs(res2["affect"]["has_saved_state"], False)
         self.assertEqual(res2["affect"]["valence"], 0.0)
         self.assertEqual(len(res2["affect"]["care_threads"]), 1)
         self.assertEqual(res2["affect"]["care_threads"][0]["topic"], "有牵挂但无状态表")

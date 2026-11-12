@@ -187,6 +187,47 @@ class ContactIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.config.update(contact_coordination_enabled=True, contact_owner_quiet_minutes=0)
         self.save_config()
 
+    async def test_owner_contact_pause_blocks_dispatch_and_survives_ordinary_reply(self):
+        self.enable()
+        api = main.ContactAPI(self.plugin)
+        ticket = api.reserve(SCOPE, "queued", "准备分享")
+        await self.plugin.incoming(FakeEvent(user="999", event_id="fake", text="暂时别主动找我"))
+        self.assertFalse(self.plugin.contact_ledger().status(SCOPE, self.config).get("paused", False))
+        await self.plugin.incoming(FakeEvent(event_id="pause", text="暂时别主动找我"))
+        await self.plugin.incoming(FakeEvent(event_id="chat", text="我回来了"))
+        with self.assertRaisesRegex(PermissionError, "暂停"):
+            api.dispatch(ticket)
+        with self.assertRaisesRegex(PermissionError, "暂停"):
+            api.reserve(SCOPE, "blocked", "另一条")
+        await self.plugin.incoming(FakeEvent(event_id="resume", text="恢复主动联系"))
+        api.dispatch(ticket)
+
+    async def test_social_pause_blocks_claimed_background_task_but_allows_owner_reply(self):
+        self.enable()
+        await self.plugin.incoming(FakeEvent(event_id="pause-chat", text="先不要主动聊天。"))
+        with self.assertRaisesRegex(PermissionError, "暂停"):
+            await self.plugin.share_thought(self.begin(), "这是受托任务，主人一定要看。")
+        await self.plugin.share_thought(FakeEvent(event_id="request"), "回应主人这轮的问题")
+        self.delivery.send.assert_awaited_once()
+        self.assertEqual(self.plugin.contact_ledger().status(SCOPE, self.config)["used"], 0)
+        self.assertTrue(self.plugin.contact_ledger().status(SCOPE, self.config)["paused"])
+
+    def test_today_pause_expires_at_shanghai_midnight(self):
+        self.enable()
+        ledger = self.plugin.contact_ledger()
+        now = datetime(2026, 11, 10, 23, 59, 59, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        ledger.set_pause(SCOPE, "today", now)
+        with self.assertRaisesRegex(PermissionError, "暂停"):
+            ledger.check(SCOPE, self.plugin.cfg(), now)
+        ledger.check(SCOPE, self.plugin.cfg(), now + 1)
+
+    async def test_required_coordination_never_uses_legacy_background_send(self):
+        self.config.update(contact_coordination_required=True, contact_coordination_enabled=False)
+        self.save_config()
+        with self.assertRaises(PermissionError):
+            await self.plugin.share_thought(self.begin(), "不应绕过发送")
+        self.delivery.send.assert_not_awaited()
+
     async def test_life_share_blocks_next_source_but_not_foreground_reply(self):
         self.enable()
         event = self.begin()
