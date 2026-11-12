@@ -25,6 +25,14 @@
 
 ## 安装与维护
 
+### 从台式机打开 ThinkBook 控制台
+
+在台式机双击仓库 `scripts/Open-ThinkBook-FishHome.cmd`。台式机需有可用的 `fishbook` 公钥 SSH，ThinkBook 的 `FishHomeOps` 桌面需已打开 `FishHome.exe`。页面标题会标明 ThinkBook，服务操作在 ThinkBook 执行，模块页面通过本机回环端口转发。关闭启动窗口会结束该次远程入口。
+
+脚本默认在 ThinkBook 的 `D:\FishHome` 下查找唯一安装目录。其他目录可用 `--root <ThinkBook 安装目录>` 指定。传 `--check` 只读取远程状态。QQ 切换前禁用远程启动全部以及 NapCat 启动、重启。
+
+2026-11-12 的 ThinkBook 离线验收通过台式机入口完成。Ollama 的启动、重启和停止均成功，本机模型目录含 `bge-m3`。人民币网关以离线模式运行，两本默认额度各 ¥5。AstrBot 初次启动前已补做原生初始化，面板绑定回环，台式机通过转发收到面板页面。测试结束后停回被测服务，ThinkBook 的 NapCat 保持停止。DSH 凭据、PhoneMCP 实机和 QQ 正式切换待后续验收。
+
 开发源在 `deploy/desktop_manager`。从仓库运行 `powershell -File deploy/desktop_manager/install.ps1`，使用 Windows 自带 .NET Framework 编译器生成 `%FISH_HOME%\dev\FishHome.exe`。运行时复用开发实例的 AstrBot Python 环境。覆盖 EXE 前先退出托盘控制台。安装保留旧启动脚本 `Start-FishHome.before-tray.cmd`。`-InstallBudgetBridge` 更新计费 Bridge 并备份原源码。`-InstallActivity` 在 AstrBot 停止时更新活动插件源码并保留原插件副本。运行配置和账本仍在 `data\plugin_data`。本机日志、进程识别记录和加密凭据都在 `%LOCALAPPDATA%\FishHome\manager`。
 
 WebUI 只监听 `127.0.0.1:6196`，由托盘打开的浏览器会话可操作服务。DSH 仍在 `FishHomeRunner` 下运行，托盘启动后会更新签名票据。NapCat 复用原脚本的快登配置。正式 ThinkBook 的路径和启动策略另行验收。

@@ -283,4 +283,18 @@ if (-not $SkipEmbedding) {
     }
 }
 
-Write-Host '[6/6] Installation complete. Read the quick start before starting services.'
+Write-Host '[6/6] Initialize AstrBot'
+Push-Location -LiteralPath $astro
+try {
+    Run $py @('-B','-m','astrbot.cli','init','--yes')
+    @'
+from pathlib import Path
+from astrbot.core.config.astrbot_config import AstrBotConfig
+
+config = AstrBotConfig(config_path=str(Path.cwd() / "data" / "cmd_config.json"))
+config["dashboard"]["host"] = "127.0.0.1"
+config.save_config()
+'@ | & $py -B -
+    if ($LASTEXITCODE -ne 0) { throw 'AstrBot dashboard setup failed.' }
+} finally { Pop-Location }
+Write-Host 'Installation complete. Read the quick start before starting services.'
