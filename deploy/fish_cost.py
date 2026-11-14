@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ REQUEST_TIMEOUT = 120
 PRICE_FILE = Path(__file__).with_name("fish_cost_prices.json")
 ENDPOINTS = {"openai": "/v1/chat/completions", "anthropic": "/anthropic/v1/messages",
              "search": "/v1/tools/search", "fetch": "/v1/tools/fetch"}
+INLINE_IMAGE = re.compile(r"data:image/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}")
 
 
 def load_prices(path):
@@ -50,10 +52,19 @@ def normalize_model(body, kind):
                       tool.get("type", "custom") == "custom" and "input_schema" in tool)
         if not local_tool:
             raise ValueError("服务器工具须经独立收费入口")
+    images = 0
     for message in body["messages"]:
         blocks = message.get("content")
         if isinstance(blocks, list):
             for block in blocks:
+                if kind == "openai" and message.get("role") == "user" and block.get("type") == "image_url":
+                    image = block["image_url"]
+                    url = image["url"]
+                    images += 1
+                    if (images > 4 or len(url) > 1_400_000 or not INLINE_IMAGE.fullmatch(url)
+                            or image.get("detail", "auto") not in {"auto", "low", "high", "original"}):
+                        raise ValueError("invalid inline image")
+                    continue
                 if block.get("type") not in {"text", "thinking", "redacted_thinking", "tool_use", "tool_result"}:
                     raise ValueError("受控入口仅接收文本和本地函数工具结果")
                 if block.get("type") == "tool_result" and isinstance(block.get("content"), list):

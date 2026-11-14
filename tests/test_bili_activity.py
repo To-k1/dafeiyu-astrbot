@@ -64,6 +64,15 @@ class ToolSet:
         self.tools = [t for t in self.tools if t.name != name]
 
 
+class TextPart:
+    def __init__(self, text):
+        self.text = text
+
+    def mark_as_temp(self):
+        self.temporary = True
+        return self
+
+
 def load_plugin():
     class Star:
         def __init__(self, context):
@@ -78,6 +87,8 @@ def load_plugin():
                              "StarTools": object, "register": lambda *a, **kw: lambda cls: cls},
         "astrbot.core": {},
         "astrbot.core.agent": {},
+        "astrbot.core.agent.message": {"TextPart": TextPart},
+        "astrbot.core.message.components": {"Image": types.SimpleNamespace(fromURL=lambda url: url)},
         "astrbot.core.agent.tool": {"FunctionTool": FunctionTool, "ToolSet": ToolSet},
     }
     modules = {}
@@ -354,6 +365,33 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                                      metadata=lambda: {"captured_at": time.time() - age})
         self.plugin.snapshots["shot"] = (shot, SCOPE, owner)
         return shot
+
+    async def test_passive_screenshot_uses_vision_and_keeps_delivery_on_failure(self):
+        shot = types.SimpleNamespace(path="phone.jpg")
+        self.plugin.pause_background = AsyncMock()
+        self.plugin.capture = AsyncMock(return_value=("shot", shot))
+        self.plugin.share = AsyncMock()
+        vision = AsyncMock(side_effect=["手机画面：B站播放器", TimeoutError()])
+        self.plugin.face_plugin = lambda: types.SimpleNamespace(_vl_describe=vision)
+        self.plugin.agent = AsyncMock(side_effect=AssertionError("text-only model received the image"))
+        await self.plugin.incoming(FakeEvent(text="截图看看"))
+        await self.plugin.incoming(FakeEvent(text="截图看看", event_id="qq2"))
+        self.assertEqual(vision.await_count, 2)
+        vision.assert_awaited_with([(0, "phone.jpg")])
+        self.plugin.agent.assert_not_called()
+        self.assertEqual([call.args[2] for call in self.plugin.share.await_args_list],
+                         ["手机画面：B站播放器", "刚截的，给你看看～"])
+
+    async def test_metered_screenshot_returns_description_and_keeps_share_id(self):
+        self.config["flash_text_only_media"] = True
+        self.plugin.control.write_text(json.dumps(self.config))
+        shot = types.SimpleNamespace(path="phone.jpg", video=None, video_verified=False, captured_at=1)
+        self.plugin.capture = AsyncMock(return_value=("shot", shot))
+        self.plugin.describe_with_flash = AsyncMock(return_value="B站首页")
+        result = await self.plugin.screen(FakeEvent())
+        self.assertEqual([part.type for part in result.content], ["text"])
+        self.assertEqual(json.loads(result.content[0].text)["visual_description"], "B站首页")
+        self.assertEqual(json.loads(result.content[0].text)["snapshot_id"], "shot")
 
     async def test_share_requires_current_scope_and_activity_ownership(self):
         self.snapshot(owner="run1")
@@ -874,6 +912,26 @@ class ToolImageTrimTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(stripped[1]["content"][0]["text"], "主人发的图")
         self.assertEqual(stripped[2], {"role": "assistant", "content": "还在"})
+
+    def test_gateway_keeps_latest_owner_image_and_discards_history_and_tool_images(self):
+        old = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}
+        new = {"type": "image_url", "image_url": {"url": "data:image/png;base64,REVG"}}
+        external = {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}
+        contexts = [{"role": "user", "content": [old]}, {"role": "assistant", "content": "前一轮"},
+                    {"role": "user", "content": [new, external]}, self.tool_image("tool.jpg")]
+        cleaned = main.gateway_image_contexts(contexts, preserve_current=True)
+        self.assertEqual(cleaned[2]["content"][0], new)
+        self.assertEqual(str(cleaned).count("image_url"), 2)
+        self.assertNotIn("https://example.test", str(cleaned))
+        self.assertNotIn("image_url", str(main.gateway_image_contexts(contexts, preserve_current=False)))
+        self.assertEqual(contexts[2]["content"], [new, external])
+
+    def test_market_sticker_resolves_only_qq_media(self):
+        url = main.qq_market_sticker_url({"emoji_id": "ab" * 16})
+        self.assertIn("https://gxh.vip.qq.com/", url)
+        self.assertEqual(main.qq_market_sticker_url({"url": url}), url)
+        self.assertIsNone(main.qq_market_sticker_url({"url": "http://127.0.0.1/secret"}))
+        self.assertIsNone(main.qq_market_sticker_url({"url": url + "?other=1"}))
 
     def test_non_list_context_is_ignored(self):
         self.assertEqual(main.trim_tool_image_history(None), 0)

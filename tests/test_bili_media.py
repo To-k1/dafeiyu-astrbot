@@ -135,7 +135,8 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_ffmpeg_still_retains_subtitles(self):
         api = FakeAPI(self.fixture, subtitles=[{"from": 0, "to": 2, "content": "known"}])
-        with patch.object(media.shutil, "which", return_value=None):
+        with (patch.object(media.shutil, "which", return_value=None),
+              patch.dict(sys.modules, {"imageio_ffmpeg": None})):
             result = await media.prepare_video(api, "BV1test12345", 321, 0, 2)
         self.assertEqual(result["subtitles"][0]["content"], "known")
         self.assertEqual(api.downloads, [])
@@ -175,6 +176,11 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
 
 
 class URLTests(unittest.TestCase):
+    def test_only_approved_https_mirrors_are_tried(self):
+        mirror = "https://mirror.bilivideo.com/asset"
+        self.assertEqual(list(media._cdn_urls({"baseUrl": "https://unknown.example/asset",
+            "backup_url": ["http://mirror.bilivideo.com/asset", mirror, mirror]})), [mirror])
+
     def test_rejects_non_cdn_and_cleartext_sources(self):
         for url in ("http://test.bilivideo.com/a", "https://bilivideo.com.evil.test/a",
                     "file:///tmp/a", "https://user:pass@test.bilivideo.com/a"):

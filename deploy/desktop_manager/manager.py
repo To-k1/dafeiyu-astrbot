@@ -23,14 +23,18 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from deploy.bili_activity.ops import exclusive, save_control
 from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
 from scripts.m6_data import export_memory
-from scripts.native_archive import snapshot
+from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sync as sync_backups
 
 from .windows import Credentials, impersonate, run_as, write_json
+from . import compute
+from .recovery import capture_and_pull
+from .thinkbook import export_from_thinkbook, production_qq_marker, sync_room_from_thinkbook
 
 
 PORT = 6196
 RUNNER = "FishHomeRunner"
 ROOT = Path(__file__).resolve().parents[2]
+DESKTOP_HOME = Path(r"D:\Share\code\FishHome")
 PAGE = Path(__file__).with_name("index.html")
 ICON = PAGE.with_name("fishhome.png")
 INTERACTION_BASE = "http://127.0.0.1:6197/openai/interaction/v1"
@@ -76,6 +80,7 @@ class Service:
     url: str = ""
     env: dict = field(default_factory=dict)
     runner: bool = False
+    account: str = RUNNER
 
 
 class Manager:
@@ -101,10 +106,19 @@ class Manager:
         self.bili_state = state / "bili"
         self.backups = dev.parent / "backups"
         self.exports = dev.parent / "exports"
+        self.room_snapshot = state / "thinkbook-room.json" if dev.parent == DESKTOP_HOME else None
+        self.room_sync_lock = asyncio.Lock()
         self.tasks = set()
         self.lock = asyncio.Lock()
         self.archive_lock = asyncio.Lock()
         self.emulator_requested = 0.0
+
+    @property
+    def compute_directory(self):
+        return Path(os.environ["ProgramData"]) / "FishHomeComputeService"
+
+    def service_password(self, service):
+        return self.creds.values.get("compute_password") if service.account == compute.ACCOUNT else self.runner_password()
 
     def specs(self):
         cat, phone, ollama = (self.dev / name for name in ("napcat-4.18.38", "PhoneMCP", "ollama-0.40.15"))
@@ -114,6 +128,8 @@ class Manager:
         cmd = Path(os.environ["ComSpec"])
         qq = str(self.options.get("napcat_qq", ""))
         cat_args = ("-q", qq) if qq.isascii() and qq.isdigit() else ()
+        room_source = (("--snapshot-file", self.room_snapshot) if self.room_snapshot is not None else
+                       ("--astrbot-root", self.astro, "--life-data-dir", self.activity))
         key = self.creds.values.get("upstream_key")
         cost_env = {"FISH_COST_INTERACTION_TOKEN": self.creds.values["interaction"],
                     "FISH_COST_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}
@@ -125,6 +141,13 @@ class Manager:
                        "FISHHOME_DSH_GATEWAY_TOKEN": self.creds.values["autonomous"],
                        "DEEPSEEK_API_KEY": self.creds.values["autonomous"]}
         commission = {}
+        compute_services = {}
+        if self.creds.values.get("compute_password"):
+            directory = self.compute_directory
+            script = directory / "compute_mcp.py"
+            compute_services["compute"] = Service("Windows Python 执行器", directory,
+                (directory / "python/python.exe", "-B", script, directory / "python.tar.gz", str(compute.PORT)),
+                compute.PORT, str(script), runner=True, account=compute.ACCOUNT)
         if (dsh / "Start-DSH-Commission.cmd").is_file():
             interaction_env = {
                 "DEEPSEEK_BASE_URL": "http://127.0.0.1:6197/anthropic/interaction",
@@ -148,6 +171,7 @@ class Manager:
                 "main.py serve", env={"PATH": str(emulator) + ";" + os.environ["PATH"]}),
             "bili": Service("B 站伴侣（只读）", ROOT, (self.python, "-B", bili, "--state-dir", self.bili_state,
                 "--adb-path", emulator / "adb.exe"), 8011, str(bili)),
+            **compute_services,
             "dsh": Service("DeepSeek Harness", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-M3.cmd"),
                 59934, str(dsh / "m5-file-only.yml"), env=dsh_env, runner=True),
             **commission,
@@ -158,9 +182,13 @@ class Manager:
             "napcat": Service("NapCat", cat, (cat / "node.exe", cat / "index.js", *cat_args), 6099,
                 str(cat / "index.js"), "http://127.0.0.1:6099/webui/"),
             "room": Service("房间与记忆星海", ROOT, (self.python, "-B", "-m", "deploy.memory_observatory.server",
-                "--port", "8767", "--astrbot-root", self.astro, "--life-data-dir", self.activity), 8767,
+                "--port", "8767", *room_source), 8767,
                 "deploy.memory_observatory.server", "http://127.0.0.1:8767/room"),
         }
+
+    async def sync_room(self):
+        async with self.room_sync_lock:
+            return await asyncio.to_thread(sync_room_from_thinkbook, self.room_snapshot)
 
     @staticmethod
     def listeners():
@@ -182,6 +210,7 @@ class Manager:
             "emulator_dir": str(specs["emulator"].cwd), "public_write": control.get("public_write_enabled") is True,
             "ollama_models": specs["ollama"].env["OLLAMA_MODELS"],
             "metered_dsh": self.options.get("metered_dsh") is True,
+            "compute_enabled": self.options.get("compute_enabled") is True,
             "paths": {
                 "AstrBot · QQ 白名单和模型": str(self.astrbot_settings),
                 "LivingMemory · AstrBot 插件配置": str(self.astro / "data/config/astrbot_plugin_livingmemory_config.json"),
@@ -199,8 +228,8 @@ class Manager:
 
     def archive_history(self):
         rows = []
-        for path in self.backups.glob("desktop-*.zip"):
-            if not re.fullmatch(r"desktop-(?:backup|test-memory)-\d{8}T\d{6}(?:\.\d+)?Z\.zip", path.name):
+        for path in self.backups.glob("*.zip"):
+            if not re.fullmatch(r"(?:desktop-(?:backup|test-memory)|thinkbook-(?:recovery|backup(?:-daily)?))-\d{8}T\d{6}(?:\.\d+)?Z\.zip", path.name):
                 continue
             if path.is_symlink() or not path.is_file():
                 continue
@@ -209,16 +238,30 @@ class Manager:
         return sorted(rows, key=lambda row: row["modified"], reverse=True)
 
     def create_archive(self, kind):
+        if kind == "recovery":
+            return capture_and_pull(self.backups).name
+        if kind == "sync":
+            name = sync_backups(self.backups)
+            if not name:
+                raise ValueError("ThinkBook 还没有普通备份可同步")
+            rotate_backups(self.backups)
+            return name
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        if kind == "export-thinkbook":
+            return export_from_thinkbook(self.exports / f"thinkbook-memory-export-{stamp}").name
         if kind == "export":
             destination = self.exports / f"desktop-memory-export-{stamp}"
             export_memory(self.astro, destination)
             return destination.name
-        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
-                                           timeout=5, creationflags=subprocess.CREATE_NO_WINDOW).strip()
-        destination = self.backups / f"desktop-backup-{stamp}.zip"
-        snapshot(self.astro, destination, environment="dev", revision=revision)
-        return destination.name
+        revision = None
+        if (ROOT / ".git").exists():
+            try:
+                revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
+                                                   stderr=subprocess.DEVNULL, timeout=5,
+                                                   creationflags=subprocess.CREATE_NO_WINDOW).strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return archive_now(self.astro, self.backups, desktop=self.dev.parent == DESKTOP_HOME, revision=revision).name
 
     def set_config(self, name, value):
         if name in {"napcat_qq", "owner_qq"}:
@@ -229,7 +272,9 @@ class Manager:
                     raise ValueError("管理员 QQ 与机器人 QQ 应使用不同账户")
                 scope = qq_owner(read_settings(self.astrbot_settings), value)
                 self.bridge_settings.parent.mkdir(parents=True, exist_ok=True)
-                write_json(self.bridge_settings, read_settings(self.bridge_settings) | {"owner_id": value, "owner_scope": scope})
+                write_json(self.bridge_settings, read_settings(self.bridge_settings) | {
+                    "owner_id": value, "owner_scope": scope, "budget_token": self.creds.values["interaction"],
+                })
                 return "已保存 DSH Bridge 管理员。自检会检查自主活动的主人是否一致。"
             if value == str(read_settings(self.bridge_settings).get("owner_id", "")):
                 raise ValueError("NapCat 快登请使用机器人 QQ 小号")
@@ -420,9 +465,9 @@ class Manager:
         try:
             return inspect()
         except psutil.AccessDenied:
-            if service.runner and self.runner_password():
+            if service.runner and self.service_password(service):
                 try:
-                    with impersonate(RUNNER, self.runner_password()):
+                    with impersonate(service.account, self.service_password(service)):
                         return inspect()
                 except (OSError, psutil.Error):
                     return None
@@ -523,20 +568,28 @@ class Manager:
         tickets = re.findall(rf"http://127\.0\.0\.1:{port}/\?token=([A-Za-z0-9._~%-]+)", text)
         return unquote(tickets[-1]) if tickets else ""
 
-    async def refresh_dsh_cookie(self, port=59934):
+    async def refresh_dsh_cookie(self, port=59934, *, compute_enabled=None):
         try:
             async with ClientSession(timeout=ClientTimeout(total=5)) as session:
-                for _ in range(40):
+                deadline = asyncio.get_running_loop().time() + 90
+                while asyncio.get_running_loop().time() < deadline:
                     if port in self.listeners():
                         ticket = self.dsh_launch_token(port)
                         if ticket:
-                            async with session.get(f"http://127.0.0.1:{port}/connect", allow_redirects=False,
-                                    params={"token": ticket, "interactions": "none"}) as response:
-                                if response.status == 302 and len(response.cookies) == 1:
-                                    name, value = next(iter(response.cookies.items()))
-                                    field = "commission_cookie" if port == 59935 else "session_cookie"
-                                    self.update_bridge(**{field: f"{name}={value.value}"})
-                                    return
+                            try:
+                                async with session.get(f"http://127.0.0.1:{port}/connect", allow_redirects=False,
+                                        params={"token": ticket, "interactions": "none"}) as response:
+                                    if response.status == 302 and len(response.cookies) == 1:
+                                        name, value = next(iter(response.cookies.items()))
+                                        field = "commission_cookie" if port == 59935 else "session_cookie"
+                                        fields = {field: f"{name}={value.value}"}
+                                        if compute_enabled is not None:
+                                            route = "commission_compute_enabled" if port == 59935 else "life_compute_enabled"
+                                            fields[route] = compute_enabled and self.options.get("compute_enabled") is True
+                                        self.update_bridge(**fields)
+                                        return
+                            except (ClientError, OSError, asyncio.TimeoutError):
+                                pass
                     await asyncio.sleep(.5)
             raise RuntimeError("DSH 启动后未取得有效连接票据")
         except Exception as exc:
@@ -545,6 +598,12 @@ class Manager:
 
     async def start(self, name):
         service = self.specs()[name]
+        is_dsh = name in {"dsh", "dsh_commission"}
+        use_compute = self.options.get("compute_enabled") is True
+        if name == "compute" and not use_compute:
+            return "计算执行已关闭"
+        if name == "napcat" and self.room_snapshot is not None and production_qq_marker().is_file():
+            raise ValueError("ThinkBook 承载正式 QQ，台式机 NapCat 保持停止。")
         if name == "emulator":
             if self.emulator_status(service) != "stopped":
                 return "已在运行或正在启动"
@@ -553,10 +612,23 @@ class Manager:
         if pids:
             if not any(self.matching_pid(service, pid) for pid in pids):
                 raise ValueError(f"端口 {service.port} 被未识别的进程占用")
+            if name == "budget":
+                self.update_bridge(budget_token=self.creds.values["interaction"])
+            if is_dsh and self.runner_password() and self.bridge_settings.is_file():
+                task = asyncio.create_task(self.refresh_dsh_cookie(service.port))
+                self.tasks.add(task)
+                task.add_done_callback(self.tasks.discard)
             return "已在运行"
         if self.tracked_pid(name) or self.launching_pid(service):
             return "已在运行或正在启动"
+        if name == "room" and self.room_snapshot is not None and not self.room_snapshot.is_file():
+            await self.sync_room()
         argv = list(map(str, service.command))
+        if name == "compute":
+            token = self.creds.values.setdefault("compute_token", secrets.token_urlsafe(32))
+            self.creds.save()
+            await asyncio.to_thread(compute.prepare, self.compute_directory, ROOT / "deploy/dsh_bridge",
+                self.dev.parent / "downloads/python-3.12.10-windows-x64.tar.gz", self.python, token, RUNNER)
         if not service.cwd.is_dir() or not Path(argv[0]).is_file():
             raise ValueError("组件安装目录或启动文件缺失")
         if name == "napcat":
@@ -568,7 +640,15 @@ class Manager:
         if name == "budget":
             self.activity.mkdir(parents=True, exist_ok=True)
             self.update_bridge(budget_token=self.creds.values["interaction"])
-        if service.runner:
+        if name == "compute":
+            profile = compute.profile(compute.ACCOUNT)
+            pid = run_as(compute.ACCOUNT, self.service_password(service), argv, env={
+                "PYTHONUTF8": "1", "USERPROFILE": str(profile), "LOCALAPPDATA": str(profile / "AppData/Local"),
+                "FISHHOME_COMPUTE_TOKEN": token,
+            })
+            with impersonate(compute.ACCOUNT, self.service_password(service)):
+                started = psutil.Process(pid).create_time()
+        elif is_dsh:
             if self.options.get("metered_dsh") is not True or not self.dsh_profile_ready():
                 raise ValueError("请先在控制台设置 DSH 计费接线")
             password = self.runner_password()
@@ -583,10 +663,31 @@ class Manager:
                     root.mkdir(parents=True, exist_ok=True)
                     (root / "output").mkdir(exist_ok=True)
                 self.update_bridge(commission_workspace=str(root), commission_cookie="")
+            if use_compute:
+                if "compute" not in self.specs():
+                    raise ValueError("请先保存 FishHomeCompute 的密码")
+                await self.start("compute")
+                async with ClientSession(timeout=ClientTimeout(total=2)) as client:
+                    for _ in range(20):
+                        try:
+                            async with client.post(f"http://127.0.0.1:{compute.PORT}/mcp", json={
+                                "jsonrpc": "2.0", "id": 1, "method": "ping",
+                            }, headers={"Authorization": "Bearer " + self.creds.values["compute_token"]}) as response:
+                                if response.status == 200:
+                                    break
+                        except (ClientError, TimeoutError):
+                            pass
+                        await asyncio.sleep(.5)
+                    else:
+                        raise ValueError("Windows Python 执行器没有就绪")
+                launcher = service.cwd / "Start-DSH-Compute.cmd"
+                if not launcher.is_file():
+                    raise ValueError("DSH 计算启动脚本缺失")
+                argv = [*argv[:4], str(launcher), str(service.port), str(self.compute_directory / "compute.yml")]
             pid = run_as(RUNNER, password, argv, env=service.env)
             with impersonate(RUNNER, password):
                 started = psutil.Process(pid).create_time()
-            task = asyncio.create_task(self.refresh_dsh_cookie(service.port))
+            task = asyncio.create_task(self.refresh_dsh_cookie(service.port, compute_enabled=use_compute))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         else:
@@ -604,14 +705,19 @@ class Manager:
 
     async def stop(self, name):
         service = self.specs()[name]
+        if name == "compute":
+            self.update_bridge(life_compute_enabled=False, commission_compute_enabled=False)
+        elif name in {"dsh", "dsh_commission"}:
+            field = "commission_compute_enabled" if name == "dsh_commission" else "life_compute_enabled"
+            self.update_bridge(**{field: False})
         if name == "emulator":
             if self.emulator_status(service) == "stopped":
                 return "已停止"
             return await self.emulator_action(service, "quit")
         pids = self.listeners().get(service.port, set())
         pid = self.tracked_pid(name)
-        if service.runner and not pid and self.runner_password():
-            with impersonate(RUNNER, self.runner_password()):
+        if service.runner and not pid and self.service_password(service):
+            with impersonate(service.account, self.service_password(service)):
                 pid = self.tracked_pid(name)
         if not pid and len(pids) == 1:
             candidate = next(iter(pids))
@@ -624,9 +730,9 @@ class Manager:
             return "已停止"
         argv = [str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"), "/PID", str(pid), "/T", "/F"]
         if service.runner:
-            if not self.runner_password():
-                raise ValueError("需要 FishHomeRunner 凭据才能关闭 DSH")
-            code = await asyncio.to_thread(run_as, RUNNER, self.runner_password(), argv, wait=True)
+            if not self.service_password(service):
+                raise ValueError(f"需要 {service.account} 凭据才能关闭服务")
+            code = await asyncio.to_thread(run_as, service.account, self.service_password(service), argv, wait=True)
         else:
             child = await asyncio.create_subprocess_exec(*argv, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -676,8 +782,51 @@ def create_app(manager, token):
 
     app = web.Application(middlewares=[local_only], client_max_size=8192)
 
+    async def sync_observatory(_app):
+        async def loop():
+            while True:
+                try:
+                    await manager.sync_room()
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    # The existing cache is marked stale by sync_room().
+                    pass
+                await asyncio.sleep(60)
+
+        async def backup_loop():
+            while True:
+                if not manager.archive_lock.locked():
+                    async with manager.archive_lock:
+                        try:
+                            if manager.room_snapshot is not None:
+                                await asyncio.to_thread(manager.create_archive, "sync")
+                            else:
+                                await asyncio.to_thread(daily_backup, manager.astro)
+                        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+                            pass
+                await asyncio.sleep(900)
+
+        tasks = []
+        if manager.room_snapshot is not None:
+            tasks.append(asyncio.create_task(loop()))
+        if manager.astro.is_dir():
+            tasks.append(asyncio.create_task(backup_loop()))
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    app.cleanup_ctx.append(sync_observatory)
+
     async def home(_request):
-        return web.Response(text=PAGE.read_text(encoding="utf-8"), content_type="text/html",
+        page = PAGE.read_text(encoding="utf-8")
+        if manager.dev.parent == DESKTOP_HOME:
+            page = page.replace('id="recovery" hidden', 'id="recovery"').replace(
+                'id="recovery-hint" class="muted hint" hidden', 'id="recovery-hint" class="muted hint"')
+            page = page.replace('id="sync-backup" hidden', 'id="sync-backup"')
+            page = page.replace('id="export-thinkbook" hidden', 'id="export-thinkbook"')
+        return web.Response(text=page, content_type="text/html",
             headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
                      "Content-Security-Policy": "default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'"})
 
@@ -722,12 +871,20 @@ def create_app(manager, token):
                 manager.creds.values[name] = value
                 manager.creds.save()
                 message = "已加密保存 DeepSeek Key，请重启计费服务以启用。"
-            elif name == "runner_password" and isinstance(value, str) and 0 < len(value) <= 256:
-                with impersonate(RUNNER, value):
+            elif name in {"runner_password", "compute_password"} and isinstance(value, str) and 0 < len(value) <= 256:
+                with impersonate(compute.ACCOUNT if name == "compute_password" else RUNNER, value):
                     pass
                 manager.creds.values[name] = value
                 manager.creds.save()
-                message = "已验证并加密保存 DSH 账户密码。"
+                message = "已验证并加密保存账户密码。"
+            elif name == "compute_enabled" and type(value) is bool:
+                if value and not manager.creds.values.get("compute_password"):
+                    raise ValueError("请先保存 FishHomeCompute 的密码")
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                if not value:
+                    manager.update_bridge(life_compute_enabled=False, commission_compute_enabled=False)
+                message = "已保存。重启两路 DSH 使配置生效。"
             else:
                 message = manager.set_config(name, value)
         return web.json_response({"message": message})
@@ -749,11 +906,14 @@ def create_app(manager, token):
                                  headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     async def archive_history(_request):
-        return web.json_response({"backups": await asyncio.to_thread(manager.archive_history)})
+        pointer = manager.backups / "thinkbook-last-verified.json"
+        return web.json_response({"backups": await asyncio.to_thread(manager.archive_history),
+                                  "last_verified": read_settings(pointer)})
 
     async def archive(request):
         kind = request.match_info["kind"]
-        if kind not in {"backup", "export"}:
+        if kind not in {"backup", "export", "recovery", "sync", "export-thinkbook"} or (
+                kind in {"recovery", "sync", "export-thinkbook"} and manager.dev.parent != DESKTOP_HOME):
             raise ValueError("未知归档操作")
         if manager.archive_lock.locked():
             raise ValueError("已有备份或导出正在执行")

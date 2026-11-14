@@ -41,6 +41,18 @@ class FishAffectBridge(Star):
         bridge = getattr(self.context, CORE_SERVICE, None)
         return bridge if getattr(bridge, "version", None) == CORE_VERSION else None
 
+    def mood_context(self, scope):
+        if not self.owner_scope(scope):
+            return None
+        core = self.core()
+        snapshot = core.get_snapshot(scope=scope) if core else None
+        if not snapshot or snapshot.get("scope") != scope:
+            return None
+        stimulus = snapshot["state"].get("extra", {}).get("last_life_stimulus") or {}
+        return {"mode": snapshot["expression"]["mode"],
+                "last_life_event": {key: stimulus[key] for key in ("kind", "topic", "at") if key in stimulus} or None,
+                "meaning": "这是心境中枢的背景估计。最近事件不证明当前心境由它造成，也不要求按标签表达。"}
+
     def record_interest(self, scope, *, source_id, topic, polarity):
         if (self.config.get("life_events_enabled") is not True or not self.owner_scope(scope)
                 or not source_id or type(polarity) is not int or polarity not in {-1, 1}):

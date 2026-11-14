@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import types
@@ -252,7 +253,6 @@ class WorkshopTests(unittest.TestCase):
             existing = workshop.Workshop(self.store)
             self.assertTrue(existing.check(SCOPE, work["id"])["passed"])
 
-    @unittest.skipUnless(os.name != "nt", "secure dir_fd export is supported on Linux only")
     def test_export_is_actual_managed_file_with_stable_hash_and_sources(self):
         work = self.revise(self.create())
         exported = self.workshop.export(SCOPE, work["id"])
@@ -294,6 +294,21 @@ class WorkshopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.workshop.export(SCOPE, work["id"])
         self.assertEqual(target.read_text(), "keep")
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory junction")
+    def test_windows_export_rejects_directory_junction(self):
+        work = self.revise(self.create())
+        outside = self.folder / "outside"
+        outside.mkdir()
+        junction = self.folder / "works"
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+                       check=True, capture_output=True)
+        try:
+            with self.assertRaisesRegex(OSError, "regular directory"):
+                self.workshop.export(SCOPE, work["id"])
+            self.assertEqual(list(outside.iterdir()), [])
+        finally:
+            junction.rmdir()
 
     def test_payload_limits_and_argument_types(self):
         work = self.create()

@@ -13,6 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .life import observed_read_evidence, parse_work_sections
+from .dsh_task import task_key as dsh_task_key
 from .rhythm import DEFAULTS as RHYTHM_DEFAULTS, snapshot as rhythm_snapshot, validate_config as validate_rhythm
 from .projects import Projects, enabled as projects_enabled
 
@@ -408,6 +409,13 @@ class LifePlanner:
 
         for goal in goals:
             gid = goal["id"]
+            plan = cfg.get("dsh_life_task")
+            dsh_enabled = cfg.get("dsh_agent_tasks_enabled") or (plan and plan.get("goal_id") == gid)
+            task = self.store.get_setting(dsh_task_key(scope, gid)) if dsh_enabled else None
+            if (isinstance(task, dict) and task.get("state") == "deferred"
+                    and type(task.get("resume_after")) in {int, float} and task["resume_after"] > now):
+                excluded.append({"key": "goal:" + gid, "reason": "dsh_deferred_until_low_cost"})
+                continue
             if goal.get("origin_id"):
                 # Cross-day curiosity goal evaluation (Item 8)
                 if curiosity_runs_today >= 1:

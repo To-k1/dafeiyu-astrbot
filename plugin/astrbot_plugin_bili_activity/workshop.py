@@ -15,6 +15,7 @@ import time
 import uuid
 from contextlib import closing, nullcontext
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .budget import BudgetExceeded
 from .life import observed_read_evidence
@@ -292,6 +293,36 @@ class Workshop:
             pass
         return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
 
+    def _export_windows(self, work_id, filename, content):
+        # These directories belong to the AstrBot account and are separate from Runner's workspace.
+        directory = Path(self.store.folder)
+        for part in (None, "works", work_id):
+            if part is not None:
+                directory /= part
+                directory.mkdir(exist_ok=True)
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise OSError("export directory must be a regular directory")
+        target = directory / filename
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(info.st_mode) or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ValueError("export destination must be a regular file")
+        with NamedTemporaryFile(dir=directory, prefix=".export-", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            try:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.close()
+                temporary.replace(target)
+            finally:
+                handle.close()
+                temporary.unlink(missing_ok=True)
+
     def export(self, scope, work_id, revision=None):
         work = self.get(scope, work_id, revision)
         if work is None:
@@ -306,6 +337,12 @@ class Workshop:
                           "", "```json", source["excerpt"].replace("```", "` ` `"), "```", ""])
         content = ("\n".join(lines) + "\n").encode("utf-8")
         filename = f"r{work['revision']}.md"
+        receipt = {"work_id": work_id, "revision": work["revision"],
+                   "path": str(Path(self.store.folder).resolve() / "works" / work_id / filename),
+                   "sha256": hashlib.sha256(content).hexdigest()}
+        if os.name == "nt":
+            self._export_windows(work_id, filename, content)
+            return receipt
         # Open each directory without following symlinks and rename within the
         # held directory FD. Neither work IDs nor user text select a file path.
         root_fd = os.open(self.store.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -338,6 +375,4 @@ class Workshop:
             if works_fd is not None:
                 os.close(works_fd)
             os.close(root_fd)
-        return {"work_id": work_id, "revision": work["revision"],
-                "path": str(Path(self.store.folder).resolve() / "works" / work_id / filename),
-                "sha256": hashlib.sha256(content).hexdigest()}
+        return receipt

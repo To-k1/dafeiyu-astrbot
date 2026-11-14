@@ -99,8 +99,18 @@ if ($InstallOwnerWork) {
         if ($LASTEXITCODE -ne 0) { throw 'The audio adapter patch could not be applied.' }
     }
     $dsh = Join-Path $dev 'dsh-0.2.2-rc.1'
-    foreach ($name in @('m5-commission.yml', 'Start-DSH-Commission.cmd')) {
+    foreach ($name in @('m5-commission.yml', 'Start-DSH-Commission.cmd', 'Start-DSH-Compute.cmd')) {
         Copy-Item -LiteralPath (Join-Path $repo "deploy\dsh_bridge\$name") -Destination $dsh
+    }
+    $autonomousPatch = Join-Path $dsh 'm5-file-only.yml'
+    if (Test-Path -LiteralPath $autonomousPatch) {
+        $base = [IO.File]::ReadAllText((Join-Path $repo 'deploy\dsh_bridge\m3-file-only.yml'))
+        foreach ($preset in ($base -split '(?m)(?=^- insert:)')) {
+            if ($preset -match 'id: (preset-fishhome-[\w-]+)' -and
+                -not (Select-String -LiteralPath $autonomousPatch -SimpleMatch $Matches[1] -Quiet)) {
+                [IO.File]::AppendAllText($autonomousPatch, "`n$preset")
+            }
+        }
     }
 }
 

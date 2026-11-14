@@ -1,4 +1,4 @@
-param([switch]$Plan, [switch]$SkipEmbedding)
+param([switch]$Plan, [switch]$SkipEmbedding, [string]$RecoveryPackage)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -16,6 +16,11 @@ $ollama = Join-Path $dev 'ollama-0.40.15'
 $napcat = Join-Path $dev 'napcat-4.18.38'
 $ownedInstall = Join-Path $dev '.thinkbook-setup'
 $pythonProbe = 'import ensurepip, sys, venv; sys.exit(not (sys.version_info[:2] == (3, 12) and sys.maxsize > 2**32))'
+if (-not $RecoveryPackage) {
+    $RecoveryPackage = Join-Path $root 'Restore-FishHome.zip'
+    if (-not (Test-Path -LiteralPath $RecoveryPackage -PathType Leaf)) { $RecoveryPackage = '' }
+}
+if ($RecoveryPackage) { $RecoveryPackage = (Resolve-Path -LiteralPath $RecoveryPackage).Path }
 
 $assets = [ordered]@{
     'python-3.12.10-windows-x64.tar.gz' = 'https://github.com/astral-sh/python-build-standalone/releases/download/20250409/cpython-3.12.10%2B20250409-x86_64-pc-windows-msvc-install_only.tar.gz'
@@ -32,6 +37,14 @@ function Require-File([string]$Path) {
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed (exit $LASTEXITCODE)." }
+}
+
+function Restore-Project([string]$Python) {
+    Push-Location -LiteralPath $repo
+    try { Run $Python @('-B','-m','scripts.thinkbook_recovery','restore-installation',$RecoveryPackage,$root) }
+    finally { Pop-Location }
+    Remove-Item -LiteralPath (Join-Path $dev '.recovery-pending')
+    Write-Host 'Recovery complete. Start FishHome from its tray when ready.'
 }
 
 function Get-Asset([string]$Name, [switch]$Refresh) {
@@ -129,12 +142,12 @@ function Prepare-Venv([string]$Directory) {
 function Apply-Patch([string]$Directory, [string]$Patch) {
     Require-File $Patch
     $parameters = @{
-        FilePath = $git; ArgumentList = @('apply','--reverse','--check',('"' + $Patch + '"'))
+        FilePath = $git; ArgumentList = @('apply','--ignore-space-change','--reverse','--check',('"' + $Patch + '"'))
         WorkingDirectory = $Directory; WindowStyle = 'Hidden'; PassThru = $true; Wait = $true
     }
     if ((Start-Process @parameters).ExitCode -eq 0) { return }
-    Run $git @('-C', $Directory, 'apply', '--check', $Patch)
-    Run $git @('-C', $Directory, 'apply', $Patch)
+    Run $git @('-C', $Directory, 'apply', '--ignore-space-change', '--check', $Patch)
+    Run $git @('-C', $Directory, 'apply', '--ignore-space-change', $Patch)
 }
 
 foreach ($relative in @('repo\deploy\desktop_manager\install.ps1','repo\persona\fish-home-v2.3.1.txt',
@@ -149,6 +162,15 @@ if ($Plan) {
     exit 0
 }
 if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Use 64-bit PowerShell on Windows x64.' }
+if ($RecoveryPackage -and (Test-Path -LiteralPath (Join-Path $astro 'data\cmd_config.json')) -and
+    -not (Test-Path -LiteralPath (Join-Path $dev '.recovery-pending'))) {
+    throw 'Existing FishHome data found. Install in a fresh project folder for recovery.'
+}
+if ($RecoveryPackage -and (Test-Path -LiteralPath (Join-Path $dev '.recovery-pending')) -and
+    (Test-Path -LiteralPath (Join-Path $astro 'data\cmd_config.json'))) {
+    Restore-Project (Join-Path $astro '.venv\Scripts\python.exe')
+    exit 0
+}
 if (Test-Path -LiteralPath (Join-Path $astro 'data\cmd_config.json')) {
     throw 'This installation already has AstrBot settings. Keep it, or unpack into a fresh folder.'
 }
@@ -194,6 +216,7 @@ $node = Join-Path $dsh 'runtime'
 Install-Asset 'node-v24.21.0-win-x64.zip' $node 'node.exe' 'node-v24.21.0-win-x64'
 $env:Path = (Join-Path $gitRoot 'cmd') + ';' + $node + ';' + $env:Path
 $env:PYTHONUTF8 = '1'
+$env:GIT_CEILING_DIRECTORIES = $root
 $env:PIP_INDEX_URL = 'https://pypi.org/simple'
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 $env:PIP_NO_CACHE_DIR = '1'
@@ -221,7 +244,13 @@ foreach ($name in @('astrbot_plugin_face_convert','astrbot_plugin_schedule_aware
 }
 $patches = Join-Path $repo 'deploy\patches'
 $site = Join-Path $astro '.venv\Lib\site-packages'
-foreach ($name in @('qq_admin_ingress','qq_message_id','chat_media')) {
+# Record the completed environment and ingress patch before message-ID changes its context.
+$astroReady = Join-Path $astro '.venv\.fishhome-ready'
+if (-not (Test-Path -LiteralPath $astroReady -PathType Leaf)) {
+    Apply-Patch $site (Join-Path $patches 'astrbot_4.29.4_qq_admin_ingress.patch')
+    Set-Content -LiteralPath $astroReady -Value 'ready'
+}
+foreach ($name in @('qq_message_id','chat_media')) {
     Apply-Patch $site (Join-Path $patches "astrbot_4.29.4_$name.patch")
 }
 Copy-Item -LiteralPath (Join-Path $patches 'chat_layout.py') -Destination (Join-Path $site 'astrbot\core\pipeline') -Force
@@ -258,7 +287,6 @@ foreach ($name in @('Start-DSH-M3.cmd','Start-DSH-Commission.cmd')) {
     [IO.File]::WriteAllText($launcher, $body, [Text.Encoding]::ASCII)
 }
 Require-File (Join-Path $dev 'FishHome.exe')
-Set-Content -LiteralPath (Join-Path $astro '.venv\.fishhome-ready') -Value 'ready'
 
 Write-Host '[5/6] Local embedding model'
 if (-not $SkipEmbedding) {
@@ -284,6 +312,7 @@ if (-not $SkipEmbedding) {
 }
 
 Write-Host '[6/6] Initialize AstrBot'
+if ($RecoveryPackage) { Set-Content -LiteralPath (Join-Path $dev '.recovery-pending') -Value 'Apply FishHome recovery package' }
 Push-Location -LiteralPath $astro
 try {
     Run $py @('-B','-m','astrbot.cli','init','--yes')
@@ -297,4 +326,8 @@ config.save_config()
 '@ | & $py -B -
     if ($LASTEXITCODE -ne 0) { throw 'AstrBot dashboard setup failed.' }
 } finally { Pop-Location }
+if ($RecoveryPackage) {
+    Restore-Project $py
+    exit 0
+}
 Write-Host 'Installation complete. Read the quick start before starting services.'

@@ -6,6 +6,7 @@ import tempfile
 import time
 import types
 import unittest
+from contextlib import suppress
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, patch
@@ -211,6 +212,45 @@ class ContactIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.delivery.send.assert_awaited_once()
         self.assertEqual(self.plugin.contact_ledger().status(SCOPE, self.config)["used"], 0)
         self.assertTrue(self.plugin.contact_ledger().status(SCOPE, self.config)["paused"])
+
+    async def test_social_pause_preserves_scheduled_reminder_and_commission_delivery(self):
+        from test_commissioned_files import FileRunner, PLAN
+
+        self.enable()
+        await self.plugin.incoming(FakeEvent(event_id="pause-owner-work", text="先不要主动聊天"))
+        ledger = self.plugin.contact_ledger()
+        self.assertTrue(ledger.status(SCOPE, self.config)["paused"])
+        with self.assertRaisesRegex(PermissionError, "暂停"):
+            main.ContactAPI(self.plugin).reserve(SCOPE, "ordinary", "普通主动分享")
+
+        reminder = main.OwnerReminders(self.plugin.store)
+        due = "2026-11-14 00:01"
+        ident = reminder.create(SCOPE, "32", due, "带伞", now=0)
+        jobs = main.CommissionedFiles(self.plugin.store)
+        task_id = jobs.accept(SCOPE, "12345", "33", PLAN)
+        runner = FileRunner(jobs.list(SCOPE, "12345", pending_only=True)[0])
+
+        def bridge(scope, source=None):
+            self.assertEqual(scope, SCOPE)
+            return runner if source is None else PLAN["cwd"]
+
+        self.plugin.context = types.SimpleNamespace(**{main.COMMISSION_BRIDGE: bridge})
+        self.plugin.commission_worker = None
+        self.plugin.live = None
+        self.plugin.prune_screens = lambda: None
+        self.delivery.ready = lambda scope: scope == SCOPE
+        self.delivery.send.return_value = {"message_id": "42"}
+        tick = datetime(2026, 11, 14, 0, 2, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        with patch.object(main.time, "time", return_value=tick), patch.object(main.asyncio, "sleep", side_effect=asyncio.CancelledError):
+            with suppress(asyncio.CancelledError):
+                await self.plugin.schedule()
+        await self.plugin.commission_worker
+        self.assertEqual((reminder.list(SCOPE)[0]["id"], reminder.list(SCOPE)[0]["status"]), (ident, "sent"))
+        result = jobs.list(SCOPE, "12345")[0]
+        self.assertEqual((result["id"], result["state"], result["delivery"]), (task_id, "completed", "sent"))
+        self.assertEqual(self.delivery.send.await_count, 2)
+        self.assertTrue(ledger.status(SCOPE, self.config)["paused"])
+        self.assertEqual(ledger.status(SCOPE, self.config)["used"], 0)
 
     def test_today_pause_expires_at_shanghai_midnight(self):
         self.enable()

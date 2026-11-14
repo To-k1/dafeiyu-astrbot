@@ -89,7 +89,8 @@ def verify(archive):
                 or manifest.get("profile") not in {"memory", "runtime"}
                 or type(manifest.get("include_private_chat")) is not bool
                 or manifest.get("consistency") not in {"sqlite-online", "writers-stopped"}
-                or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("revision", "")))):
+                or "revision" not in manifest
+                or (manifest["revision"] is not None and not re.fullmatch(r"[0-9a-f]{40}", str(manifest["revision"])))):
             raise ValueError("invalid native archive manifest")
         rows = manifest.get("files")
         if not isinstance(rows, list) or not rows:
@@ -130,7 +131,7 @@ def verify(archive):
 def snapshot(root, archive, *, environment, revision, include_private_chat=False,
              writers_stopped=False, workspace=None, work_files=(), profile="runtime"):
     if (environment not in {"dev", "prod"} or profile not in {"memory", "runtime"}
-            or not re.fullmatch(r"[0-9a-f]{40}", revision)):
+            or (revision is not None and not re.fullmatch(r"[0-9a-f]{40}", revision))):
         raise ValueError("supply the environment and a full release commit")
     if archive.exists():
         raise FileExistsError("archive already exists")

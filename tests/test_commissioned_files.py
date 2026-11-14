@@ -47,6 +47,24 @@ class FileRunner:
 
 
 class CommissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compute_is_opt_in_and_preserves_report_and_usage(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            jobs.accept(SCOPE, "12345", "1", PLAN)
+            task = jobs.list(SCOPE, "12345")[0]
+            runner = FileRunner(task, preset="fishhome-compute")
+            runner.compute_enabled = True
+            send = AsyncMock(return_value={"message_id": "42"})
+            await jobs.dispatch_next(SCOPE, "12345", lambda _: runner, send, lambda _: True)
+
+            self.assertEqual(runner.calls[0][1]["agentPreset"], "fishhome-compute")
+            prompt = next(args for method, args in runner.calls if method == "session.prompt")
+            self.assertIn("source_text", prompt["content"][0]["text"])
+            row = jobs.list(SCOPE, "12345")[0]
+            self.assertEqual((row["state"], row["billing"]), ("completed", "interaction"))
+            self.assertEqual(row["usage"], {"input": 50, "output": 20})
+            self.assertIn("sample.csv has two rows.", send.call_args.args[1])
+
     async def test_accept_restart_execute_verify_and_deliver_once(self):
         with tempfile.TemporaryDirectory() as folder:
             with closing(core.Store(folder)) as store:

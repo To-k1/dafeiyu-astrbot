@@ -82,11 +82,52 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
         Ledger(self.manager.ledger)
         async with self.client.get("/api/archives", headers={"Host": "127.0.0.1:6196"}) as result:
             self.assertEqual(result.status, 401)
-        async with self.client.post("/api/archives/backup", headers=self.auth) as result:
-            self.assertEqual(result.status, 200)
-            name = (await result.json())["name"]
+        with patch("deploy.desktop_manager.manager.ROOT", self.manager.dev.parent):
+            async with self.client.post("/api/archives/backup", headers=self.auth) as result:
+                self.assertEqual(result.status, 200)
+                name = (await result.json())["name"]
         manifest = verify(self.manager.backups / name)
+        self.assertIsNone(manifest["revision"])
+        self.assertEqual(manifest["environment"], "prod")
         self.assertEqual(manifest["consistency"], "sqlite-online")
         self.assertFalse(manifest["include_private_chat"])
         async with self.client.get("/api/archives", headers=self.auth) as result:
             self.assertEqual([row["name"] for row in (await result.json())["backups"]], [name])
+
+    async def test_recovery_route_is_desktop_only_and_lists_package(self):
+        from deploy.desktop_manager import manager as console
+
+        route = "/api/archives/recovery"
+        async with self.client.post(route, headers=self.auth) as result:
+            self.assertEqual(result.status, 409)
+        name = "thinkbook-recovery-20261113T092729.770820Z.zip"
+
+        def pull(destination):
+            destination.mkdir()
+            package = destination / name
+            package.touch()
+            return package
+
+        with patch.object(console, "DESKTOP_HOME", self.manager.dev.parent), patch.object(console, "capture_and_pull", pull):
+            async with self.client.get("/", headers=self.auth) as result:
+                self.assertIn('id="recovery">', await result.text())
+            async with self.client.post(route, headers=self.auth) as result:
+                self.assertEqual(result.status, 200)
+                self.assertEqual((await result.json())["name"], name)
+        async with self.client.get("/api/archives", headers=self.auth) as result:
+            self.assertEqual([row["name"] for row in (await result.json())["backups"]], [name])
+
+    async def test_thinkbook_export_uses_desktop_exports_directory(self):
+        from deploy.desktop_manager import manager as console
+
+        route = "/api/archives/export-thinkbook"
+        async with self.client.post(route, headers=self.auth) as result:
+            self.assertEqual(result.status, 409)
+        with (patch.object(console, "DESKTOP_HOME", self.manager.dev.parent),
+              patch.object(console, "export_from_thinkbook", side_effect=lambda path: path) as export):
+            async with self.client.get("/", headers=self.auth) as result:
+                self.assertIn('id="export-thinkbook">', await result.text())
+            async with self.client.post(route, headers=self.auth) as result:
+                self.assertEqual(result.status, 200)
+                self.assertEqual((await result.json())["name"], export.call_args.args[0].name)
+        self.assertEqual(export.call_args.args[0].parent, self.manager.exports)

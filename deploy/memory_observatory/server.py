@@ -62,6 +62,23 @@ class ObservatoryServer(ThreadingHTTPServer):
             self.demo = False
         super().__init__(address, Handler)
 
+    def refresh_cached_sources(self):
+        from .activity import FileActivitySource
+        from .livingmemory import FileMemorySource
+
+        if isinstance(self.source, FileMemorySource):
+            try:
+                self.snapshot, self.connection = self.source.load()
+            except SourceError:
+                self.connection = {**self.connection, "state": "stale"}
+        if isinstance(self.activity_source, FileActivitySource):
+            try:
+                self.activity_snapshot = self.activity_source.load()
+                self.activity_loaded_at = time.monotonic() - self.activity_snapshot.get("age_seconds", 0)
+                self.activity_state = self.activity_snapshot["connection"]
+            except ActivityError:
+                self.activity_state = "stale" if self.activity_snapshot else "unavailable"
+
     def view(self, scope=None, **kwargs):
         scopes = {m["scope"] for m in self.snapshot["memories"]}
         if scope not in scopes:
@@ -153,10 +170,12 @@ class Handler(BaseHTTPRequestHandler):
                             "mode": "livingmemory" if self.server.source is not None else "local"})
         elif path == "/api/snapshot":
             with self.server.lock:
+                self.server.refresh_cached_sources()
                 view = self.server.view()
             self.send(200, view)
         elif path == "/api/room":
             with self.server.lock:
+                self.server.refresh_cached_sources()
                 view = self.server.room_view()
             self.send(200, view)
         elif path == "/api/example":

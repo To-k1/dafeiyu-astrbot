@@ -145,6 +145,8 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(store, "queue_memory", side_effect=RuntimeError("interrupted writeback")):
                 await self.plugin.run_activity("once")
             self.assertEqual(store.get_setting(key)["state"], "needs_review")
+            with self.assertRaisesRegex(ValueError, "needs observed content"):
+                store.life.update_goal(SCOPE, goal_id, status="completed")
             clock.return_value += retry_interval
             await self.plugin.run_activity("once")
 
@@ -155,9 +157,75 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted, [first["request_id"]])
         self.assertEqual(store.life.get_goal(SCOPE, goal_id)["checkpoint"]["original_progress"], 20)
         self.assertEqual(store.db.execute("SELECT COUNT(*) FROM episodes WHERE kind='dsh_file'").fetchone()[0], 1)
+        attempts = store.life.episodes(SCOPE, kind="dsh_file_attempt")
+        reports = store.life.episodes(SCOPE, kind="dsh_file")
+        self.assertEqual([row["evidence"]["status"] for row in attempts], ["needs_review"])
+        self.assertEqual(reports[0]["evidence"]["report_excerpt"], "引用 sample.csv")
+        note = json.loads(await self.plugin.activity_note(FakeEvent(), episode_id=reports[0]["id"], thought="样例有点小"))
+        self.assertEqual(note["source_episode_id"], reports[0]["id"])
+        self.assertEqual(store.life.episodes(SCOPE, kind="dsh_file_note")[0]["interpretation"], {"thought": "样例有点小"})
         self.assertEqual(store.db.execute("SELECT COUNT(*) FROM memories WHERE id LIKE 'dsh-file:%'").fetchone()[0], 1)
+        checkpoint = store.life.get_goal(SCOPE, goal_id)["checkpoint"]
+        store.life.update_goal(SCOPE, goal_id, checkpoint={**checkpoint, "dsh_file": {
+            **checkpoint["dsh_file"], "report": "output/other.md"}})
+        with self.assertRaisesRegex(ValueError, "needs observed content"):
+            store.life.update_goal(SCOPE, goal_id, status="completed")
+        store.life.update_goal(SCOPE, goal_id, checkpoint=checkpoint)
+        completed = store.life.update_goal(SCOPE, goal_id, status="completed")
+        self.assertEqual(completed["status"], "completed")
         self.assertEqual(self.calls, [])
         self.plugin.agent.assert_not_awaited()
+
+    async def test_agent_queues_scoped_file_task_and_periodic_run_uses_file_preset(self):
+        goal = self.plugin.store.life.create_goal(SCOPE, "文件研究", "核对出处", "汇总资料", "agent-file")
+        self.config.update(dsh_agent_tasks_enabled=True, life_decision_enabled=True, dnd_ranges=[])
+        self.save_config()
+        cwd = r"C:\FishHome\approved"
+        client = types.SimpleNamespace(call=AsyncMock(return_value={"sessionId": "bad-preset"}), close=AsyncMock())
+
+        def bridge(scope, source=None, *, standalone=False):
+            self.assertEqual(scope, SCOPE)
+            if standalone:
+                return cwd
+            if source is None:
+                return client
+            if source == "":
+                return ["sample.csv"]
+            if source != "sample.csv":
+                raise PermissionError("not approved")
+            return cwd
+
+        self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: bridge})
+        with self.assertRaises(PermissionError):
+            await self.plugin.file_research(FakeEvent(), "list")
+        event = self.begin("plan")
+        self.plugin.store.life.claim_goal(SCOPE, goal["id"], "plan")
+        self.plugin.run_goals["plan"] = goal["id"]
+        with self.assertRaises(PermissionError):
+            await self.plugin.file_research(event, "queue", "../private.csv", "核对来源")
+        self.assertEqual(json.loads(await self.plugin.file_research(event, "queue", "sample.csv", "核对来源"))["status"], "queued")
+        self.assertEqual(json.loads(await self.plugin.file_research(event, "queue", "sample.csv", "另一项"))["status"], "already_queued")
+        client.call.assert_not_called()
+        self.plugin.store.life.pause_run(SCOPE, "plan", "done")
+        self.plugin.activity_budget().finish_run(SCOPE, "plan")
+        self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))
+        low = datetime.fromisoformat("2026-11-13T22:00:00+08:00").timestamp()
+        with patch.object(dsh_task, "time", return_value=low):
+            await self.plugin.run_activity("periodic")
+        client.call.assert_awaited_once_with("session.create", {"cwd": cwd, "agentPreset": "fishhome-files"})
+
+    async def test_agent_can_create_a_draft_without_source_files(self):
+        self.config["dsh_agent_tasks_enabled"] = True
+        self.save_config()
+        self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: lambda scope, *, standalone: r"C:\FishHome\approved"})
+        event = self.begin("draft")
+        draft = self.plugin.store.life.create_goal(SCOPE, "写一份计划", "自主创作", "起草三步", "draft-file")
+        self.plugin.store.life.claim_goal(SCOPE, draft["id"], "draft")
+        self.plugin.run_goals["draft"] = draft["id"]
+        with self.assertRaises(ValueError):
+            await self.plugin.file_research(event, "create", "sample.csv", "起草观察计划")
+        result = json.loads(await self.plugin.file_research(event, "create", instruction="起草观察计划"))
+        self.assertEqual((result["status"], result["source"]), ("queued", None))
 
     async def test_dsh_peak_defers_expensive_goal_and_reoffers_after_noon(self):
         store = self.plugin.store
@@ -177,10 +245,16 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         deferred = store.get_setting(key)
         self.assertEqual((deferred["state"], deferred["resume_after"]), ("deferred", after))
         client.call.assert_not_awaited()
+        alternative = store.life.create_goal(SCOPE, "另一项研究", "继续资料整理", "核对另一处来源", "other-goal")
+        choice = self.plugin.life_planner().choose(SCOPE, self.plugin.cfg(), now=before)
+        self.assertEqual(choice.get("goal_id"), alternative["id"])
+        self.assertIn({"key": "goal:" + goal["id"], "reason": "dsh_deferred_until_low_cost"}, choice["excluded"])
+        store.life.update_goal(SCOPE, alternative["id"], status="cancelled")
+        with patch.object(main.time, "time", return_value=before), patch.object(dsh_task, "time", return_value=before):
+            await self.plugin.run_activity("periodic")
+        client.call.assert_not_awaited()
         with patch.object(main.time, "time", return_value=after), patch.object(dsh_task, "time", return_value=after):
             await self.plugin.run_activity("periodic")
-            client.call.assert_not_awaited()
-            await self.plugin.run_activity("once")
         client.call.assert_awaited_once_with("session.create", {"cwd": plan["cwd"]})
         self.assertEqual(store.get_setting(key)["task_id"], deferred["task_id"])
 

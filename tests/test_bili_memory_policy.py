@@ -207,6 +207,36 @@ class MemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def flush(self, event=None):
         await main.BiliActivity.flush_memory(self.plugin, event or fixtures.FakeEvent())
 
+    async def test_interest_review_preserves_sources_and_prior_opinion(self):
+        self.enable()
+        _, first = interest(self.plugin.store, "BV1")
+        interest(self.plugin.store, "BV2")
+        event = fixtures.FakeEvent()
+        initial = json.loads(await self.plugin.recall(event))["interest_reviews"][0]
+        ident = initial["candidate_id"]
+        self.assertIsNone(initial["agent_view"])
+        self.assertIn(first["id"], {s["ref"]["source_episode_id"] for s in initial["sources"]})
+        saved = json.loads(await self.plugin.recall(event, candidate_id=ident, stance="disagree", opinion="只喜欢这个细节"))
+        old = saved["interest_reviews"][0]["agent_view"]["episode_id"]
+        self.assertIsNone(policy.MemoryPolicy(self.plugin.store).queue(SCOPE, self.plugin.cfg()))
+        self.assertEqual(json.loads(await self.plugin.recall(event, candidate_id=ident, stance="disagree",
+                         opinion="只喜欢这个细节"))["interest_reviews"][0]["agent_view"]["episode_id"], old)
+        with self.assertRaises(PermissionError):
+            await self.plugin.recall(fixtures.FakeEvent(scope=OTHER), candidate_id=ident, stance="agree", opinion="越权")
+        interest(self.plugin.store, "BV3", polarity=-1)
+        await self.plugin.recall(fixtures.FakeEvent(event_id="new"), candidate_id=ident, stance="uncertain", opinion="还想再想想")
+        self.plugin.store.close()
+        self.plugin.store = core.Store(self.plugin.folder)
+        current = json.loads(await self.plugin.recall(fixtures.FakeEvent(event_id="later"), query="海洋"))["interest_reviews"][0]
+        self.assertFalse(current["current_candidate"])
+        self.assertEqual(current["agent_view"]["stance"], "uncertain")
+        self.assertEqual(current["agent_view"]["previous_episode_id"], old)
+        by_opinion = json.loads(await self.plugin.recall(event, query="还想再想想"))["interest_reviews"]
+        self.assertEqual(by_opinion[0]["candidate_id"], ident)
+        self.assertEqual(len(current["sources"]), 2)
+        previous = json.loads(await self.plugin.recall(event, episode_id=old))["episodes"][0]
+        self.assertEqual(previous["interpretation"]["stance"], "disagree")
+
     async def test_dsh_candidate_requires_selection_in_owner_chat(self):
         self.enable()
         tool = self.mock_lm()
@@ -267,12 +297,15 @@ class MemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_recall_tool_and_foreground_context_apply_fading(self):
         self.enable()
         old = episode(self.plugin.store, age=10)
-        request = types.SimpleNamespace(system_prompt="", func_tool=fixtures.ToolSet(), contexts=[])
+        request = types.SimpleNamespace(system_prompt="", func_tool=fixtures.ToolSet(), contexts=[], extra_user_content_parts=[])
         self.plugin.store.db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", ("old", SCOPE, 1, 2, "completed", "OLD-RAW-SUMMARY"))
         await self.plugin.guard_phone(fixtures.FakeEvent(), request)
-        self.assertIn('"recall_phase":"gist"', request.system_prompt)
-        self.assertNotIn("RAW-DETAIL", request.system_prompt)
-        self.assertNotIn("OLD-RAW-SUMMARY", request.system_prompt)
+        context, = request.extra_user_content_parts
+        self.assertTrue(context.temporary)
+        self.assertIn('"recall_phase":"gist"', context.text)
+        self.assertNotIn("RAW-DETAIL", context.text)
+        self.assertNotIn("OLD-RAW-SUMMARY", context.text)
+        self.assertNotIn(old["id"], request.system_prompt)
         recalled = await self.plugin.recall(fixtures.FakeEvent(), episode_id=old["id"])
         self.assertIn("RAW-DETAIL", recalled)
         with self.assertRaises(PermissionError):

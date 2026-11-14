@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 from decimal import Decimal
+from pathlib import PureWindowsPath
 
 import aiohttp
 
@@ -36,11 +38,26 @@ class Main(Star):
         if getattr(self.context, COMMISSION_BRIDGE, None) is self._commission_client:
             delattr(self.context, COMMISSION_BRIDGE)
 
-    def life_client(self, scope):
+    def life_client(self, scope, source=None, *, standalone=False):
         cfg = json.loads(self.settings.read_text(encoding="utf-8"))
         if not scope or scope != cfg["owner_scope"]:
             raise PermissionError("DSH only serves the configured owner scope")
-        return RemoteDshClient(session_cookie=cfg["session_cookie"])
+        if source is not None or standalone:
+            workspace = cfg.get("life_workspace", "")
+            sources = cfg.get("life_sources", [])
+            if not isinstance(workspace, str) or not PureWindowsPath(workspace).is_absolute() or not isinstance(sources, list):
+                raise ValueError("自主文件工作区尚未配置")
+            if standalone:
+                return workspace
+            allowed = [name for name in sources if isinstance(name, str) and
+                       re.fullmatch(r"[\w-][\w.-]{0,79}\.(?:csv|md|txt|json)", name, re.I)]
+            if source == "":
+                return allowed
+            if source not in allowed:
+                raise PermissionError("素材未加入自主文件任务范围")
+            return workspace
+        return RemoteDshClient(session_cookie=cfg["session_cookie"],
+                               compute_enabled=cfg.get("life_compute_enabled") is True)
 
     def commission_client(self, scope, source=None):
         cfg = json.loads(self.settings.read_text(encoding="utf-8"))
@@ -52,7 +69,8 @@ class Main(Star):
             if source not in cfg.get("commission_sources", []):
                 raise ValueError("该文件未加入台式机的受托任务范围。")
             return cfg["commission_workspace"]
-        return RemoteDshClient(port=COMMISSION_PORT, session_cookie=cfg["commission_cookie"])
+        return RemoteDshClient(port=COMMISSION_PORT, session_cookie=cfg["commission_cookie"],
+                               compute_enabled=cfg.get("commission_compute_enabled") is True)
 
     def owner_event(self, event):
         try:

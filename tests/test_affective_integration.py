@@ -74,6 +74,9 @@ agent_tool = types.ModuleType("astrbot.core.agent.tool")
 agent_tool.FunctionTool = FunctionTool
 agent_tool.ToolSet = ToolSet
 sys.modules["astrbot.core.agent.tool"] = agent_tool
+agent_message = types.ModuleType("astrbot.core.agent.message")
+agent_message.TextPart = object
+sys.modules["astrbot.core.agent.message"] = agent_message
 
 # Mock components
 class MockPlain:

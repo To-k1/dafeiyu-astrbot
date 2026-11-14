@@ -650,7 +650,7 @@ class LifeState:
                 progress = self.db.execute(
                     "SELECT kind,evidence_json FROM episodes WHERE scope=? AND goal_id=? AND kind IN ('video','video_note','read')",
                     (scope, goal_id)).fetchall()
-                observed = bool(linked_work)
+                observed = bool(linked_work) or self._verified_dsh_report(scope, goal)
                 for row in progress:
                     proof = json.loads(row["evidence_json"])
                     if ((row["kind"] in {"video", "video_note"} and (proof.get("observations") or proof.get("subtitles")))
@@ -665,6 +665,24 @@ class LifeState:
                              new_status, goal["why"] if why is None else why,
                              goal["run_id"] if new_status == "running" else None, time.time(), scope, goal_id))
         return self.get_goal(scope, goal_id)
+
+    def _verified_dsh_report(self, scope, goal):
+        from .dsh_task import task_key
+
+        checkpoint = goal["checkpoint"].get("dsh_file")
+        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("episode_id"), str):
+            return False
+        task = self.store.get_setting(task_key(scope, goal["id"]), {})
+        if not isinstance(task, dict) or task.get("state") != "completed" or task.get("billing") != "autonomous":
+            return False
+        episode = self.db.execute("SELECT source_id,evidence_json FROM episodes WHERE id=? AND scope=? AND goal_id=? AND kind='dsh_file'",
+                                  (checkpoint["episode_id"], scope, goal["id"])).fetchone()
+        if episode is None or episode["source_id"] != task.get("task_id"):
+            return False
+        evidence = json.loads(episode["evidence_json"])
+        return (bool(task.get("usage")) and evidence.get("usage") == task["usage"]
+                and all(task.get(key) and task[key] == checkpoint.get(key) == evidence.get(key)
+                        for key in ("task_id", "session_id", "report", "sources")))
 
     def pause_run(self, scope, run_id, reason):
         reason = _text(reason, "reason", 1000)
@@ -775,7 +793,7 @@ class LifeState:
         self.store.event(scope, "owner_chat_topic", details)
         return details
 
-    def episodes(self, scope, query="", goal_id=None, limit=8):
+    def episodes(self, scope, query="", goal_id=None, limit=8, *, kind=None, subject_id=None):
         query = _text(query, "query", 200, empty=True)
         limit = max(1, min(int(limit), 50))
         sql = "SELECT e.* FROM episodes e WHERE e.scope=? AND NOT EXISTS (SELECT 1 FROM episodes n WHERE n.supersedes_id=e.id)"
@@ -783,6 +801,12 @@ class LifeState:
         if goal_id:
             sql += " AND e.goal_id=?"
             args.append(goal_id)
+        if kind is not None:
+            sql += " AND e.kind=?"
+            args.append(kind)
+        if subject_id is not None:
+            sql += " AND e.subject_id=?"
+            args.append(subject_id)
         if query:
             # Match any term, across evidence or interpretation. Each term is
             # escaped so user text cannot accidentally match every memory.

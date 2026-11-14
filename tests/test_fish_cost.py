@@ -12,7 +12,23 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from deploy.fish_cost import OUTPUT_LIMIT, PRICE_FILE, create_app, load_prices, stream_usage
+from deploy.fish_cost import OUTPUT_LIMIT, PRICE_FILE, create_app, load_prices, normalize_model, stream_usage
+
+
+def _vision_request(role, url):
+    return {"model": "deepseek-flash", "messages": [{"role": role, "content": [
+        {"type": "image_url", "image_url": {"url": url}},
+    ]}]}
+
+
+class VisionGatewayTests(unittest.TestCase):
+    def test_only_inline_user_images_are_accepted_on_openai_route(self):
+        inline = "data:image/jpeg;base64,YWJj"
+        self.assertEqual(normalize_model(_vision_request("user", inline), "openai"), OUTPUT_LIMIT)
+        for role, url, protocol in (("tool", inline, "openai"), ("user", inline, "anthropic"),
+                                    ("user", "https://example.com/a.jpg", "openai")):
+            with self.assertRaises(ValueError):
+                normalize_model(_vision_request(role, url), protocol)
 from deploy.fish_cost_ledger import CostLimit, Ledger, amount
 from plugin.astrbot_plugin_bili_activity.cost_window import peak_end
 

@@ -186,7 +186,7 @@ def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
 
     @mcp.tool()
     async def bili_phone(operation: str, args: dict | None = None) -> dict:
-        """Read-only navigation: status/current/home/following/open_video(bvid,page).
+        """Read-only navigation: status/current/home/following/back/open_video(bvid,page).
 
         A successful launch is not proof of current video identity. Inspect
         identity_verified and requested_video_matches independently.

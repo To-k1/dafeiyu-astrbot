@@ -105,7 +105,6 @@ class WorkshopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         memories = [r[0] for r in self.plugin.store.db.execute("SELECT body FROM memories WHERE scope=?", (SCOPE,))]
         self.assertTrue(any(work["id"] in body for body in memories))
 
-    @unittest.skipUnless(os.name != "nt", "secure dir_fd export is supported on Linux only")
     async def test_export_is_real_markdown_with_sources_and_share_has_receipt_once(self):
         goal, source, work = await self.seed()
         work = await self.write(work, source)
@@ -113,8 +112,8 @@ class WorkshopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         path = Path(exported["path"])
         self.assertTrue(path.is_relative_to(self.plugin.folder / "works"))
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), exported["sha256"])
-        self.assertIn(source["id"], path.read_text())
-        self.assertIn("合作建造研究笔记", path.read_text())
+        self.assertIn(source["id"], path.read_text(encoding="utf-8"))
+        self.assertIn("合作建造研究笔记", path.read_text(encoding="utf-8"))
         await self.plugin.workshop(FakeEvent(), "share", work_id=work["id"], caption="把刚才的资料整理好啦～")
         await self.plugin.workshop(FakeEvent(event_id="duplicate"), "share", work_id=work["id"], caption="换一句配文也不重复投递")
         self.assertEqual(self.delivery.send.await_count, 1)

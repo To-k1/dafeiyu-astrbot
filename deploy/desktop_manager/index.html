@@ -38,7 +38,10 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
   <section class="panel" aria-labelledby="archive-title">
     <h2 id="archive-title">备份与记忆</h2>
     <p class="muted hint">保存本机 SQLite 快照，或生成可读的记忆导出。两项默认排除私聊原文、密钥和登录态。</p>
-    <div class="actions"><button id="backup">备份现在的鱼</button><button id="export">导出记忆</button><button id="history" aria-expanded="false" aria-controls="archive-history">查看历史备份</button></div>
+    <div class="actions"><button id="backup">备份现在的鱼</button><button id="export">导出记忆</button><button id="history" aria-expanded="false" aria-controls="archive-history">查看历史备份</button><button id="recovery" hidden>生成 ThinkBook 还原包</button></div>
+    <p id="recovery-hint" class="muted hint" hidden>保存 ThinkBook 的完整项目状态到台式机，包含私聊和应用凭据。生成时会短暂停止聊天与文件任务服务。</p>
+    <button id="sync-backup" hidden>同步 ThinkBook 普通备份</button>
+    <button id="export-thinkbook" hidden>导出 ThinkBook 记忆</button>
     <p id="archive-message" class="muted hint" role="status"></p><button id="export-folder" hidden>打开导出目录</button>
     <div id="archive-history" hidden><ul class="locations" id="archives"></ul><button id="backup-folder">打开备份目录</button></div>
   </section>
@@ -53,6 +56,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <form id="emulator"><label for="emulator_dir">雷电安装目录</label><input id="emulator_dir" required><button>保存</button></form>
     <form id="models"><label for="ollama_models">Ollama 模型目录</label><input id="ollama_models" required><button>保存</button></form>
     <p class="muted hint" id="metered-label">DSH 计费状态待读取。</p><button id="metered" hidden>启用 DSH 计费接线</button>
+    <p class="muted hint">Windows Python 执行适用于受托和自主文件任务。保存开关后重启两路 DSH。</p><button id="compute-toggle" disabled>启用 Windows Python 执行</button>
     <p class="muted hint" id="write-label">公共写入状态待读取。</p><button id="public" disabled>更改公共写入</button>
     <p class="muted hint">控制台启动的 B 站伴侣使用只读模式。试跑无需导入 B 站 Cookie。</p>
   </details>
@@ -65,6 +69,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <p class="muted hint" id="setup">DeepSeek Key 仅加密保存在当前 Windows 账户中。</p>
     <form id="official"><label for="key">DeepSeek API Key</label><input id="key" type="password" autocomplete="off" required placeholder="官方 API Key"><button>保存</button></form>
     <form id="runner"><label for="password">FishHomeRunner</label><input id="password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
+    <form id="compute-credential"><label for="compute-password">FishHomeCompute</label><input id="compute-password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
     <p class="muted hint">保存 Key 后重启「人民币计费」。AstrBot 交互 Provider 使用 <code>http://127.0.0.1:6197/openai/interaction/v1</code> 和交互本机凭据。</p>
     <button id="showkeys">显示本机 Provider 凭据</button><pre id="keys" hidden></pre>
   </details>
@@ -149,7 +154,7 @@ async function configure(field, value) {
   } catch (error) { $('message').textContent = error.message; }
 }
 function setup(form, input, field) {
-  $(form).onsubmit = e => { e.preventDefault(); const value = field === 'runner_password' ? $(input).value : $(input).value.trim();
+  $(form).onsubmit = e => { e.preventDefault(); const value = field.endsWith('_password') ? $(input).value : $(input).value.trim();
     if ($(input).type === 'password') $(input).value = '';
     configure(field, value);
   };
@@ -160,6 +165,8 @@ async function loadConfig() {
     for (const id of ['napcat_qq','owner_qq','emulator_dir','ollama_models']) $(id).value = config[id];
     $('metered-label').textContent = config.metered_dsh ? 'DSH 已配置使用自主账本。' : 'DSH 尚未配置使用自主账本。';
     $('metered').hidden = config.metered_dsh;
+    $('compute-toggle').textContent = config.compute_enabled ? '关闭 Windows Python 执行' : '启用 Windows Python 执行';
+    $('compute-toggle').disabled = false;
     $('write-label').textContent = '公共写入总开关' + (config.public_write ? '已开启。' : '已关闭。');
     $('public').textContent = config.public_write ? '关闭公共写入' : '允许公共写入';
     $('public').disabled = false;
@@ -177,29 +184,34 @@ async function openLocation(label, message = 'message') {
 }
 async function loadArchives() {
   try {
-    const {backups} = await api('/api/archives');
+    const {backups, last_verified} = await api('/api/archives');
     const rows = backups.map(item => {
       const row = node('li', '');
       const date = new Date(item.modified * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'});
       row.append(node('strong', item.name, 'paths'), node('small', `${date} · ${Math.max(1, Math.ceil(item.bytes / 1024))} KiB`));
       return row;
     });
-    $('archives').replaceChildren(...(rows.length ? rows : [node('li', '还没有桌面备份', 'muted')]));
+    if (last_verified?.verified_at) rows.unshift(node('li', 'ThinkBook 最近同步 · ' + new Date(last_verified.verified_at).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}), 'muted'));
+    $('archives').replaceChildren(...(rows.length ? rows : [node('li', '还没有备份', 'muted')]));
   } catch (error) { $('archive-message').textContent = error.message; }
 }
 async function archive(kind) {
-  $('backup').disabled = $('export').disabled = true;
+  const buttons = ['backup', 'export', 'export-thinkbook', 'recovery', 'sync-backup'];
+  buttons.forEach(id => $(id).disabled = true);
   $('archive-message').textContent = '正在保存，请稍候…';
   try {
     const {name} = await api('/api/archives/' + kind, 'POST');
     $('archive-message').textContent = '已保存 ' + name;
-    if (kind === 'export') $('export-folder').hidden = false;
-    if (kind === 'backup' && !$('archive-history').hidden) await loadArchives();
+    if (kind.startsWith('export')) $('export-folder').hidden = false;
+    else if (!$('archive-history').hidden) await loadArchives();
   } catch (error) { $('archive-message').textContent = error.message; }
-  finally { $('backup').disabled = $('export').disabled = false; }
+  finally { buttons.forEach(id => $(id).disabled = false); }
 }
 $('backup').onclick = () => archive('backup');
 $('export').onclick = () => archive('export');
+$('export-thinkbook').onclick = () => archive('export-thinkbook');
+$('recovery').onclick = () => archive('recovery');
+$('sync-backup').onclick = () => archive('sync');
 $('history').onclick = () => {
   const panel = $('archive-history');
   panel.hidden = !panel.hidden;
@@ -229,9 +241,11 @@ async function runChecks() {
   finally { $('check').disabled = false; }
 }
 setup('official','key','upstream_key'); setup('runner','password','runner_password');
+setup('compute-credential','compute-password','compute_password');
 setup('bot','napcat_qq','napcat_qq'); setup('owner','owner_qq','owner_qq'); setup('emulator','emulator_dir','emulator_dir');
 setup('models','ollama_models','ollama_models');
 $('metered').onclick = () => configure('metered_dsh', true);
+$('compute-toggle').onclick = () => configure('compute_enabled', !config.compute_enabled);
 $('public').onclick = () => {
   if (config.public_write || confirm('打开公共写入总开关？B 站和抖音仍按各自开关、审批与额度执行。')) configure('public_write', !config.public_write);
 };

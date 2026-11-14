@@ -48,6 +48,8 @@ class FakeADB:
             return 0, "Status: ok", ""
         if args[:3] == ["shell", "input", "tap"]:
             return 0, "", ""
+        if args == ["shell", "input", "keyevent", "KEYCODE_BACK"]:
+            return 0, "", ""
         raise AssertionError(args)
 
 
@@ -82,6 +84,17 @@ class ParsingTests(unittest.TestCase):
 
 
 class NavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_back_only_from_bilibili_and_observes_the_new_screen(self):
+        runner = FakeADB(focus=[FOCUS, OTHER])
+        result = await phone.PhoneVideo(runner=runner).run("back")
+        self.assertTrue(result["back_sent"])
+        self.assertEqual(result["reason"], "bilibili_not_focused")
+        self.assertEqual(runner.calls.count(["shell", "input", "keyevent", "KEYCODE_BACK"]), 1)
+        runner = FakeADB(focus=[OTHER])
+        result = await phone.PhoneVideo(runner=runner).run("back")
+        self.assertFalse(result["back_sent"])
+        self.assertEqual(runner.calls, [["shell", "dumpsys", "window"]])
+
     async def test_identity_requires_visible_field_not_launch_echo(self):
         runner = FakeADB(screen=xml("example title", "title"))
         value = await phone.PhoneVideo(runner=runner).open_video(BV, 1)

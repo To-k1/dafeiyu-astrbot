@@ -37,6 +37,14 @@ class BridgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.terminate()
         await self.core.terminate()
 
+    async def test_life_status_exposes_read_only_mood_context(self):
+        self.bridge.record_interest(bili.SCOPE, source_id=self.observation, topic="装置", polarity=1)
+        before = self.core.store.get_owner_state(bili.SCOPE)
+        result = json.loads(await self.plugin.life_status(self.event))
+        self.assertEqual(result["mood_context"]["last_life_event"]["topic"], "装置")
+        self.assertEqual(self.core.store.get_owner_state(bili.SCOPE), before)
+        self.assertIsNone(self.bridge.mood_context(bili.OTHER_SCOPE))
+
     async def test_mixed_appraisal_retains_evidence_without_vote_or_pulse(self):
         thought = "前半段无聊，后半段装置很有意思。"
         result = json.loads(await self.plugin.interest(

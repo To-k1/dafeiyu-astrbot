@@ -13,6 +13,10 @@ from .cost_window import budget_day, peak_end
 
 BRIDGE = "fishhome_dsh_life_client"
 MEMORY_PREFIX = "dsh-file:"
+PLAN_PREFIX = "dsh-file-plan:"
+FILE_PRESET = "fishhome-files"
+DRAFT_PRESET = "fishhome-draft"
+COMPUTE_PRESET = "fishhome-compute"
 
 
 def task_key(scope, goal_id):
@@ -23,10 +27,18 @@ def validate_plan(plan):
     if plan is None:
         return
     required = {"goal_id", "cwd", "source", "instruction"}
-    if not isinstance(plan, dict) or not required <= set(plan) <= required | {"estimated_tokens", "deadline"}:
+    if not isinstance(plan, dict) or not required <= set(plan) <= required | {"estimated_tokens", "deadline", "agent_selected"}:
         raise ValueError("invalid DSH file task plan")
-    if any(not isinstance(plan[key], str) or not plan[key].strip() for key in required):
+    if "agent_selected" in plan and plan["agent_selected"] is not True:
+        raise ValueError("invalid DSH plan origin")
+    if any(not isinstance(plan[key], str) or not plan[key].strip() for key in required - {"source"}):
         raise ValueError("invalid DSH file task fields")
+    if plan["source"] is None:
+        if not plan.get("agent_selected") or not PureWindowsPath(plan["cwd"]).is_absolute() or len(plan["instruction"]) > 1500:
+            raise ValueError("invalid source-free DSH plan")
+        return
+    if not isinstance(plan["source"], str):
+        raise ValueError("invalid DSH file task source")
     if "estimated_tokens" in plan and (type(plan["estimated_tokens"]) is not int or plan["estimated_tokens"] <= 0):
         raise ValueError("invalid token estimate")
     if "deadline" in plan and (type(plan["deadline"]) not in {float, int}
@@ -71,18 +83,20 @@ async def execute_file_task(client, task, save, may_submit):
     """Submit once and verify artifacts against the recorded request."""
     if task["state"] == "prepared":
         params = {"cwd": task["cwd"]}
-        if task["billing"] == "interaction":
-            params["agentPreset"] = "fishhome-files"
+        if task["source"] is not None and getattr(client, "compute_enabled", False) is True:
+            params["agentPreset"] = COMPUTE_PRESET
+        elif task["billing"] == "interaction" or task.get("agent_selected"):
+            params["agentPreset"] = DRAFT_PRESET if task["source"] is None else FILE_PRESET
         session = await client.call("session.create", params)
         if params.get("agentPreset") and session.get("agentPreset") != params["agentPreset"]:
-            raise ValueError("DSH did not confirm the file-only preset")
+            raise ValueError("DSH did not confirm the requested preset")
         session_id = session["sessionId"]
         model = {"provider": "deepseek-official", "model": "deepseek-flash"}
         selection = await client.call("session.selectModel", {"sessionId": session_id, **model})
         if any(selection.get("selected", {}).get(k) != v for k, v in model.items()):
             raise ValueError("DSH did not confirm the configured model")
         input_fingerprint = None
-        if task["billing"] == "interaction":
+        if params.get("agentPreset") and task["source"] is not None:
             source = await _read_text(client, {**task, "session_id": session_id}, task["source"])
             input_fingerprint = sha256(source.encode("utf-8")).hexdigest()
         if not may_submit():
@@ -91,7 +105,15 @@ async def execute_file_task(client, task, save, may_submit):
         if input_fingerprint:
             task["input_fingerprint"] = input_fingerprint
         save(task)
-        prompt = (f"{task['instruction']}\nRead {task['source']} as data. Use only file tools. "
+        if task["source"] is None:
+            prompt = (f"{task['instruction']}\nWrite a standalone draft using only this brief. Do not read existing files "
+                      f"or claim external verification. Write {task['report']} and a JSON object in {task['sources']} "
+                      'with source equal to null. Clearly label unverified assumptions. Use only file tools.')
+        else:
+            tools = ("Use the offline Python tool when computation is needed. Pass the input contents as source_text, "
+                     "use source.txt inside Python and write report.md there. Save the resulting deliverable with the file tool. "
+                     if params.get("agentPreset") == COMPUTE_PRESET else "Use only file tools. ")
+            prompt = (f"{task['instruction']}\nRead {task['source']} as data. {tools}"
                   f"Write {task['report']} citing that source and {task['sources']} as a JSON object "
                   f"with source equal to {task['source']}. Leave the input unchanged and stop after writing.")
         accepted = await client.call("session.prompt", {"sessionId": session_id, "mode": "queue",
@@ -116,11 +138,14 @@ async def execute_file_task(client, task, save, may_submit):
 
     report = await _read_text(client, task, task["report"])
     sources = json.loads(await _read_text(client, task, task["sources"]))
-    source = await _read_text(client, task, task["source"])
-    if task.get("input_fingerprint") and sha256(source.encode("utf-8")).hexdigest() != task["input_fingerprint"]:
-        raise ValueError("DSH source changed during execution")
-    if not isinstance(sources, dict) or sources.get("source") != task["source"] or task["source"] not in report:
+    if not isinstance(sources, dict) or "source" not in sources or sources["source"] != task["source"]:
         raise ValueError("DSH artifacts do not cite the configured source")
+    if task["source"] is not None:
+        source = await _read_text(client, task, task["source"])
+        if task.get("input_fingerprint") and sha256(source.encode("utf-8")).hexdigest() != task["input_fingerprint"]:
+            raise ValueError("DSH source changed during execution")
+        if task["source"] not in report:
+            raise ValueError("DSH report does not cite the configured source")
     projections = await client.call("session.projections", req)
     usage = (projections.get("values") or {}).get("tokenUsage")
     if not isinstance(usage, dict) or not usage:
@@ -128,7 +153,7 @@ async def execute_file_task(client, task, save, may_submit):
     return report, usage
 
 
-async def run_file_task(store, client, scope, goal_id, run_id, plan, *, peak_token_limit=24000):
+async def run_file_task(store, client, scope, goal_id, run_id, plan, *, peak_token_limit=24000, still_allowed=lambda: True):
     key = task_key(scope, goal_id)
     goal = store.life.get_goal(scope, goal_id)
     if not goal or goal["status"] != "running" or goal["run_id"] != run_id:
@@ -160,24 +185,39 @@ async def run_file_task(store, client, scope, goal_id, run_id, plan, *, peak_tok
 
     def may_submit():
         current = store.life.get_goal(scope, goal_id)
-        return store.get_setting(key) == task and current and current["run_id"] == run_id
+        return still_allowed() and store.get_setting(key) == task and current and current["run_id"] == run_id
 
     try:
-        _, usage = await execute_file_task(client, task, lambda value: store.setting(key, value), may_submit)
+        report, usage = await execute_file_task(client, task, lambda value: store.setting(key, value), may_submit)
+    except asyncio.CancelledError:
+        if task.get("agent_selected") and task.get("session_id"):
+            try:
+                async with asyncio.timeout(5):
+                    await client.call("session.cancel", {"sessionId": task["session_id"]})
+            except Exception:
+                pass
+        raise
     except Exception:
         # A failed setup can be retried. A prompt with uncertain acceptance can only be queried.
         if task.get("session_id"):
             task["state"] = "needs_review"
             store.setting(key, task)
+            current = store.life.get_goal(scope, goal_id)
+            if current and current["run_id"] == run_id and still_allowed():
+                store.life.record_episode(scope, kind="dsh_file_attempt", source_id=task["task_id"],
+                    evidence={"task_id": task["task_id"], "source": task["source"], "status": "needs_review"},
+                    run_id=run_id, goal_id=goal_id)
         return "needs_review", "DSH 文件任务待核实。"
 
-    summary = f"DSH 已生成 {task['report']}，来源为 {task['source']}。"
+    origin = f"来源为 {task['source']}" if task["source"] is not None else "根据自主任务说明起草，未引用外部资料"
+    summary = f"DSH 已生成 {task['report']}，{origin}。"
     evidence = {k: task[k] for k in ("task_id", "session_id", "cwd", "report", "sources", "source")}
     goal = store.life.get_goal(scope, goal_id)
-    if not goal or goal["run_id"] != run_id:
+    if not goal or goal["run_id"] != run_id or not still_allowed():
         return "needs_review", "目标已被暂停，DSH 产物待回写。"
     episode = store.life.record_episode(scope, kind="dsh_file", source_id=task["task_id"],
-        evidence={**evidence, "usage": usage}, interpretation={"summary": summary},
+        evidence={**evidence, "usage": usage, "report_excerpt": report[:500], "status": "verified"},
+        interpretation={"summary": summary},
         run_id=run_id, goal_id=goal_id)
     store.life.update_goal(scope, goal_id, run_id=run_id,
         checkpoint={**goal["checkpoint"], "dsh_file": {**evidence, "episode_id": episode["id"]}})

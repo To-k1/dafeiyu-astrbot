@@ -29,7 +29,13 @@ CDN_SUFFIXES = ("bilivideo.com", "bilivideo.cn", "bilivideo.net", "acgvideo.com"
 
 
 def _cdn_url(stream):
-    url = stream.get("baseUrl") or stream.get("base_url")
+    url = next(_cdn_urls(stream), None)
+    if url is None:
+        raise ValueError("no trusted CDN supplied")
+    return url
+
+
+def _validate_cdn_url(url):
     if not isinstance(url, str):
         raise ValueError("stream URL missing")
     parsed = urlsplit(url)
@@ -39,6 +45,18 @@ def _cdn_url(stream):
     if not any(host == s or host.endswith("." + s) for s in CDN_SUFFIXES):
         raise ValueError("unexpected media CDN")
     return url
+
+
+def _cdn_urls(stream):
+    primary = stream.get("baseUrl") or stream.get("base_url")
+    backups = stream.get("backupUrl") or stream.get("backup_url") or []
+    if not isinstance(backups, list):
+        backups = []
+    for candidate in dict.fromkeys(url for url in [primary, *backups] if isinstance(url, str)):
+        try:
+            yield _validate_cdn_url(candidate)
+        except ValueError:
+            continue
 
 
 def _choose_stream(streams, video=False):
@@ -167,6 +185,13 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, RuntimeError):
+            pass
+    if not ffmpeg:
         result["notes"].append("local ffmpeg unavailable; subtitles retained")
         return result
     try:
@@ -194,7 +219,17 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
                 remaining = MAX_DOWNLOAD_BYTES - result["downloaded_bytes"]
                 if remaining <= 0:
                     raise ValueError("download budget exhausted")
-                await api.download(_cdn_url(stream), path, limit=remaining)
+                urls = list(_cdn_urls(stream))
+                if not urls:
+                    raise ValueError("no trusted CDN supplied")
+                for url in urls[:3]:
+                    try:
+                        await api.download(url, path, limit=remaining)
+                        break
+                    except Exception:
+                        path.unlink(missing_ok=True)
+                else:
+                    raise ValueError("trusted media mirrors unavailable")
                 size = path.stat().st_size
                 if size <= 0 or size > remaining:
                     raise ValueError("download size outside allowed budget")

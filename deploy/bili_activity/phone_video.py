@@ -190,6 +190,13 @@ class PhoneVideo:
         async with self.lock:
             return await self._current_video()
 
+    async def back(self):
+        async with self.lock:
+            if not focused_component(await self._adb("shell", "dumpsys", "window")):
+                return {"back_sent": False, "reason": "bilibili_not_focused"}
+            await self._adb("shell", "input", "keyevent", "KEYCODE_BACK")
+            return {**await self._current_video(), "back_sent": True}
+
     async def _launch(self, uri):
         if not (await self.device_online())["online"]:
             raise RuntimeError("device_offline")
@@ -275,6 +282,8 @@ class PhoneVideo:
             return await self.device_online()
         if operation == "current":
             return await self.current_video()
+        if operation == "back":
+            return await self.back()
         if operation == "open_video":
             return await self.open_video(args["bvid"], args.get("page", 1))
         if operation == "home":

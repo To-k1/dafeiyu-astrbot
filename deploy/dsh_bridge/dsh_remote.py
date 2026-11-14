@@ -11,10 +11,12 @@ from .dsh_client import DshClient, DshError
 class RemoteDshClient(DshClient):
     """Reuse the Bridge task flow with DSH's authenticated Remote API."""
 
-    def __init__(self, launch_token: str = "", port: int = 59934, *, session_cookie: str | None = None):
+    def __init__(self, launch_token: str = "", port: int = 59934, *, session_cookie: str | None = None,
+                 compute_enabled: bool = False):
         super().__init__({"dsh_host": "127.0.0.1", "dsh_port": port})
         self._launch_token = launch_token
         self._cookie = session_cookie
+        self.compute_enabled = compute_enabled
 
     async def discover(self, force=False, progress=None):
         return f"http://127.0.0.1:{self.port_override}"

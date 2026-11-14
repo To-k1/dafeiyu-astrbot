@@ -5,6 +5,7 @@ raise importance on recall. All text remains evidence or attributed opinion.
 """
 from __future__ import annotations
 
+import json
 import math
 import time
 
@@ -14,6 +15,7 @@ DEFAULTS = {"life_memory_enabled": False, "life_memory_detail_days": 7,
             "life_memory_dormant_days": 60}
 PREFIX = "life-consolidation:v1:"
 LIMIT = 500
+INTEREST_REVIEW = "interest_review"
 
 
 def validate_config(cfg):
@@ -70,6 +72,8 @@ class MemoryPolicy:
             return "protected", "主人明确表达的偏好"
         if row["kind"] in {"work_checked", "method_result"}:
             return "protected", "已检查的作品或方法尝试证据；检查不等于事实正确"
+        if row["kind"] in {INTEREST_REVIEW, "dsh_file_note"}:
+            return "protected", "大肥鱼留下的可追溯观点"
         goal = self.store.life.get_goal(row["scope"], row["goal_id"]) if row["goal_id"] else None
         if goal and goal["status"] not in {"completed", "cancelled"}:
             return "protected", "未完成目标仍需原始证据"
@@ -103,7 +107,8 @@ class MemoryPolicy:
     def _gist(row):
         proof, opinion = row["evidence"], row["interpretation"]
         # Whitelist provenance, never copy a raw read response into the gist.
-        refs = {key: proof[key] for key in ("bvid", "cid", "operation", "work_id", "revision", "status", "author", "package") if key in proof}
+        refs = {key: proof[key] for key in ("bvid", "cid", "operation", "work_id", "revision", "status",
+                "author", "package", "task_id", "report", "source") if key in proof}
         thought = opinion.get("thought") or opinion.get("title") or opinion.get("summary")
         interest = opinion.get("interest")
         result = {"kind": row["kind"], "source": refs}
@@ -117,6 +122,12 @@ class MemoryPolicy:
         if felt_tone and isinstance(felt_tone, str) and felt_tone.strip():
             result["felt_tone"] = felt_tone.strip()[:60]
         return result
+
+    def conversation_context(self, scope, cfg):
+        """A small source-linked projection for optional background in ordinary chat."""
+        rows = self.recall(scope, cfg, limit=2)
+        return [{"id": row["id"], "recall_phase": row["recall_phase"],
+                 "source_lookup": row["source_lookup"], "gist": row.get("gist") or self._gist(row)} for row in rows]
 
     def recall(self, scope, cfg, query="", goal_id=None, *, episode_id="", limit=8, now=None):
         cfg = DEFAULTS | cfg
@@ -208,6 +219,57 @@ class MemoryPolicy:
                 result.append({"id": key, "body": body, "source_ids": [v["episode_id"] for v in sources]})
         return result
 
+    def interest_reviews(self, scope, query="", candidate_id=""):
+        """Join a current or previously reviewed inference to its sources and current opinion."""
+        saved = {row["subject_id"]: row for row in self.store.life.episodes(
+            scope, query, limit=50, kind=INTEREST_REVIEW, subject_id=candidate_id or None)}
+        candidates = {item["id"]: json.loads(item["body"]) for item in self.candidates(scope)}
+        # Preserve exactly the inference the role reviewed, including after evidence changes.
+        subjects = {key: row["evidence"]["inference"] for key, row in saved.items()}
+        for key, inference in candidates.items():
+            subjects.setdefault(key, inference)
+        matches = []
+        for key, inference in subjects.items():
+            if (candidate_id and candidate_id != key or query and key not in saved
+                    and query.casefold() not in inference["topic"].casefold()):
+                continue
+            sources = []
+            for ref in inference["sources"]:
+                fact = self.source(scope, ref["source_episode_id"])
+                appraisal = self.source(scope, ref["episode_id"])
+                sources.append({"ref": ref, "fact": self._gist(fact)["source"] if fact else None,
+                                "fact_superseded_by": fact["superseded_by"] if fact else None,
+                                "past_view": appraisal["interpretation"].get("thought") if appraisal else None})
+            review = saved.get(key)
+            matches.append({"candidate_id": key, "topic": inference["topic"], "polarity": inference["polarity"],
+                            "current_candidate": candidates.get(key) == inference, "sources": sources,
+                            "agent_view": {**review["interpretation"], "episode_id": review["id"],
+                                           "previous_episode_id": review["supersedes_id"],
+                                           "at": review["occurred_at"]} if review else None})
+            if len(matches) == 8:
+                break
+        return matches
+
+    def review_interest(self, scope, candidate_id, stance, opinion):
+        if stance not in {"agree", "disagree", "uncertain"} or not 0 < len(opinion.strip()) <= 500:
+            raise ValueError("请提供当前看法及其理由，最多 500 字")
+        with self.store._lock:
+            previous = next(iter(self.store.life.episodes(scope, kind=INTEREST_REVIEW, subject_id=candidate_id)), None)
+            if previous:
+                inference = previous["evidence"]["inference"]
+            else:
+                candidate = next((row for row in self.candidates(scope) if row["id"] == candidate_id), None)
+                if candidate is None:
+                    raise ValueError("当前私聊没有这个可核对的兴趣候选")
+                inference = json.loads(candidate["body"])
+            interpretation = {"stance": stance, "thought": opinion.strip()}
+            if previous and previous["interpretation"] == interpretation:
+                return previous
+            previous_id = previous["id"] if previous else None
+            return self.store.life.record_episode(scope, kind=INTEREST_REVIEW, subject_id=candidate_id,
+                source_id=digest([candidate_id, previous_id, interpretation]), supersedes_id=previous_id,
+                evidence={"inference": inference}, interpretation=interpretation)
+
     def queue(self, scope, cfg, *, now=None):
         if not (enabled(cfg) and cfg.get("enabled") is True):
             return None
@@ -218,6 +280,8 @@ class MemoryPolicy:
             if latest is not None and now - latest < 86400:
                 return None
             for candidate in self.candidates(scope, now=now):
+                if self._review_blocks_consolidation(scope, candidate["id"]):
+                    continue
                 if self.db.execute("SELECT 1 FROM memories WHERE id=?", (candidate["id"],)).fetchone():
                     continue
                 self.store.queue_memory(scope, candidate["body"], candidate["id"])
@@ -228,7 +292,12 @@ class MemoryPolicy:
 
     def valid_pending(self, scope, row):
         # Recheck corrections/opposing evidence immediately before dispatch.
-        return any(v["id"] == row["id"] and v["body"] == row["body"] for v in self.candidates(scope))
+        return (not self._review_blocks_consolidation(scope, row["id"])
+                and any(v["id"] == row["id"] and v["body"] == row["body"] for v in self.candidates(scope)))
+
+    def _review_blocks_consolidation(self, scope, candidate_id):
+        reviews = self.store.life.episodes(scope, limit=1, kind=INTEREST_REVIEW, subject_id=candidate_id)
+        return bool(reviews and reviews[0]["interpretation"]["stance"] in {"disagree", "uncertain"})
 
     def status(self, scope, cfg, *, now=None):
         cfg = DEFAULTS | cfg
