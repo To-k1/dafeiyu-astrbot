@@ -89,6 +89,31 @@ class NativeMemoryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(mem["metadata"]["fishhome_evaluation_author"], "fish")
                 self.assertEqual(mem["metadata"]["fishhome_source_ref"], "fish-chat")
                 self.assertIn(fishid, [x.doc_id for x in await fish.search(owner="fish", query="apple", k=10, **fish_scope)])
+                # A verified native turn can save/read before the parent chat finishes.
+                from team_native_test_package.core import Store
+                from team_native_test_package.dsh_roster import DshRoster
+                from team_native_test_package.dsh_chats import DshChats
+                from team_native_test_package.team_memory import TeamMemory
+                activity_store = Store(path / 'source-activity')
+                try:
+                    scope = 'qq:FriendMessage:owner'
+                    agent = DshRoster(activity_store, scope).create('native-member', 'persona')['id']
+                    chats = DshChats(activity_store, scope)
+                    row = chats.enqueue('agree to verify original date', agent, 'source')
+                    request = 'f' * 32
+                    row.update(status='running', verified_memory_turns={request: {
+                        'result': 'We agree to verify the original date.', 'go_receipt_count': 1, 'persona_version': 1}})
+                    chats._save(row)
+                    service = TeamMemory(activity_store, context, path / 'unused')
+                    service.runtime = runtime
+                    saved = await service.remember_turn(scope, agent, row['id'], request,
+                        [{'kind': 'fact', 'text': 'We agreed to verify the original date.'}])
+                    self.assertEqual((await bro.get(owner=agent, memory_id=saved[0]))['text'],
+                                     'We agreed to verify the original date.')
+                    self.assertIn(saved[0], [x.doc_id for x in await bro.search(owner=agent, query='verify original date', k=10)])
+                    self.assertEqual(chats.get(row['id'])['status'], 'running')
+                finally:
+                    activity_store.close()
                 with adapter_access({"filtering_settings": {"shared_adapter_ids": []}}, "fishhome-dsh:bro-a"):
                     native_hits = await bro.engine.search_memories("likes tea", 10)
                     self.assertIn(aid, [x.doc_id for x in native_hits])

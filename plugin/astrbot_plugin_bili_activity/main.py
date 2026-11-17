@@ -3230,7 +3230,24 @@ class BiliActivity(Star):
             return client
 
         async def notify(row):
-            if row.get("agent_id") and row.get("memory_proposals"):
+            if row.get("agent_id") and row.get("verified_memory_turns"):
+                for request_id, verified in row["verified_memory_turns"].items():
+                    if request_id in row.get("memory_saved_turns", {}):
+                        continue
+                    try:
+                        receipt = await self.team_memory().remember_turn(scope, row["agent_id"], row["id"],
+                            request_id, verified.get("proposals", []))
+                        current = jobs.get(row["id"])
+                        current.setdefault("memory_saved_turns", {})[request_id] = receipt
+                        current.setdefault("memory_saved", []).extend(receipt or [])
+                        jobs._save(current)
+                    except Exception as exc:
+                        current = jobs.get(row["id"])
+                        current["memory_error"] = {"stage": "save", "type": type(exc).__name__}
+                        jobs._save(current)
+                        logger.warning("[bili_activity] dsh turn memory: %s", type(exc).__name__)
+                row = jobs.get(row["id"])
+            elif row.get("agent_id") and row.get("memory_proposals") and not row.get("memory_saved"):
                 try:
                     receipt = await self.team_memory().remember(scope, row["agent_id"], "chat:" + row["id"], row["memory_proposals"])
                     current = jobs.get(row["id"])

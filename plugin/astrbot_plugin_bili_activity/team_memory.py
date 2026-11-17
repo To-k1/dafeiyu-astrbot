@@ -5,7 +5,7 @@ from pathlib import Path
 from .core import canonical
 from .dsh_roster import DshRoster
 from .team_history import TeamHistory
-from .team_memory_protocol import GUIDANCE, MemoryProtocolError, parse, recalled_prompt
+from .team_memory_protocol import GUIDANCE, REPAIR_GUIDANCE, MemoryProtocolError, parse, recalled_prompt
 from .team_memory_runtime import TeamMemoryRuntime
 
 
@@ -54,9 +54,10 @@ class TeamMemory:
     def decode(reply):
         try:
             text, memories, query = parse(reply)
-            return {"text": text, "memories": memories, "query": query}
+            return {"text": text, "memories": memories, "query": query,
+                    "present": "<fishhome_memory>" in reply and "</fishhome_memory>" in reply}
         except MemoryProtocolError as exc:
-            return {"text": reply, "memories": [], "query": "", "error": str(exc)}
+            return {"text": reply, "memories": [], "query": "", "present": False, "error": str(exc)}
 
     async def remember(self, scope, agent_id, ref, memories):
         if not memories:
@@ -67,11 +68,18 @@ class TeamMemory:
         saved = []
         for index, item in enumerate(memories):
             kind = item["kind"]
-            saved.append(await backend.save(owner=agent_id,
+            ident = await backend.save(owner=agent_id,
                 source_ref={"scope": scope, "ref": ref, "proposal_index": index, "kind": kind},
                 content=item["text"], actors=["fish", agent_id], speakers=[],
-                evaluation_author=agent_id if kind == "evaluation" else None, summary_author=agent_id, importance=0.6))
+                evaluation_author=agent_id if kind == "evaluation" else None, summary_author=agent_id, importance=0.6)
+            confirmed = await backend.get(owner=agent_id, memory_id=ident)
+            if not confirmed or confirmed.get("content", confirmed.get("text")) != item["text"]:
+                raise ValueError("小弟记忆写入回执尚未通过原生库回读")
+            saved.append(ident)
         return saved
+
+    async def remember_turn(self, scope, agent_id, job_id, request_id, memories):
+        return await self.remember(scope, agent_id, f"chat:{job_id}:turn:{request_id}", memories)
 
     async def complete_source(self, event, ref):
         scope = event.unified_msg_origin

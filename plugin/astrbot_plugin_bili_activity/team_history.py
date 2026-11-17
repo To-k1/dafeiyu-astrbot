@@ -97,6 +97,21 @@ class TeamHistory:
     def get(self, ref, agent_id=""):
         if not isinstance(ref, str) or not isinstance(agent_id, str):
             raise ValueError("无效的历史引用")
+        match = re.fullmatch(r"chat:([0-9a-f]{16}):turn:([0-9a-f]{32})", ref)
+        if match:
+            job_id, request_id = match.groups()
+            row = self.store.get_setting(_PREFIXES['chat'] + self.scope + ':' + job_id)
+            turn = (row or {}).get('verified_memory_turns', {}).get(request_id)
+            if (row and turn and turn.get('go_receipt_count', 0) > 0
+                    and (not agent_id or row.get('agent_id') == agent_id)):
+                return {'ref': ref, 'kind': 'chat', 'source': {
+                    'id': job_id, 'agent_id': row['agent_id'], 'status': 'completed',
+                    'parent_status': row['status'], 'message': row.get('message'),
+                    'result': turn['result'], 'request_id': request_id,
+                    'session_id': row.get('turn', {}).get('session_id') or row.get('session_id'),
+                    'persona_version': turn.get('persona_version'),
+                    'go_receipt_count': turn['go_receipt_count'], 'verified_turn': True}}
+            raise ValueError("找不到这条已验证的原生聊天回合")
         for kind, current_ref, row in self._records():
             if current_ref == ref and (not agent_id or agent_id in self._participants(kind, row)):
                 result = {"ref": ref, "kind": kind, "source": row}
