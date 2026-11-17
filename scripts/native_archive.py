@@ -21,11 +21,14 @@ FORMAT = "fishhome-native-v1"
 LM = "data/plugin_data/astrbot_plugin_livingmemory"
 ACTIVITY = "data/plugin_data/astrbot_plugin_bili_activity/activity.sqlite3"
 AFFECTIVE = "data/plugin_data/astrbot_plugin_affective_core/affective.db"
+TEAM_MEMORY = "data/plugin_data/astrbot_plugin_bili_activity/dsh_team_memory"
 RUNTIME_SQLITE = {ACTIVITY, AFFECTIVE}
-SQLITE = {f"{LM}/livingmemory.db", f"{LM}/livingmemory_graph_documents.db"} | RUNTIME_SQLITE
+SQLITE = {f"{LM}/livingmemory.db", f"{LM}/livingmemory_graph_documents.db",
+          f"{TEAM_MEMORY}/livingmemory.db"} | RUNTIME_SQLITE
 # AstrBot's core DB also stores API keys and trusted-device credentials.
 CHAT = {f"{LM}/conversations.db"}
-COMPANIONS = {f"{LM}/livingmemory.index", f"{LM}/livingmemory_graph.index", f"{LM}/decay_state.json"}
+COMPANIONS = {f"{LM}/livingmemory.index", f"{LM}/livingmemory_graph.index", f"{LM}/decay_state.json",
+              f"{TEAM_MEMORY}/livingmemory.index"}
 MANIFEST = "manifest.json"
 PRIVATE_NAME = re.compile(r"credential|secret|cookie|token|passwor[dt]|login|session|\.env", re.I)
 

@@ -44,6 +44,32 @@ class ChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.jobs.list()), 2)
         self.assertEqual(self.plugin.start_dsh_chat_worker.call_count, 2)
 
+    async def test_named_session_management_keeps_identity_and_queued_destination(self):
+        roster = DshRoster(self.plugin.store, SCOPE)
+        agent = roster.create('Fixture', 'Original persona.')
+        event = FakeEvent()
+        self.plugin.dsh_chat_lock = lambda *_: asyncio.Lock()
+        async def manage(action, **fields):
+            return json.loads(await self.plugin.dsh_chat(event, agent_id=agent['id'], action=action, **fields))
+        first = (await manage('session_new', title='Agreement'))['session']
+        queued = json.loads(await self.plugin.dsh_chat(event, 'Remember this agreement', agent['id']))
+        second = (await manage('session_new', title='Research'))['session']
+        listed = await manage('session_list')
+        self.assertEqual(listed['current_session_id'], second['id'])
+        self.assertEqual({s['id'] for s in listed['sessions']}, {first['id'], second['id']})
+        bound = self.jobs.get(queued['id'])
+        self.assertEqual(bound['logical_session_id'], first['id'])
+        await manage('session_archive', session_id=first['id'])
+        with self.assertRaises(ValueError):
+            await self.plugin.dsh_chat(event, 'New message', agent['id'], session_id=first['id'])
+        restored = (await manage('session_select', session_id=first['id']))['session']
+        self.assertEqual(restored['status'], 'active')
+        original = roster.get(agent['id'])
+        self.assertEqual(original['version'], 1)
+        self.assertEqual(original['profiles'][-1]['persona'], 'Original persona.')
+        self.assertEqual(len(self.jobs.list()), 1)
+        self.plugin.start_dsh_chat_worker.assert_called_once()
+
     async def test_reply_is_kept_when_qq_offline_and_model_not_called_twice(self):
         row = self.jobs.enqueue('Question', '', 'source')
         row.update(status='completed', result='Full subordinate response')

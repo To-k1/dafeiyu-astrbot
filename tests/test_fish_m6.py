@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from scripts.m6_data import preview_migration, room_activity, sync_room
-from scripts.native_archive import ACTIVITY, AFFECTIVE, CHAT, LM, restore, snapshot, verify
+from scripts.native_archive import ACTIVITY, AFFECTIVE, CHAT, LM, TEAM_MEMORY, restore, snapshot, verify
 
 
 class NativeArchiveTests(unittest.TestCase):
@@ -72,6 +72,20 @@ class NativeArchiveTests(unittest.TestCase):
         self.archive = self.root / "memory-only.zip"
         manifest = self.create(profile="memory")
         self.assertNotIn(AFFECTIVE, {row["path"] for row in manifest["files"]})
+
+    def test_team_memory_native_database_is_included_and_restored(self):
+        name = f"{TEAM_MEMORY}/livingmemory.db"
+        path = self.data / name
+        path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, body TEXT)")
+            conn.execute("INSERT INTO memories VALUES (1, 'agreement with fish')")
+        manifest = self.create(profile="memory")
+        self.assertIn(name, {row["path"] for row in manifest["files"]})
+        target = self.root / "restored"
+        restore(self.archive, target, apply=True)
+        with closing(sqlite3.connect(target / name)) as conn:
+            self.assertEqual(conn.execute("SELECT body FROM memories").fetchone()[0], 'agreement with fish')
 
     def test_room_snapshot_omits_private_affective_details(self):
         projected = room_activity({"affect": {"state": "ready", "valence": -0.5,

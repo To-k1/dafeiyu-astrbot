@@ -88,6 +88,99 @@ class DshRoster:
         return {"id": ident, "name": profile["name"], "version": profile["version"],
                 "persona": profile["persona"], "guides": list(guides)}
 
+    def _sessions(self, row):
+        # Migrate only on first use, preserving the native history of old rows.
+        if "chat_sessions" not in row:
+            now = time()
+            session = {"id": uuid4().hex[:16], "title": "日常对话", "created": now,
+                       "status": "active", "persona_version": row["version"],
+                       "native_session": row.get("chat_session")}
+            row["chat_sessions"] = [session]
+            row["current_chat_session"] = session["id"]
+            row["legacy_chat_session_id"] = session["id"]
+            self.save(row)
+        return row["chat_sessions"]
+
+    def _session(self, row, session_id=""):
+        sessions = self._sessions(row)
+        ident = session_id or row.get("current_chat_session")
+        session = next((item for item in sessions if item["id"] == ident), None)
+        if not session:
+            raise ValueError("找不到这段对话，请选择已有会话")
+        return session
+
+    def _select_pointer(self, row, session):
+        row["current_chat_session"] = session["id"]
+        if session.get("native_session"):
+            row["chat_session"] = session["native_session"]
+        else:
+            row.pop("chat_session", None)
+
+    def list_sessions(self, ident):
+        with self.store.transaction():
+            row = self.get(self.resolve(ident))
+            return [dict(item, selected=item["id"] == row.get("current_chat_session"))
+                    for item in self._sessions(row)]
+
+    def new_session(self, ident, title=""):
+        if not isinstance(title, str) or len(title.strip()) > 80:
+            raise ValueError("会话标题不能超过 80 字")
+        with self.store.transaction():
+            row = self.get(self.resolve(ident))
+            if "chat_sessions" not in row and not row.get("chat_session"):
+                queue_prefix = self.prefix.replace("dsh-roster:v1:", "dsh-chat:v1:", 1)
+                old_jobs = (json.loads(item[0]) for item in self.store.db.execute(
+                    "SELECT value FROM settings WHERE substr(key,1,?)=?", (len(queue_prefix), queue_prefix)))
+                if any(job.get("agent_id") == row["id"] and not job.get("logical_session_id")
+                       and job.get("status") in {"queued", "running", "go_wait"} for job in old_jobs):
+                    self._sessions(row)
+                else:
+                    row["chat_sessions"] = []
+            else:
+                self._sessions(row)
+            session = {"id": uuid4().hex[:16], "title": title.strip() or "日常对话",
+                       "created": time(), "status": "active", "persona_version": row["version"],
+                       "native_session": None}
+            row["chat_sessions"].append(session)
+            self._select_pointer(row, session)
+            self.save(row)
+            return dict(session, selected=True)
+
+    def select_session(self, ident, session_id):
+        with self.store.transaction():
+            row = self.get(self.resolve(ident))
+            session = self._session(row, session_id)
+            session["status"] = "active"
+            self._select_pointer(row, session)
+            self.save(row)
+            return dict(session, selected=True)
+
+    def archive_session(self, ident, session_id):
+        with self.store.transaction():
+            row = self.get(self.resolve(ident))
+            session = self._session(row, session_id)
+            session["status"] = "archived"
+            self.save(row)
+            return dict(session, selected=session["id"] == row.get("current_chat_session"))
+
+    def bind_session(self, ident, session_id=""):
+        row = self.get(ident)
+        session = self._session(row, session_id)
+        if session["status"] != "active":
+            raise ValueError("该会话已归档，请先选择并恢复")
+        return session["id"]
+
+    def set_native_session(self, ident, session_id, native):
+        with self.store.transaction():
+            row = self.get(ident)
+            session = self._session(row, session_id)
+            if not session.get("native_session"):
+                session["native_session"] = native
+            if row.get("current_chat_session") == session_id:
+                self._select_pointer(row, session)
+            self.save(row)
+            return session["native_session"]
+
     async def chat(self, ident, client, cwd, message):
         """Called under the per-agent chat lock. Recover a prior prompt by its persisted ID."""
         row = self.get(ident)
