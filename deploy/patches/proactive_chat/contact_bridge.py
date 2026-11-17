@@ -83,6 +83,18 @@ def coordinated_send(method):
             return False
         token = CURRENT.set((api, ticket, session_id))
         try:
+            from astrbot.core.platform.sources.aiocqhttp.qq_outbox_adapter import LIVE_GUARD
+        except ImportError:
+            LIVE_GUARD = None
+
+        def recheck():
+            if coordinator(self.plugin, session_id) is not api:
+                return False
+            api.dispatch(ticket)
+            return True
+
+        outbox_token = LIVE_GUARD.set(recheck) if LIVE_GUARD is not None else None
+        try:
             result = await method(self, session_id, text, *args, **kwargs)
         except StopContact:
             complete(api, ticket, "cancelled")
@@ -95,5 +107,7 @@ def coordinated_send(method):
             complete(api, ticket, "reported" if result is True else "uncertain")
             return result
         finally:
+            if outbox_token is not None:
+                LIVE_GUARD.reset(outbox_token)
             CURRENT.reset(token)
     return wrapped

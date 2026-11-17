@@ -648,13 +648,19 @@ class LifeState:
                     if not Workshop(self.store).check(scope, linked_work["id"])["passed"]:
                         raise ValueError("a completed writing goal needs its latest work to pass fresh checks")
                 progress = self.db.execute(
-                    "SELECT kind,evidence_json FROM episodes WHERE scope=? AND goal_id=? AND kind IN ('video','video_note','read')",
+                    "SELECT kind,subject_kind,evidence_json FROM episodes WHERE scope=? AND goal_id=? "
+                    "AND kind IN ('video','video_note','read','dsh_video','dsh_web_search')",
                     (scope, goal_id)).fetchall()
                 observed = bool(linked_work) or self._verified_dsh_report(scope, goal)
                 for row in progress:
                     proof = json.loads(row["evidence_json"])
                     if ((row["kind"] in {"video", "video_note"} and (proof.get("observations") or proof.get("subtitles")))
-                            or (row["kind"] == "read" and observed_read_evidence(proof))):
+                            or (row["kind"] == "read" and observed_read_evidence(proof))
+                            or (row["kind"] == "dsh_video" and row["subject_kind"] == "system"
+                                and any(sample.get("frame_times") or sample.get("subtitle_count")
+                                        for sample in proof.get("samples", [])))
+                            or (row["kind"] == "dsh_web_search" and row["subject_kind"] == "system"
+                                and proof.get("sources"))):
                         observed = True
                         break
                 if not observed:
@@ -793,7 +799,7 @@ class LifeState:
         self.store.event(scope, "owner_chat_topic", details)
         return details
 
-    def episodes(self, scope, query="", goal_id=None, limit=8, *, kind=None, subject_id=None):
+    def episodes(self, scope, query="", goal_id=None, limit=8, *, kind=None, subject_id=None, record_id=None):
         query = _text(query, "query", 200, empty=True)
         limit = max(1, min(int(limit), 50))
         sql = "SELECT e.* FROM episodes e WHERE e.scope=? AND NOT EXISTS (SELECT 1 FROM episodes n WHERE n.supersedes_id=e.id)"
@@ -807,6 +813,9 @@ class LifeState:
         if subject_id is not None:
             sql += " AND e.subject_id=?"
             args.append(subject_id)
+        if record_id is not None:
+            sql += " AND (e.id=? OR e.source_id=?)"
+            args.extend((record_id, record_id))
         if query:
             # Match any term, across evidence or interpretation. Each term is
             # escaped so user text cannot accidentally match every memory.

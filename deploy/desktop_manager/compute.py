@@ -33,7 +33,7 @@ def acl(path, *args):
                    creationflags=subprocess.CREATE_NO_WINDOW)
 
 
-def prepare(directory, source, archive, python, token, runner):
+def prepare(directory, source, archive, python, token, runner, projects=None):
     directory.mkdir(exist_ok=True)
     if directory.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
         raise ValueError("计算组件目录不能是链接")
@@ -43,8 +43,15 @@ def prepare(directory, source, archive, python, token, runner):
         raise ValueError("计算组件目录不属于当前运维账户")
     acl(directory, "/inheritance:r", "/grant:r", f"*{current_sid}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F",
         "*S-1-5-32-544:(OI)(CI)F", f"*{sid(ACCOUNT)}:(OI)(CI)RX", f"*{sid(runner)}:(OI)(CI)RX")
-    for filename in ("compute_mcp.py", "probe_appcontainer.py", "compute_proxy.py"):
+    for filename in ("compute_mcp.py", "probe_appcontainer.py", "compute_proxy.py", "project_compute.py"):
         shutil.copyfile(source / filename, directory / filename)
+    if projects is not None:
+        if not projects.parent.is_dir() or projects.parent.resolve() != projects.parent:
+            raise ValueError("项目目录的父级必须是真实的已配置工作区")
+        projects.mkdir(exist_ok=True)
+        if projects.resolve() != projects or projects.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError("计算项目目录不能是链接")
+        acl(projects, "/grant:r", f"*{sid(ACCOUNT)}:(OI)(CI)M")
     cached = directory / "python.tar.gz"
     if not cached.is_file():
         partial = cached.with_suffix(".tmp")

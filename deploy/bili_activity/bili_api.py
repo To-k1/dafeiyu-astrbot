@@ -133,15 +133,15 @@ def decode_danmaku_xml(body):
 
 
 class BiliAPI:
-    def __init__(self, cookie_file):
-        self.cookie_file = Path(cookie_file)
+    def __init__(self, cookie_file=None):
+        self.cookie_file = Path(cookie_file) if cookie_file is not None else None
         self._wbi = None
         self._lock = asyncio.Lock()
         self._fingerprint_lock = asyncio.Lock()
         self._last_request = 0.0
 
     def cookies(self):
-        if not self.cookie_file.exists():
+        if self.cookie_file is None or not self.cookie_file.exists():
             return {}
         with self.cookie_file.open(encoding="utf-8") as stream:
             value = json.load(stream)
@@ -153,6 +153,8 @@ class BiliAPI:
 
     async def ensure_buvid3(self):
         """Provision missing browser fingerprint, without replacing login metadata."""
+        if self.cookie_file is None:
+            raise BiliError("credential file is required for authenticated operations")
         async with self._fingerprint_lock:
             if self.cookies().get("buvid3"):
                 return
@@ -185,7 +187,7 @@ class BiliAPI:
 
     def headers(self, authenticated=True):
         headers = {"User-Agent": UA, "Referer": "https://www.bilibili.com/"}
-        if authenticated:
+        if authenticated and self.cookie_file is not None:
             # Only the API host receives these headers. Never media CDN URLs.
             headers["Cookie"] = "; ".join(
                 f"{name}={value}" for name, value in self.cookies().items()
@@ -355,7 +357,7 @@ class BiliAPI:
         if operation == "status":
             fingerprint = {"buvid3_present": bool(self.cookies().get("buvid3"))}
             if not self.credentials_present():
-                return {"logged_in": False, "credential_file_present": self.cookie_file.exists(), **fingerprint}
+                return {"logged_in": False, "credential_file_present": self.cookie_file is not None and self.cookie_file.exists(), **fingerprint}
             try:
                 nav = await self.request("/x/web-interface/nav")
             except BiliError as exc:

@@ -26,3 +26,33 @@
               write: true
               edit: false
               applyPatch: false
+    - id: preset-fishhome-draft
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: fishhome-draft
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: Draft from the current brief. Use only the specified output files.
+              complete: true
+              includeRuntimeContext: false
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: false
+              readImage: false
+              write: true
+              edit: false
+              applyPatch: false
+    - id: preset-fishhome-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: fishhome-chat
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: Answer the current message directly in text.
+              complete: true
+              includeRuntimeContext: false

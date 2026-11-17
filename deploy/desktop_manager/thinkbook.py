@@ -36,8 +36,10 @@ ROUTES = {
     "/api/diagnostics": {"GET"}, "/api/ui/dsh": {"POST"}, "/api/archives": {"GET"},
     "/api/archives/backup": {"POST"}, "/api/archives/export": {"POST"},
     "/api/budgets": {"GET", "POST"}, "/api/provider-keys": {"GET"},
+    "/api/dsh-team": {"GET"},
+    "/api/dsh-team/cancel": {"POST"},
 }
-SERVICE_ACTION = re.compile(r"/api/services/(budget|ollama|emulator|phone|bili|compute|dsh|dsh_commission|astrbot|napcat|room|all)/(start|stop|restart)")
+SERVICE_ACTION = re.compile(r"/api/services/(budget|ollama|emulator|phone|bili|compute|desktop|dsh|dsh_commission|astrbot|napcat|room|all)/(start|stop|restart)")
 
 
 def module_url(text):

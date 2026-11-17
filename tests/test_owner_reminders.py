@@ -9,6 +9,30 @@ from bili_activity_test.reminders import OwnerReminders, SHANGHAI
 
 
 class OwnerReminderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_due_reminders_queue_while_offline_and_reconcile_actual_receipt(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            reminders = OwnerReminders(store)
+            scope = "test:FriendMessage:12345"
+            now = datetime(2026, 11, 12, 9, tzinfo=SHANGHAI).timestamp()
+            first = reminders.create(scope, "41", "2026-11-12 09:01", "带伞", now=now)
+            second = reminders.create(scope, "42", "2026-11-12 09:02", "带钥匙", now=now)
+            send = AsyncMock()
+            enqueue = AsyncMock(side_effect=[{"fishhome_queue_id": "first"}, {"fishhome_queue_id": "second"}])
+            queued = {}
+            for _ in range(2):
+                await reminders.dispatch_due(scope, send, now=now + 121, ready=lambda: False,
+                                             enqueue=enqueue, lookup=queued.get)
+            self.assertEqual([call.args[2] for call in enqueue.await_args_list],
+                             [reminders._key(scope, first), reminders._key(scope, second)])
+            send.assert_not_awaited()
+            self.assertTrue(reminders.cancel(scope, second, lambda entry: entry == "second"))
+            queued["first"] = {"state": "sent", "message_id": "-67"}
+            await reminders.dispatch_due(scope, send, now=now + 122, enqueue=enqueue, lookup=queued.get)
+            rows = {item["id"]: item for item in reminders.list(scope)}
+            self.assertEqual(rows[first]["message_id"], "-67")
+            self.assertEqual(rows[second]["status"], "cancelled")
+            self.assertEqual(enqueue.await_count, 2)
+
     async def test_create_cancel_dispatch_and_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             store = core.Store(folder)

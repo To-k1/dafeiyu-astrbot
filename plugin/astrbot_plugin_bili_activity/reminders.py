@@ -44,13 +44,14 @@ class OwnerReminders:
             self.store.setting(key, {"id": ident, "due": due, "text": text.strip(), "status": "pending"})
         return ident
 
-    def cancel(self, scope, ident):
+    def cancel(self, scope, ident, cancel_queued=None):
         if not re.fullmatch(r"[0-9a-f]{12}", ident):
             return False
         key = self._key(scope, ident)
         with self.store.transaction():
             row = self.store.get_setting(key)
-            if not row or row["status"] != "pending":
+            if not row or (row["status"] != "pending" and not
+                    (row["status"] == "queued" and cancel_queued and cancel_queued(row["queue_id"]))):
                 return False
             self.store.setting(key, {**row, "status": "cancelled"})
         return True
@@ -62,8 +63,17 @@ class OwnerReminders:
             "ORDER BY json_extract(value,'$.due') DESC LIMIT 10", (len(prefix), prefix)
         )]
 
-    async def dispatch_due(self, scope, send, *, now=None, ready=lambda: True):
+    async def dispatch_due(self, scope, send, *, now=None, ready=lambda: True, enqueue=None, lookup=None):
         prefix = self._key(scope)
+        if lookup:
+            queued = self.store.db.execute(
+                "SELECT key,value FROM settings WHERE substr(key,1,?)=? AND json_extract(value,'$.status')='queued'",
+                (len(prefix), prefix)).fetchall()
+            for key, raw in queued:
+                row = json.loads(raw)
+                receipt = lookup(row["queue_id"])
+                if receipt and receipt["state"] not in {"pending", "sending"}:
+                    self.store.setting(key, {**row, "status": receipt["state"], "message_id": receipt["message_id"]})
         with self.store.transaction():
             found = self.store.db.execute(
                 "SELECT key,value FROM settings WHERE substr(key,1,?)=? "
@@ -71,11 +81,25 @@ class OwnerReminders:
                 "ORDER BY json_extract(value,'$.due'),key LIMIT 1",
                 (len(prefix), prefix, time.time() if now is None else now),
             ).fetchone()
-            if found is None or not ready():
+            if found is None or (not enqueue and not ready()):
                 return
             key, raw = found
             row = json.loads(raw)
-            self.store.setting(key, {**row, "status": "sending"})
+            if not enqueue:
+                self.store.setting(key, {**row, "status": "sending"})
+        if enqueue:
+            try:
+                receipt = await enqueue(scope, "提醒：" + row["text"], key, expires_in=86400)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if not getattr(exc, "state", None):
+                    return
+                self.store.setting(key, {**row, "status": exc.state})
+                return
+            if queue_id := receipt.get("fishhome_queue_id"):
+                self.store.setting(key, {**row, "status": "queued", "queue_id": queue_id})
+            elif message_id := receipt.get("message_id"):
+                self.store.setting(key, {**row, "status": "sent", "message_id": str(message_id)})
+            return
         result = {**row, "status": "uncertain"}
         try:
             receipt = await send(scope, "提醒：" + row["text"])

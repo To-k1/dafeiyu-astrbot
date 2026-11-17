@@ -99,7 +99,7 @@ if ($InstallOwnerWork) {
         if ($LASTEXITCODE -ne 0) { throw 'The audio adapter patch could not be applied.' }
     }
     $dsh = Join-Path $dev 'dsh-0.2.2-rc.1'
-    foreach ($name in @('m5-commission.yml', 'Start-DSH-Commission.cmd', 'Start-DSH-Compute.cmd')) {
+    foreach ($name in @('m5-commission.yml', 'Start-DSH-Commission.cmd', 'Start-DSH-Compute.cmd', 'Start-DSH-Video.cmd', 'go-session-header.mjs')) {
         Copy-Item -LiteralPath (Join-Path $repo "deploy\dsh_bridge\$name") -Destination $dsh
     }
     $autonomousPatch = Join-Path $dsh 'm5-file-only.yml'

@@ -134,7 +134,7 @@ def error(status, code, message):
                              status=status)
 
 
-def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False):
+def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False, go_files=None):
     """Bind credentials to ledgers, and reserve before making an upstream call."""
     if (set(tokens_by_bucket) != set(BUCKETS) or len(set(tokens_by_bucket.values())) != len(BUCKETS)
             or (not api_key and not offline)
@@ -228,6 +228,9 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
     app.router.add_post("/{kind:openai}/{bucket}/v1/chat/completions", forward)
     app.router.add_post("/{kind:anthropic}/{bucket}/v1/messages", forward)
     app.router.add_post("/tools/{bucket}/{kind:search|fetch}", forward)
+    if go_files:
+        from deploy.dsh_bridge.go_file_gateway import mount_go_files
+        mount_go_files(app, ledger.path, session_key=session_key, **go_files)
     return app
 
 
@@ -249,7 +252,10 @@ def main():
     if args.command == "serve":
         local_tokens = {bucket: os.environ["FISH_COST_" + bucket.upper() + "_TOKEN"] for bucket in BUCKETS}
         key = None if args.offline else os.environ["FISH_COST_UPSTREAM_KEY"]
-        app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline)
+        go_key = os.environ.get("FISH_GO_FILE_KEY")
+        go_files = ({"key": go_key, "credentials": {
+            bucket: os.environ["FISH_GO_FILE_" + bucket.upper()] for bucket in BUCKETS}} if go_key else None)
+        app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline, go_files=go_files)
         web.run_app(app, host="127.0.0.1", port=args.port, access_log=None)
     else:
         if args.command == "adjust":

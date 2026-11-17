@@ -937,32 +937,15 @@ class ToolImageTrimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.trim_tool_image_history(None), 0)
         self.assertEqual(main.trim_tool_text_history(None), 0)
 
-    def test_trim_tool_text_contexts_folds_older_results_and_preserves_latest_and_user_messages(self):
-        class Message:
-            def __init__(self, data):
-                self.data = data
+    def test_trim_tool_text_contexts_preserves_long_tool_results(self):
+        content = "开头" + "A" * 12000 + "中间标记" + "B" * 12000 + "结尾标记"
+        contexts = [{"role": "tool", "tool_call_id": "file", "content": content}]
+        contexts.extend({"role": "tool", "tool_call_id": str(i), "content": str(i)} for i in range(4))
+        self.assertEqual(main.trim_tool_text_contexts(contexts, keep=1, max_chars=200), contexts)
+        self.assertEqual(main.trim_tool_text_history(contexts, keep=0), 0)
+        self.assertEqual(contexts[0]["content"], content)
 
-            def model_dump(self):
-                return self.data
-
-        contexts = [
-            {"role": "system", "content": "系统人格提示"},
-            {"role": "tool", "tool_call_id": "call_1", "content": "旧工具结果1：无障碍节点列表"},
-            Message({"role": "tool", "tool_call_id": "call_2", "content": "旧工具结果2：" + "A" * 300}),
-            {"role": "tool", "tool_call_id": "call_3", "content": "最新工具结果3：当前画面元素"},
-            {"role": "user", "content": "主人真实发言"},
-        ]
-        trimmed = main.trim_tool_text_contexts(contexts, keep=1, max_chars=200)
-        self.assertEqual(trimmed[0], {"role": "system", "content": "系统人格提示"})
-        self.assertEqual(trimmed[1]["role"], "tool")
-        self.assertEqual(trimmed[1]["tool_call_id"], "call_1")
-        self.assertEqual(trimmed[1]["content"], main.TOOL_TEXT_PLACEHOLDER)
-        self.assertTrue(trimmed[2]["content"].startswith(main.TOOL_TEXT_PLACEHOLDER))
-        self.assertTrue(trimmed[2]["content"].endswith("..."))
-        self.assertEqual(trimmed[3]["content"], "最新工具结果3：当前画面元素")
-        self.assertEqual(trimmed[4], {"role": "user", "content": "主人真实发言"})
-
-    async def test_context_guard_sanitize_and_api_error_fallback_fold_tool_text(self):
+    async def test_context_guard_sanitize_and_api_error_fallback_preserve_tool_text(self):
         class FakeRunner:
             def _sanitize_contexts_for_provider(self, contexts):
                 return contexts
@@ -989,17 +972,18 @@ class ToolImageTrimTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(main.install_tool_image_context_guard())
             runner = FakeRunner()
+            long_text = "A" * 12000 + "中间标记" + "B" * 12000 + "结尾标记"
             sanitized = runner._sanitize_contexts_for_provider(
                 [
                     self.tool_image("old-shot.jpg"),
                     self.tool_image("new-shot.jpg"),
-                    {"role": "tool", "tool_call_id": "t1", "content": "old tool 1"},
+                    {"role": "tool", "tool_call_id": "t1", "content": long_text},
                     {"role": "tool", "tool_call_id": "t2", "content": "old tool 2"},
                     {"role": "tool", "tool_call_id": "t3", "content": "new tool 3"},
                 ]
             )
             self.assertEqual(sanitized[0]["content"], main.TOOL_IMAGE_PLACEHOLDER)
-            self.assertEqual(sanitized[2]["content"], main.TOOL_TEXT_PLACEHOLDER)
+            self.assertEqual(sanitized[2]["content"], long_text)
             self.assertEqual(sanitized[3]["content"], "old tool 2")
             self.assertEqual(sanitized[4]["content"], "new tool 3")
 
@@ -1015,14 +999,15 @@ class ToolImageTrimTests(unittest.IsolatedAsyncioTestCase):
                 err, payloads, context_query, None, "k", ["k"], 0, 3, False
             )
             self.assertFalse(res1[0])
-            self.assertEqual(payloads["messages"][1]["content"], main.TOOL_TEXT_PLACEHOLDER)
+            self.assertEqual(payloads["messages"][1]["content"], "old tool 1")
             self.assertEqual(payloads["messages"][2]["content"], "latest tool 2")
 
-            # Subsequent retry when nothing more can be stripped delegates to original handler
-            res2 = await provider._handle_api_error(
-                err, payloads, context_query, None, "k", ["k"], 1, 3, False
-            )
-            self.assertEqual(res2[0], "delegated")
+            # Do not let the provider silently drop old messages on another retry.
+            with self.assertRaises(RuntimeError):
+                await provider._handle_api_error(
+                    err, payloads, context_query, None, "k", ["k"], 1, 3, False
+                )
+            self.assertEqual(payloads["messages"][1]["content"], "old tool 1")
 
 
 if __name__ == "__main__":

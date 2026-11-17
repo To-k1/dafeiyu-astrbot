@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 import json
+import types
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -378,6 +379,38 @@ class PlannerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.plugin.gate.owner, "foreground")
         self.assertEqual(self.calls, [])
         self.assertEqual(self.plugin.life_planner().recent(SCOPE)[0]["action"], "writing")
+
+    async def test_writing_can_delegate_its_own_draft_and_resume_without_the_phone(self):
+        self.config.update(workshop_enabled=True, dsh_agent_tasks_enabled=True)
+        self.save_config()
+        goal = self.goal()
+        Workshop(self.plugin.store).create(SCOPE, goal["id"], "笔记", "work")
+        worker = types.SimpleNamespace(model_route="go", close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_life_client=lambda _, source=None, *, standalone=False:
+            r"C:\Approved\FishHome" if standalone else worker)
+
+        async def agent(event, prompt, tools, max_steps):
+            self.assertIn(main.DSH_PLAN_TOOL, tools)
+            result = json.loads(await self.plugin.file_research(event, "create", instruction="为笔记起草一段对照提纲"))
+            self.assertEqual((result["status"], result["goal_id"]), ("queued", goal["id"]))
+            return "已安排草稿。"
+
+        self.plugin.agent.side_effect = agent
+        async with self.plugin.gate.lease("foreground"):
+            await self.plugin.run_activity("periodic")
+        self.assertEqual(self.plugin.life_planner().recent(SCOPE)[0]["run_status"], "completed")
+        dispatch = AsyncMock(return_value=("completed", "草稿已交付"))
+        planner = self.plugin.life_planner()
+        choice = planner.choose(SCOPE, self.config, now=time.time() + 3600)
+        self.assertEqual(choice["action"], "writing")
+        with patch.object(self.plugin, "life_planner", return_value=planner), patch.object(planner, "choose", return_value=choice):
+            with patch.object(main, "run_file_task", dispatch):
+                async with self.plugin.gate.lease("foreground"):
+                    await self.plugin.run_activity("periodic")
+                    self.assertEqual(self.plugin.gate.owner, "foreground")
+        dispatch.assert_awaited_once()
+        self.assertEqual(dispatch.await_args.args[3], goal["id"])
+        self.assertEqual(self.calls, [])
 
     async def test_disabling_decisions_blocks_new_tools_and_cleans_up_run(self):
         self.goal()

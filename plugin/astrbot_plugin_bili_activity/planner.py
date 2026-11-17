@@ -409,10 +409,20 @@ class LifePlanner:
 
         for goal in goals:
             gid = goal["id"]
+            cost_wait = goal.get("checkpoint", {}).get("personal_cost_wait", {})
+            if (type(cost_wait.get("resume_after")) in (int, float) and cost_wait["resume_after"] > now):
+                excluded.append({"key": "goal:" + gid, "reason": "personal_step_waiting_low_cost"})
+                continue
+            if type(cost_wait.get("deadline")) in (int, float) and 0 < cost_wait["deadline"] <= now:
+                excluded.append({"key": "goal:" + gid, "reason": "personal_step_deadline_expired"})
+                continue
             plan = cfg.get("dsh_life_task")
             dsh_enabled = cfg.get("dsh_agent_tasks_enabled") or (plan and plan.get("goal_id") == gid)
             task = self.store.get_setting(dsh_task_key(scope, gid)) if dsh_enabled else None
-            if (isinstance(task, dict) and task.get("state") == "deferred"
+            if isinstance(task, dict) and task.get("state") == "go_wait" and not cfg.get("dsh_go_available"):
+                excluded.append({"key": "goal:" + gid, "reason": "dsh_waiting_go_subscription"})
+                continue
+            if (not cfg.get("dsh_file_go") and isinstance(task, dict) and task.get("state") == "deferred"
                     and type(task.get("resume_after")) in {int, float} and task["resume_after"] > now):
                 excluded.append({"key": "goal:" + gid, "reason": "dsh_deferred_until_low_cost"})
                 continue

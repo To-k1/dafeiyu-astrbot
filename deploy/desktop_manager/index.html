@@ -18,6 +18,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
 .status{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}.status::before{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:currentColor}.status[data-state=running],.pass{color:var(--accent)}.status[data-state=running]::before{box-shadow:0 0 8px var(--accent)}.status[data-state=starting],.status[data-state=unknown],.warn,#message{color:var(--warn)}
 #message{white-space:pre-wrap}#message:not(:empty){margin-top:10px}details summary{cursor:pointer;font-weight:700}form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}input,select{font:inherit;max-width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}input:not([type=number]){width:min(260px,100%)}input[type=number]{width:95px}#keys{overflow-wrap:anywhere}#budgets{white-space:pre-line}.hint{margin:8px 0}.foot{font-size:12px;margin-top:24px}
 .checklist,.locations{list-style:none;margin:10px 0 0;padding:0}.checklist li,.locations li{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--line);padding:8px 0}.locations code{display:block;overflow-wrap:anywhere;color:var(--muted)}.paths{min-width:0;overflow-wrap:anywhere}.locations button{flex:none}
+.activity-group{margin:16px 0 8px}.activity-group h3{font-size:15px;margin:0}.activity-group label{min-width:11em}.command-help{margin:12px 0 0}.command-help dt{font-weight:700;margin:10px 0 2px}.command-help dd{margin:0;color:var(--muted)}.command-help code{color:var(--ink);overflow-wrap:anywhere}
 @media(max-width:660px){main{padding:23px 14px 38px}.panel{padding:13px}.row{grid-template-columns:minmax(0,1fr) auto}.row .actions{grid-column:1/-1;justify-content:flex-start}.checklist li{align-items:flex-start}.checklist li span{max-width:58%}}
 </style>
 <main>
@@ -60,6 +61,59 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <p class="muted hint" id="write-label">公共写入状态待读取。</p><button id="public" disabled>更改公共写入</button>
     <p class="muted hint">控制台启动的 B 站伴侣使用只读模式。试跑无需导入 B 站 Cookie。</p>
   </details>
+  <details class="panel"><summary>自主生活与主动联系设置</summary>
+    <p id="activity-note" class="muted hint">正在读取当前主机的活动配置…</p>
+    <div id="activity-settings"></div>
+    <div id="dsh-sources" class="activity-group" hidden><h3>DSH 文件素材</h3>
+      <p class="muted hint" id="dsh-shared-workspace" hidden></p>
+      <p class="muted hint">其他文件可放进原有 DSH 工作区，再在这里填写文件名。多个文件用逗号分隔，留空会清空该路素材名单。</p>
+      <form id="commission-source-form"><label for="commission_sources">QQ 受托素材</label><input id="commission_sources" placeholder="例如 sample.csv"><button>保存</button></form>
+      <form id="life-source-form"><label for="life_sources">自主研究素材</label><input id="life_sources" placeholder="例如 sample.csv"><button>保存</button></form>
+    </div>
+    <p id="activity-message" class="warn hint" role="status"></p>
+  </details>
+  <details class="panel" id="settings-sync" hidden><summary>台式机与 ThinkBook 设置同步</summary>
+    <p class="muted hint">确认首次同步后，台式机控制台运行时每分钟检查。两边同时修改同一项会留给你选择。</p>
+    <div class="actions"><button id="compare-settings">检查两端设置</button><button id="confirm-settings" hidden>确认首次同步</button></div>
+    <p class="muted hint" id="sync-settings-status" role="status"></p><div id="sync-settings-differences"></div>
+  </details>
+  <details id="dsh-team" class="panel"><summary>DSH 小队与任务</summary>
+    <button id="dsh-team-refresh" type="button">刷新</button>
+    <div id="dsh-team-agents"></div>
+    <div id="dsh-team-jobs"></div>
+    <div id="dsh-team-meetings"></div>
+  </details>
+  <details class="panel"><summary>使用帮助 · 主人 QQ 与 DSH</summary>
+    <dl class="command-help">
+      <dt>预算与连接</dt><dd><code>/额度</code> 查肥鱼亲自执行的人民币账本。<code>/dsh ping</code> 查正式自主和受托 DSH 的连接与模型路线。<code>/go额度</code> 查 Go 订阅，需先配对已登录的 OpenCode 本机服务。</dd>
+      <dt>肥鱼自行用 DSH</dt><dd>平常聊天直接说你想做什么。肥鱼自行决定亲自处理，或用 <code>df_dsh_submit_file</code> 查看已登记素材、整理资料、写草稿或运行受限 Python。短活结果回到对话，长活可在后台完成后回复，编号供肥鱼查进度。探索和创作轮次可用 <code>df_file_research</code>。素材名单在「自主生活与主动联系设置」。</dd>
+      <dt>主人明确委托</dt><dd><code>/委托 sample.csv 请统计 count 列合计</code>、<code>/委托 任务 写一份草稿</code> 或 <code>/委托 代码 用 Python 核验计算</code>。明确委托走正式 Go 后台，并返回可查询和控制的编号。代码入口需启用 Windows Python 执行。</dd>
+      <dt>查旧任务</dt><dd>问「用 DSH 任务记录查 BV1g8Wq6DEXj 上次代看的报告，不用重跑」或「查委托 ID，把原报告读给我」。肥鱼用 <code>df_dsh_history</code>，可按 BV、文件名、关键词、任务或经历 ID 查。已完成文件可从原会话读回；公开视频代看保存报告和采样时间，视频本体是临时文件。<code>/委托 列表</code> 可直接看文件任务状态。</dd>
+      <dt>后台视频和网页</dt><dd>对耗时的代看或检索，可以让肥鱼后台处理。完成后由她回复，处理中可继续聊天。也可以请她用 <code>df_dsh_public_job</code> 查进度或取消。</dd>
+      <dt>暂停、恢复、取消</dt><dd>用 <code>/委托 暂停 ID</code>、<code>/委托 恢复 ID</code>、<code>/委托 取消 ID</code>。运行中以 DSH 的停止回执为准，再用 <code>/委托 列表</code> 核对。</dd>
+      <dt>查网页和看视频</dt><dd>直接交代问题或 B 站链接即可，默认走 <code>df_web_search</code>、<code>df_dsh_video</code>。想让肥鱼亲自查或亲自看时直接说明；她也可以自行选择亲自复核。</dd>
+      <dt>工作区与代码</dt><dd>AstrBot 的直接文件工具使用自己的工作区。正式 DSH 以 Windows 专用账户访问其已授权的工作目录，可以在 AstrBot 工作区之外读素材、写产物。启用「Windows Python 执行」后可让它在受控 Python 工作区运行代码并交付结果。当前文件预设使用已登记素材；要接入另一目录，需给 DSH 配置该目录和对应 Windows 读写权限。临时在 AstrBot 终端运行的 DSH headless 使用另一份配置。</dd>
+      <dt>和小弟聊天</dt><dd>肥鱼可自行用 <code>df_dsh_agents</code> 创建、改名、暂停或归档小弟，用 <code>df_dsh_chat</code> 指定小弟接续原对话。</dd>
+      <dt>具名派活与组会</dt><dd>直接告诉肥鱼想请哪位小弟做什么，或请她选几位小弟讨论。她用 <code>df_dsh_guides</code> 管理指南、<code>df_dsh_assign</code> 派活和取回成果、<code>df_dsh_meeting</code> 查看发言、插话、暂停和续会。可以请她按轮数或时间接收组会汇报。</dd>
+      <dt>指南与身份</dt><dd>名字、人格和日常对话属于同一位小弟。工作指南按本次任务选择，可以组合和更新；已派任务保留派出时的版本。组会完整发言可继续查询，可请肥鱼插话、暂停、续开或停止。会议讨论中的引用可另派具名任务取证。</dd>
+      <dt>Windows 桌面操作</dt><dd>例如「请用 Windows 桌面工具，让潮汐笔记查询可用内存，并启动再正常关闭已登记的个人程序」。工具 <code>df_windows_task</code> 可选择小弟和本次指南。软件需预先登记，支持便携 ZIP 安装、启动和正常关闭；有未保存提示时保留窗口。</dd>
+      <dt>桌面账户与配对</dt><dd>FishHomeDesktop 是专用 Windows 标准账户。它的账户密码用于 Windows 登录，控制台「Windows 专用桌面配对」填写该账户服务生成的 broker-token 文件内容。当前已配对的 ThinkBook 可继续使用。</dd>
+      <dt>仅登录 FishHomeOps 的自动桌面</dt><dd>在下方加密保存 FishHomeDesktop 标准账户密码，并启用「登录 Ops 后自动启动桌面」。登录 Ops 后，随托盘的「启动全部」启动「Windows 个人桌面」服务，不必另登 Desktop 或开 PowerShell 窗口。服务以 Desktop 账户运行，窗口显示在 Ops 桌面。保持 Ops 解锁；锁屏后 GUI 操作不可用，后台文字、文件等能力按各自服务继续运行。退出托盘前可单独停止此服务；有未关闭的个人程序时会保留窗口并提示处理。</dd>
+      <dt>旧版桌面启动与切换</dt><dd>旧方式仍可手动登录 FishHomeDesktop 并运行 <code>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\FishHomeDesktop\Start-DesktopBroker.ps1" -Python "$env:ProgramData\FishHomeDesktop\python\python.exe"</code>。两种方式共用端口，先关闭已打开的个人程序并停止旧服务，再切换。若端口上的服务属于另一登录会话，不应把它当作 Ops 自动桌面。首次升级受保护组件时运行项目的 <code>deploy\dsh_bridge\Update-DesktopBroker.ps1 -InstallRoot 安装根目录</code>，Windows 会要求管理员权限。</dd>
+      <dt>完整读取文本</dt><dd>工具结果正文不再因整理聊天历史而被裁剪，DSH 文件读取自动接续到末页。AstrBot 自带文件工具超过单次大小限制时仍会明确提示分段；可让肥鱼继续读取余下部分。已经折叠过的旧聊天历史不会自动复原，需要重新读取原文件。</dd>
+      <dt>手动同步代码</dt><dd>台式机在公开 <code>fish-home</code> 分支提交并推送代码；向 ThinkBook 传送 <code>git archive</code> 生成的代码包后，还需在停止相关服务时安装到已启用插件目录，再启动服务。ThinkBook 当前是解压安装，不能只运行 <code>git pull</code> 就宣称插件已更新。完整步骤见项目 <code>docs/CODE_SYNC.md</code>。配置同步、代码更新、状态备份分别操作；正式数据库以 ThinkBook 为准。</dd>
+      <dt>QQ 文件</dt><dd>在主人私聊发文件时附上处理要求。肥鱼可将已可获取的附件复制进 <code>shared/qq-inbox</code>，再交给 DSH。若 QQ 仍要求接收，可完成接收后重发文件。</dd>
+      <dt>安全插件</dt><dd><a href="https://github.com/kenryu42/cc-safety-net" target="_blank" rel="noopener noreferrer">cc-safety-net ↗</a> 可在 DSH 执行前拦截部分危险命令和敏感读取。Windows 账户权限和执行预设决定实际可达范围。正式服务加载该插件的状态待验证。</dd>
+      <dt>原版 Bridge 提示</dt><dd>AstrBot 配置页中旧版 <code>dsh_ask</code>、<code>dsh_ping</code>、<code>/dsh scan</code> 的追加文本是原版默认。FishHome 通过上面的正式工具接线，不读取该旧文本。</dd>
+      <dt>提醒</dt><dd><code>/提醒 YYYY-MM-DD HH:MM 内容</code>，时间用北京时间。用 <code>/提醒 列表</code> 或 <code>/提醒 取消 ID</code> 管理。</dd>
+      <dt>QQ 掉线与待发消息</dt><dd>已经生成的主人私聊回复、到点提醒和委托回报会持久排队。QQ 在线且连接恢复后按顺序错峰发送，默认待发有效期 24 小时。发前可取消排队中的提醒。取得 OneBot 消息 ID 才标记已受理；发送结果不确定时保留待核对状态。主动联系继续检查暂停、额度和冷却，旧主动消息随原联系安排结束。</dd>
+      <dt>主动联系</dt><dd><code>今天别找我</code> 暂停到当天结束。<code>先不要主动聊天</code> 暂停到你发 <code>恢复主动联系</code>。已接受的委托和提醒照常交付。</dd>
+      <dt>自主活动</dt><dd><code>暂停自主活动</code> 或 <code>恢复自主活动</code>。也可以问「你最近一次生活安排是什么？计划和实际结果分开说」或「查一下你自己发起的 DSH 文件任务」。后者查已有成果。</dd>
+      <dt>长项目与工坊</dt><dd>模块开启后，可以问「你现在有哪些长期项目？」或「你在创作工坊里有哪些草稿？」。需要查原始来源时，可以请她检索已有活动记录。</dd>
+      <dt>语音与截图</dt><dd>肥鱼可自行选择语音回你，也可以直接说「只用语音回答」或「这轮只用文字」。<code>截图看看</code> 获取手机画面。</dd>
+      <dt>B 站与会话</dt><dd><code>/bili互动 状态</code> 查 B 站互动额度和审批。<code>/new</code> 开新对话，<code>/sid</code> 查当前会话来源。</dd>
+    </dl>
+  </details>
   <details class="panel"><summary>人民币预算与凭据</summary>
     <p class="hint" id="budgets">正在读取账本…</p>
     <form id="adjust"><label for="bucket">账本</label><select id="bucket"><option value="interaction">交互</option><option value="autonomous">自主</option></select>
@@ -68,6 +122,19 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     </form>
     <p class="muted hint" id="setup">DeepSeek Key 仅加密保存在当前 Windows 账户中。</p>
     <form id="official"><label for="key">DeepSeek API Key</label><input id="key" type="password" autocomplete="off" required placeholder="官方 API Key"><button>保存</button></form>
+    <form id="opencode"><label for="opencode-key">OpenCode API Key</label><input id="opencode-key" type="password" autocomplete="off" required maxlength="250" placeholder="OpenCode Go API Key"><button disabled>保存</button></form>
+    <p class="muted hint" id="opencode-status" role="status">正在读取 OpenCode Key 状态…</p>
+    <button id="dsh-video-toggle" type="button" hidden>启用 DSH 视频代看</button>
+    <button id="dsh-search-toggle" type="button" hidden>启用 DSH 网页搜索</button>
+    <button id="dsh-go-files-toggle" type="button" hidden>文件 DSH 使用 Go 订阅</button>
+    <button id="dsh-asr-toggle" type="button" hidden>已在百炼开启用完即停，启用 DSH 听写</button>
+    <form id="go-usage-pair" hidden><label for="go-server-password">OpenCode 本机额度查询密码</label><input id="go-server-password" type="password" autocomplete="off" required maxlength="250"><button>保存</button></form>
+    <div id="dsh-desktop-settings" hidden>
+      <form id="desktop-pair"><label for="desktop-token">Windows 专用桌面配对</label><input id="desktop-token" type="password" autocomplete="off" required minlength="32" maxlength="128"><button>保存</button></form>
+      <form id="desktop-credential"><label for="desktop-password">FishHomeDesktop 标准账户密码</label><input id="desktop-password" type="password" autocomplete="off" required maxlength="256"><button>加密保存</button></form>
+      <button id="desktop-auto-toggle" type="button">启用登录 Ops 后自动启动桌面</button>
+      <button id="dsh-desktop-toggle" type="button" disabled>启用 DSH Windows 桌面</button>
+    </div>
     <form id="runner"><label for="password">FishHomeRunner</label><input id="password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
     <form id="compute-credential"><label for="compute-password">FishHomeCompute</label><input id="compute-password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
     <p class="muted hint">保存 Key 后重启「人民币计费」。AstrBot 交互 Provider 使用 <code>http://127.0.0.1:6197/openai/interaction/v1</code> 和交互本机凭据。</p>
@@ -85,6 +152,29 @@ if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.re
 const token = sessionStorage.getItem('fishhome-session') || '';
 let busy = false;
 let config = {};
+const activityGroups = [
+  ['主动联系', [
+    ['contact_daily_limit', '每日主动联系上限（次）'], ['contact_unanswered_limit', '未回复时最多联系（次）'],
+    ['contact_cooldown_minutes', '基础联系冷却（分钟）'], ['contact_owner_quiet_minutes', '主人发言后基础留白（分钟）'],
+    ['dnd_ranges', '免打扰时段（北京时间）'],
+  ]],
+  ['生活调度与执行', [
+    ['periodic_enabled', '周期调度'], ['dsh_agent_tasks_enabled', '允许生活轮次派发 DSH'],
+    ['autonomous_visual_enabled', '允许自主活动使用视觉'], ['check_minutes', '检查间隔（分钟）'],
+    ['check_jitter_minutes', '检查间隔浮动（分钟）'], ['daily_minutes', '每日活动时长（分钟）'],
+    ['daily_model_calls', '每日模型调用上限（次）'], ['max_model_calls_per_run', '单轮模型调用上限（次）'],
+    ['daily_shares', '每日自主分享上限（次）'], ['dsh_peak_token_limit', '高峰期单任务估算 Token 阈值'],
+  ]],
+  ['长期项目与工坊', [
+    ['project_active_limit', '进行中项目上限'], ['project_max_stages', '单项目阶段上限'],
+    ['project_review_delay_hours', '项目复查间隔（小时）'],
+    ['workshop_revisions_per_run', '每轮工坊修订上限'], ['workshop_max_characters', '单件作品字数上限'],
+  ]],
+];
+const sharedSettingLabels = Object.fromEntries(activityGroups.flatMap(([, fields]) => fields));
+sharedSettingLabels.default_interaction_budget = '默认交互额度（元）';
+sharedSettingLabels.default_autonomous_budget = '默认自主额度（元）';
+let syncView;
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store'});
   const result = await response.json();
@@ -114,6 +204,44 @@ async function openDsh() {
   }
 }
 $('dsh-ui').onclick = openDsh;
+async function refreshDshTeam() {
+  try {
+    const {agents, jobs, meetings = []} = await api('/api/dsh-team');
+    const names = {active:'可用', paused:'暂停', archived:'已归档'};
+    $('dsh-team-agents').replaceChildren(node('h3', '小弟'),
+      ...(agents.length ? agents.map(agent => node('p', `${agent.name} · ${names[agent.status] || agent.status} · 人格 v${agent.version}`))
+        : [node('p', '肥鱼还没有在此主机创建小弟。', 'muted')]));
+    const states = {prepared:'排队', dispatching:'派发中', queued:'排队', running:'执行中',
+      submitting:'提交中', submitted:'执行中', continuing:'待续做', go_wait:'等待 Go 额度',
+      completed:'完成', paused:'暂停', cancelling:'取消中', cancelled:'已取消', failed:'失败', needs_review:'待核对',
+      stopping:'停止中', stopped:'已停止'};
+    const kinds = {file:'文件', video:'视频', web:'网页'};
+    $('dsh-team-jobs').replaceChildren(node('h3', '近期任务'),
+      ...(jobs.length ? jobs.map(job => {
+        const row = node('div', '', 'row');
+        row.append(node('span', [job.id, kinds[job.job_kind] || '文件', states[job.state] || job.state,
+          job.agent, job.project, job.source].filter(Boolean).join(' · ')));
+        if (['video', 'web'].includes(job.job_kind) && ['prepared', 'dispatching', 'queued', 'running'].includes(job.state)) {
+          row.append(button('取消', async () => {
+            try {
+              const result = await api('/api/dsh-team/cancel', 'POST', {id: job.id});
+              $('message').textContent = `${result.id} · ${states[result.state] || result.state}`;
+              refreshDshTeam();
+            } catch (error) { $('message').textContent = error.message; }
+          }, false));
+        }
+        return row;
+      })
+        : [node('p', '还没有 DSH 任务。', 'muted')]));
+    $('dsh-team-meetings').replaceChildren(node('h3', '近期组会'),
+      ...(meetings.length ? meetings.map(meeting => node('p', `${meeting.topic.slice(0, 100)} · ${states[meeting.status] || meeting.status} · ${meeting.round}/${meeting.rounds} 轮`))
+        : [node('p', '还没有组会。', 'muted')]));
+  } catch (error) {
+    $('dsh-team-agents').textContent = error.message;
+  }
+}
+$('dsh-team').addEventListener('toggle', () => { if ($('dsh-team').open) refreshDshTeam(); });
+$('dsh-team-refresh').onclick = refreshDshTeam;
 async function refresh() {
   try {
     const {services, official_key, runner_password} = await api('/api/status');
@@ -159,12 +287,147 @@ function setup(form, input, field) {
     configure(field, value);
   };
 }
+function activityField(key, title, values, bounds) {
+  const form = node('form', '');
+  const id = 'setting-' + key;
+  const label = node('label', title);
+  label.htmlFor = id;
+  const input = node(bounds || key === 'dnd_ranges' ? 'input' : 'select', '');
+  input.id = id;
+  if (bounds) {
+    input.type = 'number'; input.step = '1'; input.required = true; input.min = bounds[0];
+    if (bounds[1] !== null) input.max = bounds[1];
+    input.value = values[key];
+  } else if (key === 'dnd_ranges') {
+    input.placeholder = values[key] === null ? '未配置。例：23:00-08:00' : '例如 23:00-08:00，留空关闭';
+    input.value = (values[key] || []).map(pair => pair.join('-')).join(', ');
+  } else {
+    input.add(new Option('开启', 'on')); input.add(new Option('关闭', 'off'));
+    input.value = values[key] ? 'on' : 'off';
+  }
+  const save = node('button', '保存');
+  form.append(label, input, save);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      let value = bounds ? input.valueAsNumber : input.value === 'on';
+      if (key === 'dnd_ranges') {
+        const ranges = input.value.trim() ? input.value.split(/[,，]/).map(range => range.trim()) : [];
+        if (ranges.some(range => !/^\d{2}:\d{2}\s*[-–]\s*\d{2}:\d{2}$/.test(range))) {
+          throw Error('请输入 HH:MM-HH:MM，多段用逗号分隔。不需要免打扰时留空。');
+        }
+        value = ranges.map(range => range.split(/\s*[-–]\s*/));
+      }
+      const result = await api('/api/config', 'POST', {[key]:value});
+      $('activity-message').textContent = `${title} · ${result.message}`;
+    } catch (error) { $('activity-message').textContent = error.message; }
+    finally { save.disabled = false; }
+  };
+  return form;
+}
+function renderActivitySettings() {
+  const values = config.activity_settings;
+  const root = $('activity-settings');
+  root.replaceChildren();
+  $('activity-note').textContent = values
+    ? '设置应用于当前控制的主机。主动联系次数每天北京时间 00:00 重置，人民币预算另计。免打扰时段也适用于周期活动。'
+    : '当前主机尚未完成活动插件配置，或控制台服务需要更新。';
+  if (values && !config.contact_coordinated) {
+    $('activity-note').textContent += ' 此主机未开启联系协调，联系次数和间隔设置暂不生效。';
+  }
+  $('dsh-sources').hidden = !config.dsh_sources;
+  $('dsh-shared-workspace').hidden = !config.dsh_shared_workspace;
+  $('dsh-shared-workspace').textContent = config.dsh_shared_workspace
+    ? `共享目录 ${config.dsh_shared_workspace}。肥鱼与两路正式 DSH 共用，文件无需逐个登记。` : '';
+  for (const key of ['commission_sources', 'life_sources']) $(key).value = (config.dsh_sources?.[key] || []).join(', ');
+  if (!values) return;
+  for (const [name, fields] of activityGroups) {
+    const group = node('div', '', 'activity-group');
+    group.append(node('h3', name), ...fields.map(([key,title]) => activityField(key, title, values, config.activity_limits[key])));
+    root.append(group);
+  }
+}
+function formatSyncValue(value) {
+  if (value === null) return '未配置';
+  if (Array.isArray(value)) return value.map(pair => pair.join('-')).join('，') || '无免打扰时段';
+  return String(value);
+}
+function renderSettingsSync(view) {
+  syncView = view;
+  const action = $('confirm-settings');
+  action.hidden = !view.last_checked || (view.initialized && !view.rows.length) || !!view.error;
+  action.textContent = view.initialized ? '应用冲突选择' : '确认首次同步';
+  $('sync-settings-status').textContent = view.error || (view.rows.length
+    ? (view.initialized ? '有设置冲突。请选择保留哪边的值。' : '首次同步差异。默认采用 ThinkBook 的值。')
+    : (view.initialized ? '已开启自动同步。' : (view.last_checked ? '两端设置一致，可以确认启用。' : '请先检查两端设置。')));
+  $('sync-settings-differences').replaceChildren(...view.rows.map(row => {
+    const wrap = node('div', '', 'row');
+    const label = node('label', sharedSettingLabels[row.key]);
+    label.htmlFor = 'sync-choice-' + row.key;
+    const select = node('select', '');
+    select.id = label.htmlFor;
+    if (view.initialized) select.add(new Option('请选择', ''));
+    select.add(new Option('ThinkBook · ' + formatSyncValue(row.thinkbook), 'thinkbook'));
+    select.add(new Option('台式机 · ' + formatSyncValue(row.desktop), 'desktop'));
+    const values = node('small', `台式机 · ${formatSyncValue(row.desktop)} / ThinkBook · ${formatSyncValue(row.thinkbook)}`);
+    wrap.append(label, values, select);
+    return wrap;
+  }));
+}
+async function readSettingsSync(method = 'GET', body) {
+  const button = $('compare-settings');
+  const confirm = $('confirm-settings');
+  button.disabled = confirm.disabled = true;
+  try { renderSettingsSync(await api('/api/settings-sync', method, body)); }
+  catch (error) { $('sync-settings-status').textContent = error.message; }
+  finally { button.disabled = confirm.disabled = false; }
+}
+$('settings-sync').ontoggle = () => { if ($('settings-sync').open) readSettingsSync(); };
+$('compare-settings').onclick = () => readSettingsSync('POST', {});
+$('confirm-settings').onclick = () => {
+  const expected = {}, choices = {};
+  for (const {key, desktop, thinkbook} of syncView.rows) {
+    expected[key] = {desktop, thinkbook};
+    choices[key] = $('sync-choice-' + key).value;
+    if (!choices[key]) { $('sync-settings-status').textContent = '请选择每项冲突保留哪边的值。'; return; }
+  }
+  readSettingsSync('POST', {expected, choices});
+};
 async function loadConfig() {
   try {
     config = await api('/api/config');
+    $('settings-sync').hidden = !config.settings_sync_supported;
+    const opencodeAvailable = typeof config.opencode_key_saved === 'boolean';
+    $('opencode').querySelector('button').disabled = !opencodeAvailable;
+    const opencodeStatus = config.opencode_key_saved ? '已加密保存。' : '尚未保存。';
+    $('opencode-status').textContent = opencodeAvailable
+      ? `OpenCode Key ${opencodeStatus} 预定模型 deepseek-v4.1-flash，保存后可另行接入。`
+      : '请先更新当前主机的控制台后端。';
+    $('dsh-video-toggle').hidden = !config.dsh_video_supported;
+    $('dsh-video-toggle').disabled = !config.opencode_key_saved;
+    $('dsh-video-toggle').textContent = config.dsh_video_enabled ? '关闭 DSH 视频代看' : '启用 DSH 视频代看';
+    $('dsh-search-toggle').hidden = !config.dsh_video_supported || typeof config.dsh_web_search_enabled !== 'boolean';
+    $('dsh-search-toggle').disabled = !config.opencode_key_saved;
+    $('dsh-search-toggle').textContent = config.dsh_web_search_enabled ? '关闭 DSH 网页搜索' : '启用 DSH 网页搜索';
+    $('dsh-go-files-toggle').hidden = !config.dsh_video_supported || typeof config.dsh_go_files_enabled !== 'boolean';
+    $('dsh-go-files-toggle').disabled = !config.opencode_key_saved;
+    $('dsh-go-files-toggle').textContent = config.dsh_go_files_enabled ? '文件 DSH 使用 Go（点击回切）' : '文件 DSH 使用 Go 订阅';
+    $('go-usage-pair').hidden = typeof config.go_usage_paired !== 'boolean';
+    $('dsh-asr-toggle').hidden = !config.dsh_video_supported || typeof config.dsh_asr_free_only_confirmed !== 'boolean';
+    $('dsh-asr-toggle').textContent = config.dsh_asr_free_only_confirmed ? '关闭 DSH 音轨听写' : '已在百炼开启用完即停，启用 DSH 听写';
+    $('dsh-desktop-settings').hidden = !config.dsh_video_supported || typeof config.dsh_desktop_paired !== 'boolean';
+    $('dsh-desktop-toggle').disabled = !config.dsh_desktop_paired;
+    $('dsh-desktop-toggle').textContent = config.dsh_desktop_enabled ? '关闭 DSH Windows 桌面' : '启用 DSH Windows 桌面';
+    $('desktop-auto-toggle').disabled = !config.desktop_password_saved;
+    $('desktop-auto-toggle').textContent = config.desktop_auto_enabled ? '关闭桌面自动启动' : '启用登录 Ops 后自动启动桌面';
+    renderActivitySettings();
     for (const id of ['napcat_qq','owner_qq','emulator_dir','ollama_models']) $(id).value = config[id];
-    $('metered-label').textContent = config.metered_dsh ? 'DSH 已配置使用自主账本。' : 'DSH 尚未配置使用自主账本。';
-    $('metered').hidden = config.metered_dsh;
+    let fileBilling = '文件 DSH 尚未接入计费。';
+    if (config.dsh_go_files_enabled) fileBilling = '两路文件 DSH 配置为使用 OpenCode Go 订阅。';
+    else if (config.metered_dsh) fileBilling = '两路文件 DSH 配置为使用各自的人民币账本。';
+    $('metered-label').textContent = fileBilling;
+    $('metered').hidden = config.dsh_go_files_enabled || config.metered_dsh;
     $('compute-toggle').textContent = config.compute_enabled ? '关闭 Windows Python 执行' : '启用 Windows Python 执行';
     $('compute-toggle').disabled = false;
     $('write-label').textContent = '公共写入总开关' + (config.public_write ? '已开启。' : '已关闭。');
@@ -241,11 +504,35 @@ async function runChecks() {
   finally { $('check').disabled = false; }
 }
 setup('official','key','upstream_key'); setup('runner','password','runner_password');
+setup('opencode','opencode-key','opencode_key');
+setup('desktop-pair','desktop-token','desktop_token');
+setup('desktop-credential','desktop-password','desktop_password');
+setup('go-usage-pair','go-server-password','opencode_server_password');
 setup('compute-credential','compute-password','compute_password');
 setup('bot','napcat_qq','napcat_qq'); setup('owner','owner_qq','owner_qq'); setup('emulator','emulator_dir','emulator_dir');
 setup('models','ollama_models','ollama_models');
+for (const [form, key] of [['commission-source-form','commission_sources'], ['life-source-form','life_sources']]) {
+  $(form).onsubmit = async event => {
+    event.preventDefault();
+    const save = $(form).querySelector('button');
+    save.disabled = true;
+    try {
+      const names = $(key).value.split(/[,，]/).map(name => name.trim()).filter(Boolean);
+      const result = await api('/api/config', 'POST', {[key]:names});
+      $(key).value = [...new Set(names)].join(', ');
+      $('activity-message').textContent = result.message;
+    } catch (error) { $('activity-message').textContent = error.message; }
+    finally { save.disabled = false; }
+  };
+}
 $('metered').onclick = () => configure('metered_dsh', true);
 $('compute-toggle').onclick = () => configure('compute_enabled', !config.compute_enabled);
+$('dsh-video-toggle').onclick = () => configure('dsh_video_enabled', !config.dsh_video_enabled);
+$('dsh-search-toggle').onclick = () => configure('dsh_web_search_enabled', !config.dsh_web_search_enabled);
+$('dsh-desktop-toggle').onclick = () => configure('dsh_desktop_enabled', !config.dsh_desktop_enabled);
+$('desktop-auto-toggle').onclick = () => configure('desktop_auto_enabled', !config.desktop_auto_enabled);
+$('dsh-go-files-toggle').onclick = () => configure('dsh_go_files_enabled', !config.dsh_go_files_enabled);
+$('dsh-asr-toggle').onclick = () => configure('dsh_asr_free_only_confirmed', !config.dsh_asr_free_only_confirmed);
 $('public').onclick = () => {
   if (config.public_write || confirm('打开公共写入总开关？B 站和抖音仍按各自开关、审批与额度执行。')) configure('public_write', !config.public_write);
 };
@@ -262,6 +549,6 @@ $('showkeys').onclick = async () => {
   catch (error) { $('message').textContent = error.message; }
 };
 $('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop');
-$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadBudgets(), runChecks()]);
+$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadConfig(), loadBudgets(), runChecks()]);
 refresh(); loadConfig(); loadBudgets(); runChecks(); setInterval(() => { if (!busy) refresh(); }, 2500);
 </script>

@@ -253,6 +253,11 @@ if (-not (Test-Path -LiteralPath $astroReady -PathType Leaf)) {
 foreach ($name in @('qq_message_id','chat_media')) {
     Apply-Patch $site (Join-Path $patches "astrbot_4.29.4_$name.patch")
 }
+$qqAdapter = Join-Path $site 'astrbot\core\platform\sources\aiocqhttp'
+foreach ($name in @('qq_outbox.py','qq_outbox_adapter.py')) {
+    Copy-Item -LiteralPath (Join-Path $patches $name) -Destination $qqAdapter -Force
+}
+Apply-Patch $site (Join-Path $patches 'astrbot_4.29.4_qq_outbox.patch')
 Copy-Item -LiteralPath (Join-Path $patches 'chat_layout.py') -Destination (Join-Path $site 'astrbot\core\pipeline') -Force
 
 Write-Host '[3/6] NapCat, Ollama and PhoneMCP'

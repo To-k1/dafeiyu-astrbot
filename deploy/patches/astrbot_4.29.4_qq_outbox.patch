@@ -1,0 +1,55 @@
+--- a/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
++++ b/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py
+@@ -5,6 +5,7 @@
+ import time
+ import uuid
+ from collections.abc import Awaitable
++from pathlib import Path
+ from typing import Any, cast
+ 
+ from aiocqhttp import CQHttp, Event
+@@ -22,10 +23,12 @@
+ )
+ from astrbot.core import astrbot_config
+ from astrbot.core.platform.astr_message_event import MessageSesion
++from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+ 
+ from ...register import register_platform_adapter
+ from .aiocqhttp_message_event import *
+ from .aiocqhttp_message_event import AiocqhttpMessageEvent
++from .qq_outbox_adapter import install_outbox
+ 
+ 
+ @register_platform_adapter(
+@@ -60,6 +63,15 @@
+             access_token=platform_config.get(
+                 "ws_reverse_token",
+             ),  # 以防旧版本配置不存在
++        )
++
++        def owner_id():
++            admins = [str(item).strip() for item in astrbot_config.get("admins_id") or []]
++            ids = [item for item in admins if item.isascii() and item.isdecimal()]
++            return ids[0] if len(ids) == 1 else None
++
++        self.fishhome_outbox = install_outbox(
++            self.bot, Path(get_astrbot_data_path()) / "fishhome-qq-outbox.sqlite3", owner_id,
+         )
+ 
+         @self.bot.on_request()
+@@ -462,6 +474,7 @@
+             self.host = "0.0.0.0"
+             self.port = 6199
+ 
++        self.fishhome_outbox.start()
+         coro = self.bot.run_task(
+             host=self.host,
+             port=int(self.port),
+@@ -475,6 +488,7 @@
+         return coro
+ 
+     async def terminate(self) -> None:
++        await self.fishhome_outbox.close()
+         if hasattr(self, "shutdown_event"):
+             self.shutdown_event.set()
+         await self._close_reverse_ws_connections()

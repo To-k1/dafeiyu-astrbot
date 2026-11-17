@@ -113,6 +113,19 @@ def _jpeg(path):
     raise ValueError("frame exceeds compact transfer budget")
 
 
+async def extract_frame(ffmpeg, video_path, output, at):
+    rc, _ = await _ffmpeg(
+        ffmpeg, "-loglevel", "error", "-y", "-ss", at,
+        "-protocol_whitelist", "file,pipe", "-i", video_path,
+        "-map", "0:v:0", "-frames:v", "1", "-an",
+        "-filter_threads", "1", "-vf", "scale=960:960:force_original_aspect_ratio=decrease",
+        "-q:v", "4", "-threads", "1", output,
+    )
+    if rc != 0 or not output.is_file():
+        raise ValueError("frame extraction failed")
+    return _jpeg(output)
+
+
 def _append_media(result, kind, item):
     result[kind].append(item)
     size = len(json.dumps(result, ensure_ascii=False).encode())
@@ -144,7 +157,7 @@ def _subtitle_rows(payload, start, end):
     return output
 
 
-async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float = 300):
+async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float = 300, *, include_audio=True, force_audio=False):
     """Return frames, subtitles, or audio with actual times and partial failures.
 
     The caller must run this on the local companion, not on the 2 Mbit/s cloud
@@ -181,7 +194,7 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
                 break
             result["subtitles"].append(row)
     except Exception as exc:
-        result["notes"].append(f"subtitles unavailable ({type(exc).__name__}); audio fallback")
+        result["notes"].append(f"subtitles unavailable ({type(exc).__name__})" + ("; audio fallback" if include_audio else ""))
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -201,7 +214,7 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
         )
         dash = playback.get("dash") or {}
         video = _choose_stream(dash.get("video") or [], video=True)
-        audio = None if result["subtitles"] else _choose_stream(dash.get("audio") or [])
+        audio = _choose_stream(dash.get("audio") or []) if include_audio and (force_audio or not result["subtitles"]) else None
     except Exception as exc:
         result["notes"].append(f"playback source unavailable ({type(exc).__name__}); subtitles retained")
         return result
@@ -211,7 +224,7 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
         paths = {}
         for kind, stream in (("video", video), ("audio", audio)):
             if stream is None:
-                if kind == "video" or not result["subtitles"]:
+                if kind == "video" or (include_audio and (force_audio or not result["subtitles"])):
                     result["notes"].append(f"{kind} stream unavailable")
                 continue
             path = folder / (kind + ".m4s")
@@ -257,18 +270,9 @@ async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float =
                 for index, at in enumerate(moments):
                     output = folder / f"frame-{index}.jpg"
                     try:
-                        rc, _ = await _ffmpeg(
-                            ffmpeg, "-loglevel", "error", "-y", "-ss", at,
-                            "-protocol_whitelist", "file,pipe", "-i", video_path,
-                            "-map", "0:v:0", "-frames:v", "1", "-an",
-                            "-filter_threads", "1", "-vf",
-                            "scale=960:960:force_original_aspect_ratio=decrease",
-                            "-q:v", "4", "-threads", "1", output,
-                        )
-                        if rc != 0:
-                            raise ValueError("frame extraction failed")
+                        data = await extract_frame(ffmpeg, video_path, output, at)
                         item = {"at": round(at, 3), "mime": "image/jpeg",
-                                "data": base64.b64encode(_jpeg(output)).decode("ascii")}
+                                "data": base64.b64encode(data).decode("ascii")}
                         if not _append_media(result, "frames", item):
                             result["notes"].append("frame omitted due to transfer budget")
                             break

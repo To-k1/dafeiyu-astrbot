@@ -8,9 +8,10 @@ from datetime import datetime
 from importlib import import_module
 import json
 from pathlib import PureWindowsPath
+import sys
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_bili_activity as fixtures
 main, core = fixtures.main, fixtures.core
@@ -57,6 +58,314 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await fixtures.PluginTests.asyncTearDown(self)
 
+    async def test_named_assignment_reuses_roster_and_keeps_selected_guide_revision(self):
+        event = FakeEvent(event_id="named-file")
+        self.plugin.start_commission_worker = Mock()
+        dsh = types.SimpleNamespace(model_route="go", compute_enabled=True, close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(
+            fishhome_dsh_commission_client=lambda scope, **kw: r"D:\FishHome\workspaces\dsh\commission" if kw else dsh)
+        worker = json.loads(await self.plugin.dsh_agents(event, "create", name="阿墨", persona="检查事实"))
+        guide = json.loads(await self.plugin.dsh_guides(event, "save", title="查证", text="逐条列证据"))
+        assigned = json.loads(await self.plugin.dsh_assign(event, "submit", "阿墨", instruction="检查清单",
+            project="review", guide_ids=json.dumps([guide["id"]])))
+        await self.plugin.dsh_guides(event, "save", guide["id"], "查证", "后续用新规则")
+        visible = json.loads(await self.plugin.dsh_assign(event, agent_id=worker["id"], project="review"))["tasks"][0]
+        self.assertEqual(visible["agent"]["guides"], [{"id": guide["id"], "title": "查证", "version": 1}])
+        self.assertEqual(visible["project"], "review")
+        self.assertNotIn("persona", visible["agent"])
+        stored = self.plugin.store.get_setting(f"commissioned-file:v1:{SCOPE}:{assigned['id']}")
+        self.assertIn("逐条列证据", dsh_task.assignment_prompt(stored["agent"]))
+        self.assertFalse(main.DshRoster(self.plugin.store, SCOPE).get(worker["id"]).get("chat_session"))
+        changed = json.loads(await self.plugin.dsh_assign(event, "pause", task_id=assigned["id"]))
+        self.assertTrue(changed["updated"])
+        with self.assertRaises(PermissionError):
+            await self.plugin.dsh_assign(FakeEvent(scope=OTHER_SCOPE), "get", task_id=assigned["id"])
+
+    async def test_meeting_tool_accepts_named_members_and_host_input(self):
+        event = FakeEvent(event_id="called-a-meeting")
+        self.plugin.start_dsh_meeting_worker = Mock()
+        for name in ("阿墨", "团子"):
+            await self.plugin.dsh_agents(event, "create", name=name, persona="独立表达")
+        meeting = json.loads(await self.plugin.dsh_meeting(event, "create", topic="核对来源",
+            members=json.dumps(["阿墨", "团子"]), mode="interactive", report_every_minutes=3))
+        ident = meeting["id"]
+        self.assertEqual(meeting["report_every_minutes"], 3)
+        await self.plugin.dsh_meeting(FakeEvent(event_id="second-message"), "post", ident, text="先确认原出处")
+        readback = json.loads(await self.plugin.dsh_meeting(event, "get", ident))
+        self.assertEqual(readback["transcript"][0]["text"], "先确认原出处")
+        self.assertEqual({member["name"] for member in readback["members"]}, {"阿墨", "团子"})
+        with self.assertRaises(PermissionError):
+            await self.plugin.dsh_meeting(FakeEvent(scope=OTHER_SCOPE), "get", ident)
+
+    async def test_web_search_delegates_by_default_and_preserves_personal_choice(self):
+        evidence = [{"title": "Primary source", "url": "https://example.org/source"}]
+        fetch = AsyncMock(side_effect=[
+            {"kind": "dsh_web_search", "task_id": "search1", "summary": "Found evidence", "evidence": evidence, "billing": []},
+            {"kind": "personal_web_search", "results": evidence},
+        ])
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_web_search_client=lambda scope: fetch if scope == SCOPE else None)
+        event = FakeEvent()
+        result = json.loads(await self.plugin.web_search(event, "project primary source"))
+        fetch.assert_awaited_once_with("project primary source", "default")
+        self.assertEqual(result["summary"], "Found evidence")
+        self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="dsh_web_search")[0]["subject_kind"], "system")
+        result = json.loads(await self.plugin.web_search(event, "check the citation", mode="personal"))
+        fetch.assert_awaited_with("check the citation", "personal")
+        self.assertEqual(result["results"], evidence)
+
+    async def test_dsh_history_recalls_prior_media_without_dispatching_again(self):
+        store = self.plugin.store
+        source = "BV1g8Wq6DEXj"
+        episode = store.life.record_episode(SCOPE, kind="dsh_video", subject_kind="system", source_id="old-worker-id",
+            evidence={"bvid": source, "samples": [{"frame_times": [10, 11]}]}, interpretation={"summary": "旧代看报告"})
+        store.life.record_episode(SCOPE, kind="video", source_id="own", evidence={"bvid": source}, interpretation={})
+        store.life.record_episode(OTHER_SCOPE, kind="dsh_video", source_id="other", evidence={"bvid": source}, interpretation={})
+        result = json.loads(await self.plugin.dsh_history(FakeEvent(event_id="new-chat"), kind="video", query=source))
+        self.assertEqual([row["id"] for row in result["tasks"]], [episode["id"]])
+        self.assertEqual(result["tasks"][0]["summary"], "旧代看报告")
+        self.assertEqual(result["tasks"][0]["evidence"]["samples"][0]["frame_times"], [10, 11])
+        with self.assertRaises(PermissionError):
+            await self.plugin.dsh_history(FakeEvent(scope=OTHER_SCOPE), kind="video", query=source)
+
+    async def test_background_search_reconnects_and_puts_evidence_through_agent_once(self):
+        sync = AsyncMock()
+        source = {"title": "Primary source", "url": "https://example.org/source"}
+        final = {"kind": "dsh_web_search", "task_id": "go-task", "session_id": "go-session",
+                 "summary": "Background evidence", "evidence": [source], "billing": [{"source": "go"}]}
+        calls = []
+
+        async def api(method, ident, spec=None):
+            calls.append((method, ident, spec))
+            return {"id": ident, "state": "queued"} if method == "PUT" else {
+                "id": ident, "state": "completed", "report": final}
+
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_web_search_client=lambda _: sync,
+                                                     fishhome_dsh_public_jobs_client=lambda _: api)
+        self.plugin.start_public_jobs_worker = Mock()
+        self.plugin.wake_commission = AsyncMock(return_value="我的报告有一个可核查来源。")
+        send = AsyncMock(return_value={"message_id": "99"})
+        self.plugin.sender = lambda: types.SimpleNamespace(send=send, ready=lambda _: True)
+        event = FakeEvent(event_id="one-background-message")
+        accepted = json.loads(await self.plugin.web_search(event, "project primary source", background=True))
+        repeated = json.loads(await self.plugin.web_search(event, "project primary source", background=True))
+        self.assertEqual((accepted["status"], repeated["id"]), ("prepared", accepted["id"]))
+        self.assertEqual(calls, [])
+        sync.assert_not_awaited()
+        await self.plugin.dispatch_public_jobs(SCOPE, event.get_sender_id())
+        self.plugin.wake_commission.assert_not_awaited()
+        await self.plugin.dispatch_public_jobs(SCOPE, event.get_sender_id())
+        await self.plugin.dispatch_public_jobs(SCOPE, event.get_sender_id())
+        self.assertEqual([method for method, _, _ in calls], ["PUT", "GET"])
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="dsh_web_search")[0]["subject_kind"], "system")
+        found = json.loads(await self.plugin.dsh_public_job(event, "status", accepted["id"]))["jobs"][0]
+        self.assertEqual((found["status"], found["delivery"], found["evidence"]["sources"]),
+                         ("completed", "sent", [source]))
+        self.plugin.wake_commission.assert_awaited_once()
+        send.assert_awaited_once_with(SCOPE, "我的报告有一个可核查来源。")
+        with self.assertRaises(PermissionError):
+            await self.plugin.dsh_public_job(FakeEvent(scope=OTHER_SCOPE), "status", accepted["id"])
+
+    async def test_background_video_cancellation_does_not_report_completion(self):
+        call = AsyncMock(side_effect=lambda method, ident, _: {
+            "id": ident, "state": {"PUT": "running", "DELETE": "cancelled"}[method]})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda _: AsyncMock(),
+                                                     fishhome_dsh_public_jobs_client=lambda _: call)
+        self.plugin.start_public_jobs_worker = Mock()
+        self.plugin.wake_commission = AsyncMock()
+        send = AsyncMock()
+        self.plugin.sender = lambda: types.SimpleNamespace(send=send, ready=lambda _: True)
+        event = FakeEvent(event_id="video-background-message")
+        job = json.loads(await self.plugin.delegate_video(event, "BV1g8Wq6DEXj", "Describe seconds 10–14.", background=True))
+        await self.plugin.dispatch_public_jobs(SCOPE, event.get_sender_id())
+        pending = json.loads(await self.plugin.dsh_public_job(event, "cancel", job["id"]))
+        self.assertTrue(pending["cancellation_requested"])
+        await self.plugin.dispatch_public_jobs(SCOPE, event.get_sender_id())
+        found = json.loads(await self.plugin.dsh_public_job(event, "status", job["id"]))["jobs"][0]
+        self.assertEqual(found["status"], "cancelled")
+        self.assertEqual([entry.args[0] for entry in call.await_args_list], ["PUT", "DELETE"])
+        self.plugin.wake_commission.assert_not_awaited()
+        send.assert_not_awaited()
+
+    async def test_dsh_file_tool_accepts_a_normal_request_and_limits_input_to_registered_files(self):
+        cwd = r"C:\Runner\files"
+
+        def factory(scope, source=None):
+            self.assertEqual(scope, SCOPE)
+            if source is None:
+                return types.SimpleNamespace(model_route="go")
+            if source == "":
+                return ["sample.csv"]
+            if source == "sample.csv":
+                return cwd
+            raise ValueError("该文件未加入受托任务范围。")
+
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=factory)
+        event = FakeEvent(text="这个表里的 count 加起来是多少？")
+        self.assertEqual(json.loads(await self.plugin.dsh_submit_file(event))["sources"], ["sample.csv"])
+        with self.assertRaises(ValueError):
+            await self.plugin.dsh_submit_file(event, "other.csv", "求和")
+        with self.assertRaises(PermissionError):
+            await self.plugin.dsh_submit_file(FakeEvent(user="99999"), "sample.csv", "求和")
+        with patch.object(self.plugin, "start_commission_worker"):
+            first = json.loads(await self.plugin.dsh_submit_file(event, "sample.csv", "求和", background=True))
+            second = json.loads(await self.plugin.dsh_submit_file(event, "sample.csv", "求和", background=True))
+        self.assertEqual((first["status"], first["billing"], first["id"]), ("running_in_background", "go", second["id"]))
+        rows = json.loads(await self.plugin.dsh_history(FakeEvent(), kind="file", record_id=first["id"]))["tasks"]
+        self.assertEqual([(row["id"], row["status"], row["source"]) for row in rows],
+                         [(first["id"], "prepared", "sample.csv")])
+
+    async def test_dsh_history_reads_the_recorded_file_through_original_session(self):
+        cwd = r"C:\Runner\files"
+        jobs = main.CommissionedFiles(self.plugin.store)
+        ident = jobs.accept(SCOPE, "12345", "qq1", {"cwd": cwd, "source": "sample.csv", "instruction": "求和"})
+        row = jobs.list(SCOPE, "12345")[0]
+        self.plugin.store.setting(jobs._key(SCOPE, ident), {**row, "state": "completed", "session_id": "old-session"})
+        file = row["report"]
+        client = types.SimpleNamespace(call=AsyncMock(return_value={"text": "旧产物", "eof": True,
+            "absolutePath": str(PureWindowsPath(cwd) / file)}), close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=lambda _, source=None: cwd if source else client)
+        result = json.loads(await self.plugin.dsh_history(FakeEvent(event_id="after-new"), record_id=ident, read_report=True))
+        self.assertEqual(result["tasks"][0]["report_text"], "旧产物")
+        client.call.assert_awaited_once_with("workspaceFiles.read", {"sessionId": "old-session", "path": file})
+        self.plugin.context.fishhome_dsh_commission_client = lambda *_: r"C:\Different"
+        result = json.loads(await self.plugin.dsh_history(FakeEvent(), record_id=ident, read_report=True))
+        self.assertEqual(result["tasks"][0]["report_status"], "unavailable")
+        self.assertEqual(client.call.await_count, 1)
+
+    async def test_direct_dsh_tool_returns_a_quick_report_to_the_model_without_qq_delivery(self):
+        from test_commissioned_files import FileRunner, PLAN
+
+        jobs = main.CommissionedFiles(self.plugin.store)
+
+        def factory(scope, source=None):
+            if source:
+                return PLAN["cwd"]
+            pending = jobs.list(SCOPE, "12345", pending_only=True)
+            if not pending:
+                return types.SimpleNamespace(model_route="go")
+            runner = FileRunner(pending[0])
+            runner.model_route = "go"
+            runner.go_receipts = AsyncMock(return_value={"receipts": [{"source": "go"}]})
+            return runner
+
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=factory)
+        sender = types.SimpleNamespace(ready=lambda _: True, send=AsyncMock())
+        self.plugin.sender = lambda: sender
+        result = json.loads(await self.plugin.dsh_submit_file(FakeEvent(text="count 列有几行？"), "sample.csv", "统计数据行"))
+        self.assertEqual((result["status"], result["result"]), ("completed", "sample.csv has two rows."))
+        self.assertEqual(jobs.list(SCOPE, "12345")[0]["delivery"], "inline")
+        sender.send.assert_not_awaited()
+
+    async def test_owner_chat_gets_the_active_dsh_file_tool_and_default_guidance(self):
+        tool = fixtures.FunctionTool(name=main.DSH_FILE_TOOL, active=True)
+        full = types.SimpleNamespace(get_tool=lambda name: tool if name == main.DSH_FILE_TOOL else None)
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=lambda *_: ["sample.csv", "D:/private.txt"],
+            get_llm_tool_manager=lambda: types.SimpleNamespace(get_full_tool_set=lambda: full))
+        event = FakeEvent(text="sample.csv 的 count 加起来是多少？")
+        local_names = ["astrbot_file_read_tool", "astrbot_execute_shell", "astrbot_execute_python", "astrbot_shell_session"]
+        local = [fixtures.FunctionTool(name=name, active=True, description=name, parameters={}) for name in local_names]
+        req = types.SimpleNamespace(func_tool=fixtures.ToolSet(local), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(event, req)
+        self.assertIn(main.DSH_FILE_TOOL, req.func_tool.names())
+        self.assertIn("astrbot_file_read_tool", req.func_tool.names())
+        self.assertNotIn("astrbot_execute_shell", req.func_tool.names())
+        self.assertNotIn("astrbot_execute_python", req.func_tool.names())
+        self.assertNotIn("astrbot_shell_session", req.func_tool.names())
+        self.assertIn("你自己决定用本地文件工具还是 df_dsh_submit_file", req.system_prompt)
+        self.assertLess(req.system_prompt.index("【本轮 DSH 与文件能力】"), req.system_prompt.index("persona"))
+        self.assertIn('["sample.csv"]', req.system_prompt)
+        self.assertNotIn("D:/private.txt", req.system_prompt)
+        outsider = types.SimpleNamespace(func_tool=fixtures.ToolSet([tool]), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(FakeEvent(scope=OTHER_SCOPE), outsider)
+        self.assertNotIn(main.DSH_FILE_TOOL, outsider.func_tool.names())
+
+    async def test_workspace_lookup_hints_only_after_a_local_miss(self):
+        dsh = fixtures.FunctionTool(name=main.DSH_FILE_TOOL, active=True)
+        read = fixtures.FunctionTool(name="astrbot_file_read_tool", active=True, description="read", parameters={},
+            call=AsyncMock(side_effect=["Error reading file: [WinError 2] The system cannot find the file specified", "item,count\nlocal,6"]))
+        grep = fixtures.FunctionTool(name="astrbot_grep_tool", active=True, description="grep", parameters={},
+            call=AsyncMock(return_value="No matches found."))
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=lambda *_: ["sample.csv", "other.csv"])
+        event = FakeEvent(text="count 列合计多少？")
+        request = types.SimpleNamespace(func_tool=fixtures.ToolSet([dsh, read, grep]), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(event, request)
+        tools = {tool.name: tool for tool in request.func_tool.tools}
+        missed = await tools[read.name].call(None, path="sample.csv")
+        self.assertIn('独立工作区已登记素材（存在性以执行为准）：["sample.csv"]', missed)
+        self.assertIn(main.DSH_FILE_TOOL, missed)
+        local = await tools[read.name].call(None, path="local.csv")
+        self.assertEqual(local, "item,count\nlocal,6")
+        searched = await tools[grep.name].call(None, pattern="count", glob="sample.csv")
+        self.assertIn('"sample.csv"', searched)
+        self.assertNotIn('"other.csv"', searched)
+        self.assertEqual(main.CommissionedFiles(self.plugin.store).list(SCOPE, "12345"), [])
+
+    async def test_named_file_question_is_left_for_chat_model_while_slash_commissions_go(self):
+        def factory(_, source=None):
+            if source == "":
+                return ["sample.csv"]
+            if source == "sample.csv":
+                return r"C:\Runner\files"
+            return types.SimpleNamespace(model_route="go")
+
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_commission_client=factory)
+        text = "sample.csv 的 count 列合计是多少？注明来源。"
+        event = FakeEvent(text=text)
+        event.get_platform_name = lambda: "aiocqhttp"
+        event.message_obj.raw_message = {"post_type": "message", "message_type": "private", "sub_type": "friend"}
+        await self.plugin.incoming(event)
+        self.assertFalse(event.is_stopped())
+        jobs = main.CommissionedFiles(self.plugin.store)
+        self.assertEqual(jobs.list(SCOPE, "12345"), [])
+        ack = self.plugin.owner_commission_command(event, "/委托 sample.csv " + text)
+        self.assertIn("OpenCode Go", ack)
+        row = jobs.list(SCOPE, "12345", explicit_only=True)[0]
+        self.assertEqual((row["source"], row["instruction"]), ("sample.csv", text))
+
+    async def test_voice_tool_can_be_chosen_without_a_keyword_and_suppresses_duplicate_text(self):
+        event = FakeEvent(text="今天好累。")
+        event.get_platform_name = lambda: "aiocqhttp"
+        event.set_extra = event._extra.__setitem__
+        event.clear_result = lambda: event.set_extra("cleared", True)
+        event.message_obj.raw_message = {"post_type": "message", "message_type": "private", "sub_type": "friend"}
+        provider = types.SimpleNamespace(provider_config={"id": "voice", "type": "dashscope_tts"},
+            get_model=lambda: "qwen-audio-model", get_audio=AsyncMock(return_value="speech.wav"))
+        tool = fixtures.FunctionTool(name=main.TTS_SPEAK_TOOL, active=True)
+        registry = types.SimpleNamespace(get_tool=lambda name: tool if name == main.TTS_SPEAK_TOOL else None)
+        self.plugin.context = types.SimpleNamespace(get_config=lambda **kwargs: {}, get_all_tts_providers=lambda: [provider],
+            get_llm_tool_manager=lambda: types.SimpleNamespace(get_full_tool_set=lambda: registry))
+        sender = types.SimpleNamespace(send=AsyncMock(return_value={"message_id": "42", "record_readback": True}))
+        self.plugin.sender = lambda: sender
+        layout = types.SimpleNamespace(make_tts_text=lambda text: text)
+        req = types.SimpleNamespace(func_tool=fixtures.ToolSet(), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(event, req)
+        self.assertIn(main.TTS_SPEAK_TOOL, req.func_tool.names())
+        with patch.dict(sys.modules, {"astrbot.core.pipeline.chat_layout": layout}):
+            result = json.loads(await self.plugin.tts_speak(event, "先歇一会儿。"))
+            await self.plugin.tts_speak(event, "不再发一条。")
+        self.assertTrue(result["sent"])
+        sender.send.assert_awaited_once_with(SCOPE, "", record_path="speech.wav")
+        await self.plugin.suppress_voice_only_confirmation(event)
+        self.assertTrue(event.get_extra("cleared"))
+        event.message_obj.message_str = "这轮只用文字回复"
+        with self.assertRaises(PermissionError):
+            await self.plugin.tts_speak(event, "照样发语音")
+
+    async def test_personal_step_can_save_and_wait_for_low_cost(self):
+        event = self.begin("personal-scheduling")
+        goal = await self.create(event)
+        now = main.time.time()
+        with patch.object(main, "peak_end", return_value=now + 1800):
+            small = json.loads(await self.plugin.goal(event, "schedule_step", goal_id=goal["id"], estimated_tokens=500))
+            self.assertEqual(small["status"], "available")
+            result = json.loads(await self.plugin.goal(event, "schedule_step", goal_id=goal["id"],
+                                                       estimated_tokens=30000, next_step="继续测试"))
+        self.assertEqual(result["status"], "deferred")
+        saved = self.plugin.store.life.get_goal(SCOPE, goal["id"])
+        self.assertEqual((saved["status"], saved["next_step"]), ("paused", "继续测试"))
+        self.assertEqual(saved["checkpoint"]["personal_cost_wait"]["resume_after"], now + 1800)
+
     def save_config(self):
         self.plugin.control.write_text(json.dumps(self.config))
 
@@ -73,6 +382,52 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def watched(self, event):
         await self.plugin.watch(event, "BVexample", "1", 0, 20)
         return json.loads(await self.plugin.activity_note(event, "BVexample", "1", 20, "想再查合作机制"))
+
+    async def test_video_delegation_uses_only_link_and_question_and_writes_separate_report(self):
+        target = "https://www.bilibili.com/video/BV1g8Wq6DEXj?p=1"
+        report = {"kind": "dsh_video", "task_id": "delegated-1", "summary": "代看了开头",
+                  "evidence": [{"source": target, "frame_times": [0, 7.5], "subtitle_count": 0}],
+                  "billing": [{"source": "go"}]}
+        worker = AsyncMock(return_value=report)
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda scope: worker if scope == SCOPE else None)
+        event = self.begin()
+        goal = await self.create(event)
+        result = json.loads(await self.plugin.delegate_video(event, target, "开头在做什么"))
+        worker.assert_awaited_once_with(target, "开头在做什么")
+        self.assertEqual(self.calls, [])
+        saved = self.plugin.store.life.episodes(SCOPE, kind="dsh_video")
+        self.assertEqual([(item["id"], item["subject_kind"]) for item in saved], [(result["episode_id"], "system")])
+        self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="video"), [])
+        self.assertEqual(saved[0]["evidence"]["samples"], report["evidence"])
+        self.assertEqual(result["summary"], "代看了开头")
+        completed = await self.plugin.goal(event, "update", goal_id=goal["id"], status="completed")
+        self.assertEqual(json.loads(completed)["status"], "completed")
+        await self.plugin.watch(FakeEvent(), "BV1g8Wq6DEXj", "1", 0, 20, mode="personal")
+        self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="video")[0]["subject_kind"], "agent")
+
+    async def test_video_delegation_failure_does_not_watch_or_write_a_report(self):
+        worker = AsyncMock(side_effect=ValueError("没有订阅回执"))
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda scope: worker)
+        event = FakeEvent()
+        result = json.loads(await self.plugin.delegate_video(event, "BV1g8Wq6DEXj", "核对开头"))
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="dsh_video"), [])
+
+    async def test_existing_video_tool_defaults_to_dsh_locks_part_and_allows_explicit_personal(self):
+        worker = AsyncMock(return_value={"kind": "dsh_video", "task_id": "one", "summary": "代看",
+                                         "evidence": [{"cid": 11, "frame_times": [0]}], "billing": []})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda scope: worker)
+        event = FakeEvent()
+        result = json.loads(await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 0, 8))
+        self.assertEqual(result["kind"], "dsh_video")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.calls, [])
+        result = json.loads(await self.plugin.watch(event, "BV1g8Wq6DEXj", "12", 0, 8))
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(self.calls, [])
+        await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 0, 8, mode="personal")
+        self.assertEqual(self.calls[0][0], "bili_prepare_video")
 
     async def test_dsh_goal_recovers_accepted_request_and_writes_back_once(self):
         store = self.plugin.store

@@ -12,11 +12,40 @@ class RemoteDshClient(DshClient):
     """Reuse the Bridge task flow with DSH's authenticated Remote API."""
 
     def __init__(self, launch_token: str = "", port: int = 59934, *, session_cookie: str | None = None,
-                 compute_enabled: bool = False):
+                 compute_enabled: bool = False, go_file_token: str = "", go_usage_token: str = ""):
         super().__init__({"dsh_host": "127.0.0.1", "dsh_port": port})
         self._launch_token = launch_token
         self._cookie = session_cookie
         self.compute_enabled = compute_enabled
+        self.go_file_token = go_file_token
+        self.go_usage_token = go_usage_token
+        self.model_route = "go" if go_file_token else "deepseek"
+
+    async def go_receipts(self, session_id):
+        if not self.go_file_token:
+            raise DshError("Go 文件回执入口未启用")
+        bucket = "interaction" if self.port_override == 59935 else "autonomous"
+        session = await self._session()
+        try:
+            async with session.get(f"http://127.0.0.1:6197/go/{bucket}/receipts/{session_id}",
+                    headers={"Authorization": "Bearer " + self.go_file_token},
+                    timeout=aiohttp.ClientTimeout(total=8), allow_redirects=False) as response:
+                response.raise_for_status()
+                return await response.json()
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            raise DshError("Go 文件用量回执未确认") from None
+
+    async def go_quota_available(self):
+        if not self.go_usage_token:
+            return False
+        try:
+            session = await self._session()
+            async with session.get("http://127.0.0.1:6196/api/worker/go-usage",
+                    headers={"Authorization": "Bearer " + self.go_usage_token},
+                    timeout=aiohttp.ClientTimeout(total=6), allow_redirects=False) as response:
+                return response.status == 200 and (await response.json()).get("status") == "available"
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            return False
 
     async def discover(self, force=False, progress=None):
         return f"http://127.0.0.1:{self.port_override}"
@@ -57,6 +86,41 @@ class RemoteDshClient(DshClient):
             return self._cookie
 
     async def call(self, method, payload=None, timeout=30.0):
+        if method != "workspaceFiles.read":
+            return await self._call_once(method, payload, timeout)
+
+        request = dict(payload or {})
+        offset = 1
+        pages = []
+        first = None
+        async with asyncio.timeout(timeout):
+            while True:
+                page = await self._call_once(method, {**request, "_offset": offset}, timeout)
+                if (not isinstance(page, dict) or page.get("offset") != offset
+                        or not isinstance(page.get("text"), str)
+                        or type(page.get("lines")) is not int or page["lines"] < 0
+                        or type(page.get("eof")) is not bool):
+                    raise DshError("DSH 文件分页返回无效结果")
+                if first is None:
+                    first = page
+                elif page.get("version") != first.get("version"):
+                    raise DshError("DSH 文件读取期间发生变更")
+                if page["lines"]:
+                    pages.append(page["text"])
+                if page["eof"]:
+                    break
+                if page["lines"] == 0:
+                    raise DshError("DSH 文件分页没有前进")
+                offset += page["lines"]
+        content = "\n".join(pages)
+        # The native line API omits a final newline. Its stat reports byte size,
+        # allowing that single omitted byte to be restored without guessing.
+        size = first.get("bytes")
+        if type(size) is int and len(content.encode("utf-8")) + 1 == size:
+            content += "\n"
+        return {**first, "text": content, "lines": offset - 1 + page["lines"], "eof": True}
+
+    async def _call_once(self, method, payload=None, timeout=30.0):
         request = dict(payload or {})
         if method == "session.list":
             endpoint, args = "session/list", {"_request": request}
@@ -64,7 +128,7 @@ class RemoteDshClient(DshClient):
             endpoint, args = "session/modelCatalog", {}
         elif method == "workspaceFiles.read":
             endpoint, args = "workspaceFiles/read", {"workspaceFileScopeId": request["sessionId"],
-                "path": request["path"], "range": {"limit": 200}}
+                "path": request["path"], "range": {"offset": request.get("_offset", 1), "limit": 200}}
         elif method == "session.history":
             session_id = request.pop("sessionId")
             request["address"] = {"kind": "session", "sessionId": session_id}

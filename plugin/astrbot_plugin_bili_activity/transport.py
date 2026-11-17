@@ -38,6 +38,12 @@ class DeliveryRejected(TransportError):
     """OneBot explicitly rejected the send."""
 
 
+class DeliveryQueued(TransportError):
+    def __init__(self, queue_id):
+        self.queue_id = queue_id
+        super().__init__("QQ 暂未返回回执，消息已进入出站队列")
+
+
 class MCPClient:
     """Open/use/close MCP in one task; never share an AnyIO cancel scope across tasks."""
 
@@ -343,7 +349,20 @@ class QQDelivery:
         bot = getattr(self.context.get_platform_inst(platform_id), "bot", None)
         return bool(getattr(bot, "_wsr_api_clients", None))
 
-    async def send(self, scope: str, text: str, image_path=None, *, record_path=None):
+    def outbox(self, scope):
+        platform_id, _ = self._target(scope)
+        platform = getattr(self.context, "get_platform_inst", None)
+        bot = getattr(platform(platform_id), "bot", None) if platform else None
+        return getattr(bot, "fishhome_outbox", None)
+
+    async def enqueue_text(self, scope, text, key, *, expires_in=None):
+        platform_id, target = self._target(scope)
+        bot = self.context.get_platform_inst(platform_id).bot
+        return await bot.fishhome_submit("send_private_msg", {"user_id": target,
+            "message": [{"type": "text", "data": {"text": str(text)[:2000]}}]},
+            key=key, expires_in=expires_in)
+
+    async def send(self, scope: str, text: str, image_path=None, *, record_path=None, live_guard=None):
         platform_id, target = self._target(scope)
         platform = self.context.get_platform_inst(platform_id)
         bot = getattr(platform, "bot", None)
@@ -383,14 +402,20 @@ class QQDelivery:
             raise ValueError("empty message")
 
         try:
+            submit = getattr(bot, "fishhome_submit", None)
+            pending = (submit("send_private_msg", {"user_id": target, "message": message},
+                              wait=min(15, self.timeout - 1), live_guard=live_guard)
+                       if submit else bot.call_action("send_private_msg", user_id=target, message=message))
             response = await asyncio.wait_for(
-                bot.call_action("send_private_msg", user_id=target, message=message),
+                pending,
                 self.timeout,
             )
             data = _onebot_data(response)
+            if isinstance(data, dict) and data.get("fishhome_queue_id"):
+                raise DeliveryQueued(data["fishhome_queue_id"])
         except asyncio.CancelledError:
             raise
-        except DeliveryRejected:
+        except (DeliveryRejected, DeliveryQueued):
             raise
         except Exception as exc:
             raise DeliveryUnknown(

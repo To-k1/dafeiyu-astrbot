@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,27 +18,52 @@ from urllib.parse import unquote, urlencode
 from uuid import uuid4
 
 import psutil
+import pywintypes
 import win32profile
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from deploy.bili_activity.ops import exclusive, save_control
+from deploy.bili_activity.ops import DEFAULTS as ACTIVITY_DEFAULTS, NUMERIC_LIMITS, exclusive, ready, save_control, validate_dnd
+from deploy.dsh_bridge.public_search import search_anysearch, validate_query
+from deploy.dsh_bridge.go_profile import KEY_ENV, render_file_go_patch
+from deploy.dsh_bridge.go_usage import read_go_usage
 from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
 from scripts.m6_data import export_memory
 from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sync as sync_backups
 
 from .windows import Credentials, impersonate, run_as, write_json
 from . import compute
+from . import desktop_session
+from .public_jobs import PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable, validate_agent
 from .recovery import capture_and_pull
+from .settings_sync import PEER_PATH, SettingsSync, SharedSettings, ThinkBookPeer
 from .thinkbook import export_from_thinkbook, production_qq_marker, sync_room_from_thinkbook
+from .video_worker import VideoWorker
 
 
 PORT = 6196
+VIDEO_PATH = "/api/worker/public-video"
+SEARCH_PATH = "/api/worker/public-search"
+DESKTOP_PATH = "/api/worker/windows-desktop"
+GO_USAGE_PATH = "/api/worker/go-usage"
+WORKER_SWITCHES = {VIDEO_PATH: "dsh_video_enabled", SEARCH_PATH: "dsh_web_search_enabled",
+                   DESKTOP_PATH: "dsh_desktop_enabled"}
 RUNNER = "FishHomeRunner"
 ROOT = Path(__file__).resolve().parents[2]
 DESKTOP_HOME = Path(r"D:\Share\code\FishHome")
 PAGE = Path(__file__).with_name("index.html")
 ICON = PAGE.with_name("fishhome.png")
 INTERACTION_BASE = "http://127.0.0.1:6197/openai/interaction/v1"
+ACTIVITY_NUMBERS = (
+    "contact_daily_limit", "contact_unanswered_limit", "contact_cooldown_minutes", "contact_owner_quiet_minutes",
+    "check_minutes", "check_jitter_minutes", "daily_minutes", "daily_model_calls", "max_model_calls_per_run",
+    "daily_shares", "dsh_peak_token_limit",
+    "project_active_limit", "project_max_stages", "project_review_delay_hours",
+    "workshop_revisions_per_run", "workshop_max_characters",
+)
+ACTIVITY_SWITCHES = ("periodic_enabled", "dsh_agent_tasks_enabled", "autonomous_visual_enabled")
+ACTIVITY_FIELDS = (*ACTIVITY_NUMBERS, *ACTIVITY_SWITCHES, "dnd_ranges")
+DSH_SOURCE_FIELDS = ("commission_sources", "life_sources")
+DSH_SOURCE_NAME = re.compile(r"[\w-][\w.-]{0,79}\.(?:csv|md|txt|json)", re.I)
 
 
 def read_settings(path):
@@ -50,6 +76,13 @@ def read_settings(path):
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} 必须是 JSON 对象")
     return value
+
+
+def configured_dsh_sources(bridge, key):
+    names = bridge.get(key)
+    if not isinstance(names, list):
+        return []
+    return [name for name in names if isinstance(name, str) and DSH_SOURCE_NAME.fullmatch(name)]
 
 
 def qq_owner(config, owner):
@@ -90,6 +123,7 @@ class Manager:
         self.creds = Credentials(state / "credentials.bin")
         for bucket in ("interaction", "autonomous"):
             self.creds.values.setdefault(bucket, secrets.token_urlsafe(32))
+            self.creds.values.setdefault("go_file_" + bucket, secrets.token_urlsafe(32))
         self.creds.save()
         self.options_path = state / "settings.json"
         self.options = read_settings(self.options_path)
@@ -103,6 +137,9 @@ class Manager:
         self.astrbot_settings = self.astro / "data/cmd_config.json"
         self.control = self.activity / "control.json"
         self.ledger = self.activity / "activity.sqlite3"
+        self.shared_settings = SharedSettings(self.control, self.ledger)
+        self.settings_sync = (SettingsSync(self.shared_settings, state / "shared-settings-baseline.json", ThinkBookPeer())
+                              if dev.parent == DESKTOP_HOME else None)
         self.bili_state = state / "bili"
         self.backups = dev.parent / "backups"
         self.exports = dev.parent / "exports"
@@ -112,12 +149,51 @@ class Manager:
         self.lock = asyncio.Lock()
         self.archive_lock = asyncio.Lock()
         self.emulator_requested = 0.0
+        self.video_worker = VideoWorker(self.dev / "dsh-0.2.2-rc.1", state, RUNNER)
+        self.public_jobs = PublicJobs(state / "dsh-public-jobs", self.run_public_job)
+
+    def sync_video_worker(self):
+        key = self.creds.values.get("opencode_key")
+        token = ""
+        if (self.room_snapshot is None and (any(self.options.get(key) is True for key in WORKER_SWITCHES.values())
+                or self.options.get("dsh_go_files_enabled") is True)
+                and key and self.runner_password() and self.bridge_settings.is_file()
+                and (self.video_worker.dsh / "Start-DSH-Video.cmd").is_file()):
+            token = self.creds.values.get("video_worker_token")
+            if not token:
+                token = secrets.token_urlsafe(32)
+                self.creds.values["video_worker_token"] = token
+                self.creds.save()
+        self.update_bridge(video_worker_token=token, video_worker_enabled=bool(token) and
+            self.options.get("dsh_video_enabled") is True, web_search_worker_enabled=bool(token) and
+            self.options.get("dsh_web_search_enabled") is True, desktop_worker_enabled=bool(token) and
+            self.options.get("dsh_desktop_enabled") is True and bool(self.creds.values.get("desktop_token")),
+            go_usage_worker_enabled=bool(token), prefer_go_files=self.options.get("dsh_go_files_enabled") is True)
+        return token
+
+    def public_job_enabled(self, kind):
+        switch = {"video": "dsh_video_enabled", "web": "dsh_web_search_enabled"}.get(kind)
+        return bool(switch and self.options.get(switch) is True and self.sync_video_worker())
+
+    async def run_public_job(self, body, started):
+        kind = body["kind"]
+        if not self.public_job_enabled(kind):
+            raise PublicJobUnavailable("DSH 公开资料工作进程不可用")
+        password, go_key = self.runner_password(), self.creds.values["opencode_key"]
+        if kind == "web":
+            return await self.video_worker.search(password, go_key, body["query"],
+                                                  background_started=started, agent=body.get("agent"))
+        return await self.video_worker.run(password, go_key, body["reference"], body["question"],
+                                           asr_key=self.dsh_asr_key(), background_started=started,
+                                           agent=body.get("agent"))
 
     @property
     def compute_directory(self):
         return Path(os.environ["ProgramData"]) / "FishHomeComputeService"
 
     def service_password(self, service):
+        if service.account == "FishHomeDesktop":
+            return self.creds.values.get("desktop_password")
         return self.creds.values.get("compute_password") if service.account == compute.ACCOUNT else self.runner_password()
 
     def specs(self):
@@ -135,12 +211,26 @@ class Manager:
                     "FISH_COST_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}
         if key:
             cost_env["FISH_COST_UPSTREAM_KEY"] = key
+        if self.options.get("dsh_go_files_enabled") is True and self.creds.values.get("opencode_key"):
+            cost_env["FISH_GO_FILE_KEY"] = self.creds.values["opencode_key"]
+            for bucket in ("interaction", "autonomous"):
+                cost_env["FISH_GO_FILE_" + bucket.upper()] = self.creds.values["go_file_" + bucket]
         dsh_env = {}
         if self.options.get("metered_dsh") is True:
             dsh_env = {"DEEPSEEK_BASE_URL": "http://127.0.0.1:6197/anthropic/autonomous",
                        "FISHHOME_DSH_GATEWAY_TOKEN": self.creds.values["autonomous"],
                        "DEEPSEEK_API_KEY": self.creds.values["autonomous"]}
         commission = {}
+        desktop_services = {}
+        if self.room_snapshot is None and self.creds.values.get("desktop_password"):
+            directory = Path(os.environ["ProgramData"]) / "FishHomeDesktop"
+            account_profile = compute.profile("FishHomeDesktop")
+            desktop_state = account_profile / "AppData/Local/FishHome/desktop"
+            script = directory / "windows_desktop.py"
+            desktop_services["desktop"] = Service("Windows 个人桌面", directory,
+                (directory / "python/python.exe", "-B", script, "--workspace", desktop_state / "workspace",
+                 "--token-file", desktop_state / "broker-token", "--init-token"),
+                59937, str(script), runner=True, account="FishHomeDesktop")
         compute_services = {}
         if self.creds.values.get("compute_password"):
             directory = self.compute_directory
@@ -172,6 +262,7 @@ class Manager:
             "bili": Service("B 站伴侣（只读）", ROOT, (self.python, "-B", bili, "--state-dir", self.bili_state,
                 "--adb-path", emulator / "adb.exe"), 8011, str(bili)),
             **compute_services,
+            **desktop_services,
             "dsh": Service("DeepSeek Harness", dsh, (cmd, "/d", "/c", "call", dsh / "Start-DSH-M3.cmd"),
                 59934, str(dsh / "m5-file-only.yml"), env=dsh_env, runner=True),
             **commission,
@@ -201,6 +292,21 @@ class Manager:
     def runner_password(self):
         return self.creds.values.get("runner_password")
 
+    def dsh_asr_key(self):
+        if self.options.get("dsh_asr_free_only_confirmed") is not True:
+            return ""
+        face = self.astro / "data/plugins/astrbot_plugin_face_convert/config.json"
+        settings = read_settings(face)
+        key = settings.get("asr_api_key")
+        if not key:
+            for provider in read_settings(self.astrbot_settings).get("provider", []):
+                if provider.get("type") in {"dashscope", "dashscope_tts"} and provider.get("api_key"):
+                    key = provider["api_key"]
+                    break
+        if isinstance(key, list):
+            key = next((value for value in key if isinstance(value, str) and value), None)
+        return key if isinstance(key, str) else ""
+
     def configuration(self):
         specs = self.specs()
         bridge = read_settings(self.bridge_settings)
@@ -211,6 +317,29 @@ class Manager:
             "ollama_models": specs["ollama"].env["OLLAMA_MODELS"],
             "metered_dsh": self.options.get("metered_dsh") is True,
             "compute_enabled": self.options.get("compute_enabled") is True,
+            "opencode_key_saved": bool(self.creds.values.get("opencode_key")),
+            "dsh_video_supported": self.room_snapshot is None and
+                (self.video_worker.dsh / "Start-DSH-Video.cmd").is_file(),
+            "dsh_video_enabled": self.options.get("dsh_video_enabled") is True and
+                bool(bridge.get("video_worker_token")),
+            "dsh_web_search_enabled": self.options.get("dsh_web_search_enabled") is True and
+                bool(bridge.get("video_worker_token")),
+            "dsh_desktop_enabled": bridge.get("desktop_worker_enabled") is True,
+            "dsh_desktop_paired": bool(self.creds.values.get("desktop_token")),
+            "desktop_password_saved": bool(self.creds.values.get("desktop_password")),
+            "desktop_auto_enabled": self.options.get("desktop_auto_enabled") is True,
+            "dsh_go_files_enabled": self.options.get("dsh_go_files_enabled") is True,
+            "dsh_go_file_routes": {kind: bool(bridge.get(kind + "_go_file_token")) for kind in ("life", "commission")},
+            "go_usage_paired": bool(self.creds.values.get("opencode_server_password")),
+            "dsh_asr_free_only_confirmed": self.options.get("dsh_asr_free_only_confirmed") is True,
+            "settings_sync_supported": self.settings_sync is not None,
+            "activity_settings": ({key: control.get(key, ACTIVITY_DEFAULTS[key]) for key in ACTIVITY_FIELDS}
+                                  if self.control.is_file() else None),
+            "activity_limits": {key: NUMERIC_LIMITS.get(key, (1, None)) for key in ACTIVITY_NUMBERS},
+            "contact_coordinated": control.get("contact_coordination_enabled") is True,
+            "dsh_sources": ({key: configured_dsh_sources(bridge, key) for key in DSH_SOURCE_FIELDS}
+                            if self.bridge_settings.is_file() else None),
+            "dsh_shared_workspace": bridge.get("shared_workspace") or None,
             "paths": {
                 "AstrBot · QQ 白名单和模型": str(self.astrbot_settings),
                 "LivingMemory · AstrBot 插件配置": str(self.astro / "data/config/astrbot_plugin_livingmemory_config.json"),
@@ -264,6 +393,16 @@ class Manager:
         return archive_now(self.astro, self.backups, desktop=self.dev.parent == DESKTOP_HOME, revision=revision).name
 
     def set_config(self, name, value):
+        if name in ACTIVITY_FIELDS:
+            return self.set_activity_config(name, value)
+        if name in DSH_SOURCE_FIELDS:
+            if not self.bridge_settings.is_file():
+                raise ValueError("请先完成 DSH Bridge 配置")
+            if not isinstance(value, list) or any(not isinstance(item, str) or not DSH_SOURCE_NAME.fullmatch(item)
+                                                  for item in value):
+                raise ValueError("请输入工作区中的 CSV、Markdown、TXT 或 JSON 文件名，不能填写目录")
+            self.update_bridge(**{name: list(dict.fromkeys(value))})
+            return "已保存素材名单。请确认文件已放入相应的 DSH 工作目录。"
         if name in {"napcat_qq", "owner_qq"}:
             if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{4,11}", value):
                 raise ValueError("请填写有效的 QQ 号码")
@@ -311,6 +450,36 @@ class Manager:
         write_json(self.options_path, updated)
         self.options = updated
         return message
+
+    def set_activity_config(self, name, value):
+        if not self.control.is_file():
+            raise ValueError("请先完成活动插件配置")
+        if name in ACTIVITY_NUMBERS:
+            low, high = NUMERIC_LIMITS.get(name, (1, None))
+            if type(value) is not int or value < low or (high is not None and value > high):
+                constraint = f"{low}–{high}" if high is not None else f"至少 {low}"
+                raise ValueError(f"请输入{constraint}的整数")
+        elif name in ACTIVITY_SWITCHES:
+            if type(value) is not bool:
+                raise ValueError("请选择开启或关闭")
+        elif name == "dnd_ranges":
+            validate_dnd(value)
+        else:
+            raise ValueError("未知的活动设置")
+
+        with exclusive(self.activity):
+            control = read_settings(self.control)
+            update = {name: value}
+            if name == "periodic_enabled" and value:
+                ready(ACTIVITY_DEFAULTS | control)
+                if control.get("one_shot_verified") is not True:
+                    raise ValueError("先完成活动验收，再开启周期调度")
+                update["enabled"] = True
+            if name == "dsh_agent_tasks_enabled" and value and control.get("life_enabled") is not True:
+                raise ValueError("先启用持续生活功能，再允许自主派发 DSH 任务")
+            if any(control.get(key, ACTIVITY_DEFAULTS[key]) != val for key, val in update.items()):
+                save_control(self.activity, control | update)
+        return "已保存，活动插件将在下一次读取配置时生效。"
 
     def dsh_profile_ready(self):
         folder = self.specs()["dsh"].cwd
@@ -568,7 +737,7 @@ class Manager:
         tickets = re.findall(rf"http://127\.0\.0\.1:{port}/\?token=([A-Za-z0-9._~%-]+)", text)
         return unquote(tickets[-1]) if tickets else ""
 
-    async def refresh_dsh_cookie(self, port=59934, *, compute_enabled=None):
+    async def refresh_dsh_cookie(self, port=59934, *, compute_enabled=None, file_go_token=None):
         try:
             async with ClientSession(timeout=ClientTimeout(total=5)) as session:
                 deadline = asyncio.get_running_loop().time() + 90
@@ -586,6 +755,9 @@ class Manager:
                                         if compute_enabled is not None:
                                             route = "commission_compute_enabled" if port == 59935 else "life_compute_enabled"
                                             fields[route] = compute_enabled and self.options.get("compute_enabled") is True
+                                        if file_go_token is not None:
+                                            route = "commission" if port == 59935 else "life"
+                                            fields[route + "_go_file_token"] = file_go_token
                                         self.update_bridge(**fields)
                                         return
                             except (ClientError, OSError, asyncio.TimeoutError):
@@ -600,6 +772,7 @@ class Manager:
         service = self.specs()[name]
         is_dsh = name in {"dsh", "dsh_commission"}
         use_compute = self.options.get("compute_enabled") is True
+        use_file_go = self.options.get("dsh_go_files_enabled") is True and is_dsh
         if name == "compute" and not use_compute:
             return "计算执行已关闭"
         if name == "napcat" and self.room_snapshot is not None and production_qq_marker().is_file():
@@ -610,8 +783,15 @@ class Manager:
             return await self.emulator_action(service, "launch")
         pids = self.listeners().get(service.port, set())
         if pids:
-            if not any(self.matching_pid(service, pid) for pid in pids):
+            recognized = [pid for pid in pids if self.matching_pid(service, pid)]
+            if not recognized:
                 raise ValueError(f"端口 {service.port} 被未识别的进程占用")
+            if name == "desktop":
+                current_session = desktop_session.get_session()["session_id"]
+                with impersonate(service.account, self.service_password(service)):
+                    other_session = any(desktop_session.session_id(pid) != current_session for pid in recognized)
+                if other_session:
+                    raise ValueError("旧桌面服务在另一 Windows 会话，请先切换到该会话关闭服务")
             if name == "budget":
                 self.update_bridge(budget_token=self.creds.values["interaction"])
             if is_dsh and self.runner_password() and self.bridge_settings.is_file():
@@ -627,9 +807,16 @@ class Manager:
         if name == "compute":
             token = self.creds.values.setdefault("compute_token", secrets.token_urlsafe(32))
             self.creds.save()
+            configured_root = read_settings(self.bridge_settings).get("dsh_workspaces_root")
+            projects = Path(configured_root) / "dsh" / "projects" if configured_root else None
             await asyncio.to_thread(compute.prepare, self.compute_directory, ROOT / "deploy/dsh_bridge",
-                self.dev.parent / "downloads/python-3.12.10-windows-x64.tar.gz", self.python, token, RUNNER)
-        if not service.cwd.is_dir() or not Path(argv[0]).is_file():
+                self.dev.parent / "downloads/python-3.12.10-windows-x64.tar.gz", self.python, token, RUNNER, projects)
+        if name == "desktop":
+            with impersonate(service.account, self.service_password(service)):
+                available = service.cwd.is_dir() and Path(argv[0]).is_file() and Path(argv[2]).is_file()
+        else:
+            available = service.cwd.is_dir() and Path(argv[0]).is_file()
+        if not available:
             raise ValueError("组件安装目录或启动文件缺失")
         if name == "napcat":
             self.verify_qq()
@@ -640,29 +827,47 @@ class Manager:
         if name == "budget":
             self.activity.mkdir(parents=True, exist_ok=True)
             self.update_bridge(budget_token=self.creds.values["interaction"])
-        if name == "compute":
+        if name == "desktop":
+            pid = desktop_session.launch_desktop(service.account, self.service_password(service), argv, {})
+            with impersonate(service.account, self.service_password(service)):
+                started = psutil.Process(pid).create_time()
+        elif name == "compute":
             profile = compute.profile(compute.ACCOUNT)
             pid = run_as(compute.ACCOUNT, self.service_password(service), argv, env={
                 "PYTHONUTF8": "1", "USERPROFILE": str(profile), "LOCALAPPDATA": str(profile / "AppData/Local"),
                 "FISHHOME_COMPUTE_TOKEN": token,
+                **({"FISHHOME_COMPUTE_PROJECTS": str(projects)} if projects is not None else {}),
             })
             with impersonate(compute.ACCOUNT, self.service_password(service)):
                 started = psutil.Process(pid).create_time()
         elif is_dsh:
-            if self.options.get("metered_dsh") is not True or not self.dsh_profile_ready():
+            if (not use_file_go and self.options.get("metered_dsh") is not True) or not self.dsh_profile_ready():
                 raise ValueError("请先在控制台设置 DSH 计费接线")
             password = self.runner_password()
             if not password:
                 raise ValueError("请在 WebUI 保存 FishHomeRunner 密码后启动 DSH")
+            configured = read_settings(self.bridge_settings)
+            public_root = configured.get("dsh_workspaces_root")
+            public_workspace = None
+            if public_root:
+                root = Path(public_root)
+                if not root.is_absolute() or not root.is_dir() or root.resolve() != root:
+                    raise ValueError("DSH 公共工作区无效")
+                public_workspace = root / "dsh" / ("commission" if name == "dsh_commission" else "life")
+                if not public_workspace.is_dir() or public_workspace.resolve() != public_workspace:
+                    raise ValueError("DSH 项目目录无效")
             if name == "dsh_commission":
                 if not service.cwd.joinpath("m5-commission.yml").is_file():
                     raise ValueError("受托文件执行配置缺失")
                 with impersonate(RUNNER, password) as token:
-                    root = (Path(win32profile.GetUserProfileDirectory(token))
-                            / "AppData/Local/FishHome/commission-files")
+                    root = public_workspace or (Path(win32profile.GetUserProfileDirectory(token))
+                                                / "AppData/Local/FishHome/commission-files")
                     root.mkdir(parents=True, exist_ok=True)
                     (root / "output").mkdir(exist_ok=True)
                 self.update_bridge(commission_workspace=str(root), commission_cookie="")
+            elif public_workspace:
+                self.update_bridge(life_workspace=str(public_workspace), session_cookie="")
+            extra_patches = []
             if use_compute:
                 if "compute" not in self.specs():
                     raise ValueError("请先保存 FishHomeCompute 的密码")
@@ -680,19 +885,44 @@ class Manager:
                         await asyncio.sleep(.5)
                     else:
                         raise ValueError("Windows Python 执行器没有就绪")
+                extra_patches.append(self.compute_directory / "compute.yml")
+            env = service.env
+            go_token = ""
+            if use_file_go:
+                if not self.creds.values.get("opencode_key"):
+                    raise ValueError("请先保存 OpenCode Go Key")
+                bucket = "interaction" if name == "dsh_commission" else "autonomous"
+                go_token = self.creds.values["go_file_" + bucket]
+                async with ClientSession(timeout=ClientTimeout(total=3), trust_env=False) as client:
+                    async with client.get(f"http://127.0.0.1:6197/go/{bucket}/receipts/readiness",
+                            headers={"Authorization": "Bearer " + go_token}) as response:
+                        if response.status != 200:
+                            raise ValueError("请先重启人民币计费服务以装载独立 Go 网关")
+                session_plugin = service.cwd / "go-session-header.mjs"
+                if not session_plugin.is_file():
+                    raise ValueError("DSH Go 会话插件缺失")
+                with impersonate(RUNNER, password) as token:
+                    folder = Path(win32profile.GetUserProfileDirectory(token)) / "AppData/Local/FishHome"
+                    patch = folder / f"go-files-{bucket}.json"
+                    write_json(patch, render_file_go_patch(bucket, session_plugin))
+                extra_patches.append(patch)
+                env = {KEY_ENV: go_token}
+            if public_workspace:
+                env = env | {"FISHHOME_DSH_WORKSPACE": str(public_workspace)}
+            if extra_patches or public_workspace:
                 launcher = service.cwd / "Start-DSH-Compute.cmd"
                 if not launcher.is_file():
-                    raise ValueError("DSH 计算启动脚本缺失")
-                argv = [*argv[:4], str(launcher), str(service.port), str(self.compute_directory / "compute.yml")]
-            pid = run_as(RUNNER, password, argv, env=service.env)
+                    raise ValueError("DSH 专用启动脚本缺失")
+                argv = [*argv[:4], str(launcher), str(service.port), *map(str, extra_patches)]
+            pid = run_as(RUNNER, password, argv, env=env)
             with impersonate(RUNNER, password):
                 started = psutil.Process(pid).create_time()
-            task = asyncio.create_task(self.refresh_dsh_cookie(service.port, compute_enabled=use_compute))
+            task = asyncio.create_task(self.refresh_dsh_cookie(service.port, compute_enabled=use_compute, file_go_token=go_token))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         else:
             env = {key: val for key, val in os.environ.items()
-                   if not key.startswith(("FISH_COST_", "FISH_MANAGER_", "FISHHOME_INTERACTION_TOKEN",
+                   if not key.startswith(("FISH_COST_", "FISH_GO_FILE_", "FISH_MANAGER_", "FISHHOME_INTERACTION_TOKEN",
                                           "FISHHOME_AUTONOMOUS_TOKEN"))}
             with (self.state / f"{name}.log").open("ab") as log:
                 child = subprocess.Popen(argv, cwd=service.cwd, stdout=log, stderr=subprocess.STDOUT,
@@ -705,11 +935,54 @@ class Manager:
 
     async def stop(self, name):
         service = self.specs()[name]
+        if name == "desktop":
+            listeners = self.listeners().get(service.port, set())
+            password = self.service_password(service)
+            with impersonate(service.account, password):
+                if listeners:
+                    candidates = [pid for pid in listeners if self.matching_pid(service, pid)]
+                    if len(candidates) != 1:
+                        raise ValueError("桌面服务端口被未识别的进程占用")
+                    pid = candidates[0]
+                else:
+                    pid = self.tracked_pid(name) or self.launching_pid(service)
+                try:
+                    started = psutil.Process(pid).create_time() if pid else None
+                except psutil.NoSuchProcess:
+                    pid = None
+            if listeners:
+                if not pid:
+                    raise ValueError("桌面服务进程已退出，请重试")
+                pairing = self.creds.values.get("desktop_token")
+                if not pairing:
+                    raise ValueError("请先配对桌面服务")
+                async with ClientSession(timeout=ClientTimeout(total=8), trust_env=False) as session:
+                    async with session.post("http://127.0.0.1:59937/desktop",
+                            json={"op": "shutdown"}, headers={"Authorization": "Bearer " + pairing}) as response:
+                        result = await response.json()
+                        if response.status != 200:
+                            raise ValueError(result.get("error", "桌面服务未确认停止"))
+            if pid:
+                def wait_for_exit():
+                    with impersonate(service.account, password):
+                        try:
+                            process = psutil.Process(pid)
+                            if process.create_time() == started:
+                                process.wait(timeout=8)
+                        except psutil.NoSuchProcess:
+                            pass
+                        except psutil.TimeoutExpired as exc:
+                            raise ValueError("桌面服务尚未退出，请稍后重试") from exc
+                await asyncio.to_thread(wait_for_exit)
+            self.launches.pop(name, None)
+            write_json(self.launch_file, self.launches)
+            return "桌面服务已停止" if pid else "已停止"
         if name == "compute":
             self.update_bridge(life_compute_enabled=False, commission_compute_enabled=False)
         elif name in {"dsh", "dsh_commission"}:
             field = "commission_compute_enabled" if name == "dsh_commission" else "life_compute_enabled"
-            self.update_bridge(**{field: False})
+            prefix = "commission" if name == "dsh_commission" else "life"
+            self.update_bridge(**{field: False, prefix + "_go_file_token": ""})
         if name == "emulator":
             if self.emulator_status(service) == "stopped":
                 return "已停止"
@@ -769,7 +1042,19 @@ def create_app(manager, token):
     async def local_only(request, handler):
         if request.host != f"127.0.0.1:{PORT}":
             return web.json_response({"error": "只允许本机访问"}, status=403)
-        if request.path not in {"/", "/icon.png"} and not hmac.compare_digest(
+        if request.path.startswith("/api/worker/public-jobs/"):
+            worker_token = manager.creds.values.get("video_worker_token")
+            if not worker_token or not hmac.compare_digest(request.headers.get("Authorization", "").encode(),
+                                                              f"Bearer {worker_token}".encode()):
+                return web.json_response({"error": "DSH 公开资料工作进程不可用"}, status=401)
+        elif request.path in WORKER_SWITCHES or request.path == GO_USAGE_PATH:
+            worker_token = manager.sync_video_worker()
+            if (not worker_token or (request.path in WORKER_SWITCHES
+                    and manager.options.get(WORKER_SWITCHES[request.path]) is not True)
+                    or not hmac.compare_digest(request.headers.get("Authorization", "").encode(),
+                                               f"Bearer {worker_token}".encode())):
+                return web.json_response({"error": "DSH 公开资料工作进程不可用"}, status=401)
+        elif request.path not in {"/", "/icon.png"} and not hmac.compare_digest(
             request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()
         ):
             return web.json_response({"error": "请从系统托盘打开 WebUI"}, status=401)
@@ -777,10 +1062,91 @@ def create_app(manager, token):
             return await handler(request)
         except (ValueError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=409)
-        except (OSError, psutil.Error, sqlite3.Error, subprocess.SubprocessError) as exc:
+        except (OSError, psutil.Error, pywintypes.error, sqlite3.Error, subprocess.SubprocessError) as exc:
             return web.json_response({"error": f"Windows 操作失败（{type(exc).__name__}）"}, status=409)
 
     app = web.Application(middlewares=[local_only], client_max_size=8192)
+
+    async def configure_video(_app):
+        manager.sync_video_worker()
+
+    app.on_startup.append(configure_video)
+
+    async def start_desktop(_app):
+        if manager.options.get("desktop_auto_enabled") is True and manager.creds.values.get("desktop_password"):
+            try:
+                async with manager.lock:
+                    await manager.start("desktop")
+            except (OSError, ValueError, RuntimeError, KeyError, psutil.Error, pywintypes.error) as exc:
+                with (manager.state / "manager.log").open("a", encoding="utf-8") as log:
+                    log.write(f"桌面服务自动启动失败：{type(exc).__name__}\n")
+
+    app.on_startup.append(start_desktop)
+
+    async def public_job_worker(_app):
+        manager.public_jobs.start()
+        try:
+            yield
+        finally:
+            await manager.public_jobs.close()
+
+    app.cleanup_ctx.append(public_job_worker)
+
+    async def public_job(request):
+        ident = request.match_info["ident"]
+        if request.method == "GET":
+            status = manager.public_jobs.get(ident)
+        elif request.method == "DELETE":
+            status = manager.public_jobs.cancel(ident)
+        else:
+            body = await request.clone(client_max_size=WORKER_BODY_LIMIT).json()
+            status = manager.public_jobs.submit(ident, body, enabled=manager.public_job_enabled)
+        return web.json_response(status, headers={"Cache-Control": "no-store"})
+
+    async def delegate_video(request):
+        body = await request.json()
+        if not isinstance(body, dict) or body.keys() != {"reference", "question"}:
+            raise ValueError("代看只接受公开视频链接和问题")
+        try:
+            asr_key = manager.dsh_asr_key()
+            report = await manager.video_worker.run(manager.runner_password(), manager.creds.values["opencode_key"],
+                                                    body["reference"], body["question"],
+                                                    **({"asr_key": asr_key} if asr_key else {}))
+        except (ClientError, TimeoutError, KeyError, TypeError):
+            raise RuntimeError("DSH 未返回可核实的代看结果") from None
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
+
+    async def delegate_search(request):
+        body = await request.json()
+        if not isinstance(body, dict) or body.keys() != {"query", "mode"} or body["mode"] not in ("default", "personal"):
+            raise ValueError("只接受公开搜索问题和搜索方式")
+        query = validate_query(body["query"])
+        try:
+            if body["mode"] == "personal":
+                rows = await search_anysearch(query)
+                report = {"kind": "personal_web_search", "results": rows}
+            else:
+                report = await manager.video_worker.search(manager.runner_password(),
+                    manager.creds.values["opencode_key"], query)
+        except (ClientError, TimeoutError, KeyError, TypeError):
+            raise RuntimeError("DSH 未返回可核实的网页资料") from None
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
+
+    async def delegate_desktop(request):
+        body = await request.clone(client_max_size=WORKER_BODY_LIMIT).json()
+        if not isinstance(body, dict) or body.keys() - {"agent"} != {"instruction"}:
+            raise ValueError("只接受专用 Windows 桌面任务说明")
+        agent = validate_agent(body["agent"]) if "agent" in body else None
+        pairing = manager.creds.values.get("desktop_token")
+        if not pairing:
+            raise ValueError("专用 Windows 桌面尚未配对")
+        report = await manager.video_worker.desktop(manager.runner_password(), manager.creds.values["opencode_key"],
+                                                     pairing, body["instruction"], agent=agent)
+        return web.json_response(report, headers={"Cache-Control": "no-store"})
+
+    async def go_usage(_request):
+        return web.json_response(await read_go_usage(manager.options.get("opencode_server_port", 28894),
+            manager.creds.values.get("opencode_server_password")), headers={"Cache-Control": "no-store"})
 
     async def sync_observatory(_app):
         async def loop():
@@ -805,17 +1171,27 @@ def create_app(manager, token):
                             pass
                 await asyncio.sleep(900)
 
+        async def settings_loop():
+            while True:
+                if manager.settings_sync.base is not None:
+                    await manager.settings_sync.check()
+                await asyncio.sleep(60)
+
         tasks = []
         if manager.room_snapshot is not None:
             tasks.append(asyncio.create_task(loop()))
         if manager.astro.is_dir():
             tasks.append(asyncio.create_task(backup_loop()))
+        if manager.settings_sync is not None:
+            tasks.append(asyncio.create_task(settings_loop()))
         try:
             yield
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if manager.settings_sync is not None:
+                await manager.settings_sync.peer.close()
 
     app.cleanup_ctx.append(sync_observatory)
 
@@ -852,6 +1228,8 @@ def create_app(manager, token):
             order = list(manager.specs())
             outcomes = {}
             for item in order if mode == "start" else reversed(order):
+                if item == "desktop" and mode == "start" and not manager.options.get("desktop_auto_enabled"):
+                    continue
                 try:
                     outcomes[item] = await manager.action(item, mode)
                 except (OSError, ValueError, RuntimeError, psutil.Error) as exc:
@@ -867,16 +1245,62 @@ def create_app(manager, token):
             raise ValueError("一次只保存一项设置")
         name, value = next(iter(body.items()))
         async with manager.lock:
-            if name == "upstream_key" and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{12,250}", value):
+            if name in {"upstream_key", "opencode_key"} and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{12,250}", value):
                 manager.creds.values[name] = value
                 manager.creds.save()
-                message = "已加密保存 DeepSeek Key，请重启计费服务以启用。"
-            elif name in {"runner_password", "compute_password"} and isinstance(value, str) and 0 < len(value) <= 256:
-                with impersonate(compute.ACCOUNT if name == "compute_password" else RUNNER, value):
+                if name == "opencode_key":
+                    manager.sync_video_worker()
+                    message = "已加密保存 OpenCode Key，当前模型路由未切换。"
+                else:
+                    message = "已加密保存 DeepSeek Key，请重启计费服务以启用。"
+            elif name in {"runner_password", "compute_password", "desktop_password"} and isinstance(value, str) and 0 < len(value) <= 256:
+                account = {"compute_password": compute.ACCOUNT, "desktop_password": "FishHomeDesktop"}.get(name, RUNNER)
+                with impersonate(account, value):
                     pass
                 manager.creds.values[name] = value
                 manager.creds.save()
+                if name == "runner_password":
+                    manager.sync_video_worker()
                 message = "已验证并加密保存账户密码。"
+            elif name == "desktop_auto_enabled" and type(value) is bool:
+                if value and not manager.creds.values.get("desktop_password"):
+                    raise ValueError("请先保存 FishHomeDesktop 标准账户密码")
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                message = "已保存 Windows 桌面随全部服务启动的设置。"
+            elif name == "dsh_go_files_enabled" and type(value) is bool:
+                if value and not manager.creds.values.get("opencode_key"):
+                    raise ValueError("请先保存 OpenCode Go Key")
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                manager.sync_video_worker()
+                message = "已保存。先重启计费服务，再重启两路文件 DSH。"
+            elif name == "dsh_asr_free_only_confirmed" and type(value) is bool:
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                message = "已保存百炼免费额度用完即停的确认状态。"
+            elif name == "desktop_token" and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", value):
+                manager.creds.values[name] = value
+                manager.creds.save()
+                manager.sync_video_worker()
+                message = "已加密保存专用桌面配对凭据。"
+            elif name == "opencode_server_password" and isinstance(value, str) and 1 <= len(value) <= 250:
+                manager.creds.values[name] = value
+                manager.creds.save()
+                message = "已加密保存 OpenCode 本机额度查询凭据。"
+            elif name == "opencode_server_port" and type(value) is int and 1 <= value <= 65535:
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                message = "已保存 OpenCode 本机服务端口。"
+            elif name in WORKER_SWITCHES.values() and type(value) is bool:
+                if name == "dsh_desktop_enabled" and value and not manager.creds.values.get("desktop_token"):
+                    raise ValueError("请先保存专用 Windows 桌面配对凭据")
+                manager.options[name] = value
+                write_json(manager.options_path, manager.options)
+                available = bool(manager.sync_video_worker()) and value
+                label = {"dsh_video_enabled": "视频代看", "dsh_web_search_enabled": "网页搜索",
+                         "dsh_desktop_enabled": "Windows 桌面"}[name]
+                message = f"已启用 DSH {label}。" if available else f"DSH {label}当前不可用。"
             elif name == "compute_enabled" and type(value) is bool:
                 if value and not manager.creds.values.get("compute_password"):
                     raise ValueError("请先保存 FishHomeCompute 的密码")
@@ -891,6 +1315,94 @@ def create_app(manager, token):
 
     async def configuration(_request):
         return web.json_response(manager.configuration(), headers={"Cache-Control": "no-store"})
+
+    async def dsh_team(_request):
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        if not scope or not manager.ledger.is_file():
+            return web.json_response({"agents": [], "jobs": [], "meetings": []})
+        roster_prefix = f"dsh-roster:v1:{scope}:"
+        job_prefix = f"commissioned-file:v1:{scope}:"
+        meeting_prefix = f"dsh-meeting:v1:{scope}:"
+
+        def read():
+            with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
+                agents = db.execute(
+                    "SELECT json_extract(value,'$.id'), json_extract(value,'$.name'), "
+                    "json_extract(value,'$.status'), json_extract(value,'$.version') "
+                    "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created')",
+                    (len(roster_prefix), roster_prefix),
+                )
+                jobs = db.execute(
+                    "SELECT json_extract(value,'$.id'), json_extract(value,'$.source'), "
+                    "json_extract(value,'$.state'), json_extract(value,'$.delivery'), "
+                    "COALESCE(json_extract(value,'$.job_kind'),'file'), "
+                    "COALESCE(json_extract(value,'$.agent.name'),json_extract(value,'$.spec.agent.name')), "
+                    "json_extract(value,'$.project') "
+                    "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created') DESC LIMIT 20",
+                    (len(job_prefix), job_prefix),
+                )
+                meetings = db.execute(
+                    "SELECT json_extract(value,'$.id'), json_extract(value,'$.topic'), "
+                    "json_extract(value,'$.status'), json_extract(value,'$.round'), json_extract(value,'$.rounds') "
+                    "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created') DESC LIMIT 15",
+                    (len(meeting_prefix), meeting_prefix),
+                )
+                return {"agents": [dict(zip(("id", "name", "status", "version"), row)) for row in agents],
+                        "jobs": [dict(zip(("id", "source", "state", "delivery", "job_kind", "agent", "project"), row))
+                                 for row in jobs],
+                        "meetings": [dict(zip(("id", "topic", "status", "round", "rounds"), row)) for row in meetings]}
+
+        try:
+            return web.json_response(await asyncio.to_thread(read))
+        except sqlite3.Error:
+            return web.json_response({"error": "暂时无法读取 DSH 小队和任务"}, status=503)
+
+    async def cancel_public_team_job(request):
+        body = await request.json()
+        if (not isinstance(body, dict) or set(body) != {"id"} or not isinstance(body["id"], str)
+                or not re.fullmatch(r"[0-9a-f]{12}", body["id"])):
+            raise ValueError("请提供一条有效的公开资料任务 ID")
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        if not scope or not manager.ledger.is_file():
+            raise ValueError("找不到这项公开资料任务")
+        key = f"commissioned-file:v1:{scope}:{body['id']}"
+
+        def lookup():
+            with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
+                return db.execute(
+                    "SELECT json_extract(value,'$.task_id') FROM settings WHERE key=? "
+                    "AND json_extract(value,'$.job_kind') IN ('video','web') "
+                    "AND json_extract(value,'$.state') IN ('prepared','dispatching','queued','running','cancelling')",
+                    (key,),
+                ).fetchone()
+
+        row = await asyncio.to_thread(lookup)
+        if not row:
+            raise ValueError("任务已结束或不在当前主人的队列中")
+        result = manager.public_jobs.cancel(row[0])
+        return web.json_response({"id": body["id"], "state": result["state"]})
+
+    async def shared_settings(request):
+        if request.method == "GET":
+            values = await asyncio.to_thread(manager.shared_settings.snapshot)
+        else:
+            body = await request.json()
+            if not isinstance(body, dict) or body.keys() != {"expected", "changes"}:
+                raise ValueError("设置请求格式不正确")
+            async with manager.lock:
+                values = await asyncio.to_thread(manager.shared_settings.apply, body["expected"], body["changes"])
+        return web.json_response(values, headers={"Cache-Control": "no-store"})
+
+    async def settings_sync(request):
+        sync = manager.settings_sync
+        if sync is None:
+            return web.json_response({"error": "请在台式机本机控制台管理同步"}, status=404)
+        if request.method == "GET":
+            result = sync.view
+        else:
+            body = await request.json()
+            result = await sync.check(confirmation=body if body else None)
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def diagnostics(_request):
         return web.json_response({"checks": await manager.diagnostics()}, headers={"Cache-Control": "no-store"})
@@ -956,7 +1468,19 @@ def create_app(manager, token):
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
+    app.router.add_post(VIDEO_PATH, delegate_video)
+    app.router.add_post(SEARCH_PATH, delegate_search)
+    app.router.add_post(DESKTOP_PATH, delegate_desktop)
+    for method in ("PUT", "GET", "DELETE"):
+        app.router.add_route(method, PUBLIC_JOBS_PATH, public_job)
+    app.router.add_get(GO_USAGE_PATH, go_usage)
     app.router.add_get("/api/config", configuration)
+    app.router.add_get("/api/dsh-team", dsh_team)
+    app.router.add_post("/api/dsh-team/cancel", cancel_public_team_job)
+    app.router.add_get(PEER_PATH, shared_settings)
+    app.router.add_post(PEER_PATH, shared_settings)
+    app.router.add_get("/api/settings-sync", settings_sync)
+    app.router.add_post("/api/settings-sync", settings_sync)
     app.router.add_get("/api/diagnostics", diagnostics)
     app.router.add_post("/api/ui/dsh", dsh_ui)
     app.router.add_get("/api/archives", archive_history)
