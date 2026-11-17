@@ -93,7 +93,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <dt>暂停、恢复、取消</dt><dd>用 <code>/委托 暂停 ID</code>、<code>/委托 恢复 ID</code>、<code>/委托 取消 ID</code>。运行中以 DSH 的停止回执为准，再用 <code>/委托 列表</code> 核对。</dd>
       <dt>查网页和看视频</dt><dd>直接交代问题或 B 站链接即可，默认走 <code>df_web_search</code>、<code>df_dsh_video</code>。想让肥鱼亲自查或亲自看时直接说明；她也可以自行选择亲自复核。</dd>
       <dt>工作区与代码</dt><dd>AstrBot 的直接文件工具使用自己的工作区。正式 DSH 以 Windows 专用账户访问其已授权的工作目录，可以在 AstrBot 工作区之外读素材、写产物。启用「Windows Python 执行」后可让它在受控 Python 工作区运行代码并交付结果。当前文件预设使用已登记素材；要接入另一目录，需给 DSH 配置该目录和对应 Windows 读写权限。临时在 AstrBot 终端运行的 DSH headless 使用另一份配置。</dd>
-      <dt>和小弟聊天</dt><dd>肥鱼可自行用 <code>df_dsh_agents</code> 创建、改名、暂停或归档小弟，用 <code>df_dsh_chat</code> 指定小弟接续原对话。</dd>
+      <dt>和小弟聊天</dt><dd>肥鱼可自行用 <code>df_dsh_agents</code> 创建、改名、暂停或归档小弟，用 <code>df_dsh_chat</code> 接续原对话。聊天始终异步，发送立即入队，小弟答完自动交回肥鱼；同一小弟的新消息按顺序处理，无需发短话催取。主人发起的交谈结果走已有 QQ 待发队列，自主交谈先交回肥鱼本人。用 <code>action=get, chat_id=内部ID</code> 可只读查原回复；<code>action=list</code> 查最近状态。查询不会发送新一轮。超时和重启保留原请求，异常会记为待核对，不伪装成成功。</dd>
       <dt>具名派活与组会</dt><dd>直接告诉肥鱼想请哪位小弟做什么，或请她选几位小弟讨论。她用 <code>df_dsh_guides</code> 管理指南、<code>df_dsh_assign</code> 派活和取回成果、<code>df_dsh_meeting</code> 查看发言、插话、暂停和续会。可以请她按轮数或时间接收组会汇报。</dd>
       <dt>指南与身份</dt><dd>名字、人格和日常对话属于同一位小弟。工作指南按本次任务选择，可以组合和更新；已派任务保留派出时的版本。组会完整发言可继续查询，可请肥鱼插话、暂停、续开或停止。会议讨论中的引用可另派具名任务取证。</dd>
       <dt>Windows 桌面操作</dt><dd>例如「请用 Windows 桌面工具，让潮汐笔记查询可用内存，并启动再正常关闭已登记的个人程序」。工具 <code>df_windows_task</code> 可选择小弟和本次指南。软件需预先登记，支持便携 ZIP 安装、启动和正常关闭；有未保存提示时保留窗口。</dd>

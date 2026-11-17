@@ -56,7 +56,7 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
 
         enabled = {"video", "web"}
         jobs = PublicJobs(self.root / "jobs", execute)
-        manager = SimpleNamespace(
+        manager = SimpleNamespace(options={},
             creds=SimpleNamespace(values={"video_worker_token": "worker-token"}),
             public_job_enabled=lambda kind: kind in enabled,
             sync_video_worker=lambda: "worker-token",
@@ -179,7 +179,7 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
                     f"commissioned-file:v1:{event_scope}:{ident}",
                     json.dumps({"job_kind": kind, "state": "prepared", "task_id": worker_id})))
         jobs = PublicJobs(self.root / "jobs", AsyncMock())
-        manager = SimpleNamespace(
+        manager = SimpleNamespace(options={},
             creds=SimpleNamespace(values={"video_worker_token": "worker-token"}),
             public_job_enabled=lambda _: True, sync_video_worker=lambda: "worker-token",
             public_jobs=jobs, room_snapshot=None, astro=self.root / "missing", settings_sync=None,
