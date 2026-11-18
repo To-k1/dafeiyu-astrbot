@@ -25,7 +25,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from deploy.bili_activity.ops import DEFAULTS as ACTIVITY_DEFAULTS, NUMERIC_LIMITS, exclusive, ready, save_control, validate_dnd
 from deploy.dsh_bridge.public_search import search_anysearch, validate_query
 from deploy.dsh_bridge.go_profile import KEY_ENV, render_file_go_patch
-from deploy.dsh_bridge.go_usage import read_go_usage
+from deploy.dsh_bridge.go_usage import read_go_key_usage, read_go_usage
 from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
 from scripts.m6_data import export_memory
 from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sync as sync_backups
@@ -1144,9 +1144,23 @@ def create_app(manager, token):
                                                      pairing, body["instruction"], agent=agent)
         return web.json_response(report, headers={"Cache-Control": "no-store"})
 
+    go_usage_lock = asyncio.Lock()
+    go_usage_cache = None
+
     async def go_usage(_request):
-        return web.json_response(await read_go_usage(manager.options.get("opencode_server_port", 28894),
-            manager.creds.values.get("opencode_server_password")), headers={"Cache-Control": "no-store"})
+        nonlocal go_usage_cache
+        async with go_usage_lock:
+            key = manager.creds.values.get("opencode_key")
+            if key:
+                if not go_usage_cache or go_usage_cache[0] != key or time.monotonic() >= go_usage_cache[1]:
+                    value = await read_go_key_usage(key)
+                    go_usage_cache = (key, time.monotonic() + 30, value)
+                value = go_usage_cache[2]
+            else:
+                go_usage_cache = None
+                value = await read_go_usage(manager.options.get("opencode_server_port", 28894),
+                    manager.creds.values.get("opencode_server_password"))
+        return web.json_response(value, headers={"Cache-Control": "no-store"})
 
     async def sync_observatory(_app):
         async def loop():

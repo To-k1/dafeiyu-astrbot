@@ -85,7 +85,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
   </details>
   <details class="panel"><summary>使用帮助 · 主人 QQ 与 DSH</summary>
     <dl class="command-help">
-      <dt>预算与连接</dt><dd><code>/额度</code> 查肥鱼亲自执行的人民币账本。<code>/dsh ping</code> 查正式自主和受托 DSH 的连接与模型路线。<code>/go额度</code> 查 Go 订阅，需先配对已登录的 OpenCode 本机服务。</dd>
+      <dt>预算与连接</dt><dd><code>/额度</code> 查肥鱼亲自执行的人民币账本。<code>/dsh ping</code> 查正式自主和受托 DSH 的连接与模型路线。<code>/go额度</code> 通过控制台已保存的 OpenCode Go Key 查正式任务账户的订阅窗口。</dd>
       <dt>肥鱼自行用 DSH</dt><dd>平常聊天直接说你想做什么。肥鱼自行决定亲自处理，或用 <code>df_dsh_submit_file</code> 查看已登记素材、整理资料、写草稿或运行受限 Python。短活结果回到对话，长活可在后台完成后回复，编号供肥鱼查进度。探索和创作轮次可用 <code>df_file_research</code>。素材名单在「自主生活与主动联系设置」。</dd>
       <dt>主人明确委托</dt><dd><code>/委托 sample.csv 请统计 count 列合计</code>、<code>/委托 任务 写一份草稿</code> 或 <code>/委托 代码 用 Python 核验计算</code>。明确委托走正式 Go 后台，并返回可查询和控制的编号。代码入口需启用 Windows Python 执行。</dd>
       <dt>查旧任务</dt><dd>问「用 DSH 任务记录查 BV1g8Wq6DEXj 上次代看的报告，不用重跑」或「查委托 ID，把原报告读给我」。肥鱼用 <code>df_dsh_history</code>，可按 BV、文件名、关键词、任务或经历 ID 查。已完成文件可从原会话读回；公开视频代看保存报告和采样时间，视频本体是临时文件。<code>/委托 列表</code> 可直接看文件任务状态。</dd>
@@ -131,7 +131,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <button id="dsh-go-files-toggle" type="button" hidden>文件 DSH 使用 Go 订阅</button>
     <button id="dsh-asr-toggle" type="button" hidden>已在百炼开启用完即停，启用 DSH 听写</button>
     <form id="go-usage-pair" hidden><label for="go-server-password">OpenCode 本机额度查询密码</label><input id="go-server-password" type="password" autocomplete="off" required maxlength="250"><button>保存</button></form>
-    <p class="muted hint">查询额度需在本机启动已登录 Console 工作区的 OpenCode 服务（默认 127.0.0.1:28894），并在此保存相同的服务密码。此密码不同于 OpenCode API Key。</p>
+    <p class="muted hint">保存正式任务的 OpenCode Go API Key 后，QQ 的 <code>/go额度</code> 可直接查官方订阅窗口。已有本机额度服务配对可继续保留。</p>
     <div id="dsh-desktop-settings" hidden>
       <form id="desktop-pair"><label for="desktop-token">Windows 专用桌面配对</label><input id="desktop-token" type="password" autocomplete="off" required minlength="32" maxlength="128"><button>保存</button></form>
       <form id="desktop-credential"><label for="desktop-password">FishHomeDesktop 标准账户密码</label><input id="desktop-password" type="password" autocomplete="off" required maxlength="256"><button>加密保存</button></form>
@@ -416,7 +416,7 @@ async function loadConfig() {
     $('dsh-go-files-toggle').hidden = !config.dsh_video_supported || typeof config.dsh_go_files_enabled !== 'boolean';
     $('dsh-go-files-toggle').disabled = !config.opencode_key_saved;
     $('dsh-go-files-toggle').textContent = config.dsh_go_files_enabled ? '文件 DSH 使用 Go（点击回切）' : '文件 DSH 使用 Go 订阅';
-    $('go-usage-pair').hidden = typeof config.go_usage_paired !== 'boolean';
+    $('go-usage-pair').hidden = config.opencode_key_saved || typeof config.go_usage_paired !== 'boolean';
     $('dsh-asr-toggle').hidden = !config.dsh_video_supported || typeof config.dsh_asr_free_only_confirmed !== 'boolean';
     $('dsh-asr-toggle').textContent = config.dsh_asr_free_only_confirmed ? '关闭 DSH 音轨听写' : '已在百炼开启用完即停，启用 DSH 听写';
     $('dsh-desktop-settings').hidden = !config.dsh_video_supported || typeof config.dsh_desktop_paired !== 'boolean';
