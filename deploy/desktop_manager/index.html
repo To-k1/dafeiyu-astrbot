@@ -131,6 +131,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <button id="dsh-go-files-toggle" type="button" hidden>文件 DSH 使用 Go 订阅</button>
     <button id="dsh-asr-toggle" type="button" hidden>已在百炼开启用完即停，启用 DSH 听写</button>
     <form id="go-usage-pair" hidden><label for="go-server-password">OpenCode 本机额度查询密码</label><input id="go-server-password" type="password" autocomplete="off" required maxlength="250"><button>保存</button></form>
+    <p class="muted hint">查询额度需在本机启动已登录 Console 工作区的 OpenCode 服务（默认 127.0.0.1:28894），并在此保存相同的服务密码。此密码不同于 OpenCode API Key。</p>
     <div id="dsh-desktop-settings" hidden>
       <form id="desktop-pair"><label for="desktop-token">Windows 专用桌面配对</label><input id="desktop-token" type="password" autocomplete="off" required minlength="32" maxlength="128"><button>保存</button></form>
       <form id="desktop-credential"><label for="desktop-password">FishHomeDesktop 标准账户密码</label><input id="desktop-password" type="password" autocomplete="off" required maxlength="256"><button>加密保存</button></form>

@@ -95,6 +95,8 @@ class TeamMemoryBackend:
         async with self._lock:
             receipt = self.store.get_setting(key)
             if receipt:
+                if receipt.get("status") == "rebound":
+                    raise MemoryAlreadyExistsError("原记录已经更正出处，请使用更正后的引用")
                 if receipt.get("status") == "saved":
                     with self._boundary(adapter_id):
                         existing = await self.engine.get_memory(receipt["memory_id"])
@@ -155,6 +157,43 @@ class TeamMemoryBackend:
                 raise MemoryUncertainError("replacement did not confirm an ID")
             self.store.setting(key, {**receipt, "memory_id": new_id})
             return new_id
+
+    async def rebind_source(self, *, owner, memory_id, old_reference, new_reference,
+                            session_id=None, persona_id=None, adapter_id=None):
+        """Correct the indexed source while preserving the original save provenance and ID."""
+        session_id, persona_id = self._scope(owner, session_id, persona_id)
+        adapter_id = self._adapter(owner, adapter_id)
+        args = dict(owner=owner, session_id=session_id, persona_id=persona_id, adapter_id=adapter_id)
+        old_key = self._key(owner, old_reference, session_id, persona_id, adapter_id)
+        new_key = self._key(owner, new_reference, session_id, persona_id, adapter_id)
+        async with self._lock:
+            memory = await self.get(memory_id=memory_id, **args)
+            if not memory:
+                raise ValueError("找不到该主体的记忆条目")
+            meta = self._metadata(memory)
+            current = meta.get("fishhome_source_ref")
+            if old_key == new_key:
+                return memory_id
+            old = self.store.get_setting(old_key)
+            existing = self.store.get_setting(new_key)
+            if current == new_reference and existing and existing.get("status") == "saved" and existing.get("memory_id") == memory_id:
+                return memory_id
+            if existing or not old or old.get("status") != "saved" or old.get("memory_id") != memory_id:
+                raise MemoryUncertainError("出处回执冲突，未覆盖任何条目")
+            if current == old_reference:
+                with self._boundary(adapter_id):
+                    await self.engine.update_memory(memory_id, {"metadata": {
+                        "fishhome_source_ref": new_reference,
+                        "fishhome_saved_from": meta.get("fishhome_saved_from", old_reference)}})
+                memory = await self.get(memory_id=memory_id, **args)
+            elif current != new_reference:
+                raise ValueError("旧出处与索引不一致")
+            if self._metadata(memory).get("fishhome_source_ref") != new_reference:
+                raise MemoryUncertainError("出处更正尚未通过原生索引回读")
+            with self.store.transaction():
+                self.store.setting(new_key, {**old, "source_ref": new_reference})
+                self.store.setting(old_key, {**old, "status": "rebound", "rebound_to": new_reference})
+            return memory_id
 
     async def reconcile(self, *, owner, source_ref, session_id=None, persona_id=None, adapter_id=None):
         """Inspect every scoped document; repair only an unambiguous interrupted save."""

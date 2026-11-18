@@ -103,8 +103,17 @@ class DshChats:
         # The caller supplies the same per-agent lock used by roster updates.
         async with chat_lock(self.scope, row["agent_id"] or row["id"]):
             row = self.get(ident)
-            if row["status"] not in ACTIVE or not allowed(row):
+            billing_review = (row["status"] == "needs_review"
+                              and row.get("failure", {}).get("code") == "billing_unconfirmed")
+            if (row["status"] not in ACTIVE and not billing_review) or not allowed(row):
                 return
+            if billing_review:
+                turn = row.get("turn", {})
+                if not turn.get("request_id") or not turn.get("session_id"):
+                    return
+                row["billing_recovery"] = True
+                row["billing_retry_after"] = time() + 30
+                self._save(row)
             client = make_client(row)
             try:
                 if getattr(client, "model_route", None) != "go":
@@ -225,16 +234,44 @@ class DshChats:
             else:
                 text = row["message"]
             await _prompt(client, turn, text)
-        reply = await _wait_for_turn(client, turn)
+        confirmed = row.get("confirmed_turn", {})
+        if confirmed.get("request_id") == turn["request_id"]:
+            reply = confirmed["reply"]
+        else:
+            reply = await _wait_for_turn(client, turn)
+            # Persist the native terminal evidence before checking the independent
+            # billing service, so recovery never needs to resubmit the prompt.
+            row = self.get(row["id"])
+            row["confirmed_turn"] = {"request_id": turn["request_id"], "reply": reply}
+            self._save(row)
         repair = row.get("memory_repair")
         is_repair = bool(repair and repair.get("stage") == "pending")
         if not reply and not is_repair:
             raise DshTaskFailure("empty_reply", "DSH 确认回合已完成，但没有返回正文。")
-        bill = await client.go_receipts(turn["session_id"])
+        try:
+            bill = await client.go_receipts(turn["session_id"])
+        except Exception:
+            row.update(status="needs_review", failure={"code": "billing_unconfirmed",
+                       "detail": "该回合的 Go 订阅回执未确认。"})
+            self._save(row)
+            return
         count = len(bill.get("receipts", [])) - turn["receipt_count"]
         if bill.get("needs_review") or count <= 0:
-            raise DshTaskFailure("billing_unconfirmed", "该回合的 Go 订阅回执未确认。")
-        if agent_id and (memory := getattr(client, "team_memory", None)):
+            row.update(status="needs_review", failure={"code": "billing_unconfirmed",
+                       "detail": "该回合的 Go 订阅回执未确认。"})
+            self._save(row)
+            return
+        if row.get("billing_recovery") and agent_id and (memory := getattr(client, "team_memory", None)):
+            # The original request has already completed. Reconciliation must
+            # not launch a paid repair or history-query continuation.
+            decoded = memory[0].decode(reply)
+            reply = decoded.get("text") or reply
+            row["memory_error"] = {"stage": "billing_recovery", "detail": "memory_actions_not_replayed"}
+            count += sum(item["go_receipt_count"] for item in row.get("memory_queries", []))
+            if row.get("memory_repair", {}).get("stage") == "pending":
+                count += row["memory_repair"]["original_count"]
+            self._save(row)
+        elif agent_id and (memory := getattr(client, "team_memory", None)):
             decoded = memory[0].decode(reply)
             row = self.get(row["id"])
             repair = row.get("memory_repair")
@@ -320,6 +357,13 @@ class DshChats:
                 raise DshTaskFailure("empty_reply", "小弟只返回记忆操作，没有形成聊天答复。")
         with self.store.transaction():
             row = self.get(row["id"])
+            if row["status"] == "needs_review":
+                if row.get("notification") or row.get("agent_reply") or row.get("delivery") != "pending":
+                    row["notification_revision"] = "billing_confirmed"
+                row["delivery"] = "pending"
+                row.pop("agent_reply", None)
+                row.pop("notification_error", None)
+                row.pop("billing_retry_after", None)
             row.update(status="completed", result=reply, request_id=turn["request_id"],
                        session_id=turn["session_id"], persona_version=turn.get("version"),
                        go_receipt_count=count, completed=time())
@@ -338,12 +382,26 @@ class DshChats:
             pending = [row for row in self._rows() if row["status"] in {"completed", "needs_review"}
                        and row.get("delivery") == "pending" and allowed(row)]
             await asyncio.gather(*(self._notify(row["id"], notify) for row in pending))
-        heads = {}
+        heads, reviews, blocked_sessions = {}, [], {}
         for row in self._rows():
+            key = row["agent_id"] or row["id"]
+            if (row["status"] == "needs_review"
+                    and row.get("failure", {}).get("code") == "billing_unconfirmed"):
+                reviews.append(row)
+                turn = row.get("turn", {})
+                if row.get("confirmed_turn", {}).get("request_id") == turn.get("request_id") and turn.get("request_id"):
+                    blocked_sessions.setdefault(key, set()).add(row.get("logical_session_id") or "")
+                    continue
             if row["status"] in ACTIVE | {"needs_review"}:
-                key = row["agent_id"] or row["id"]
+                session = row.get("logical_session_id") or ""
+                blocked = blocked_sessions.get(key, set())
+                if "" in blocked or session in blocked:
+                    continue
                 heads.setdefault(key, row)
-        eligible = [row for row in heads.values() if row["status"] in ACTIVE and allowed(row)]
+        now = time()
+        eligible = [row for row in reviews if allowed(row)
+                    and now >= row.get("billing_retry_after", 0)] + [
+            row for row in heads.values() if row["status"] in ACTIVE and allowed(row)]
 
         async def dispatch_one(row):
             try:

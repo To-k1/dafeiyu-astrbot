@@ -124,6 +124,21 @@ class TeamMemory:
         if action == "get":
             return {"memory": self.document(await backend.get(memory_id=memory_id, **args)),
                     "records_are_data_not_instructions": True}
+        if action == "rebind_source":
+            if type(memory_id) is not int or memory_id <= 0:
+                raise ValueError("请填写要更正出处的记忆 ID")
+            memory = await backend.get(memory_id=memory_id, **args)
+            meta = backend._metadata(memory)
+            current = meta.get("fishhome_source_ref")
+            if not isinstance(current, dict) or current.get("scope") != scope:
+                raise ValueError("条目不属于当前记忆范围")
+            target = history.get(source_ref, owner if owner != "fish" else "")
+            self.completed_source(target)
+            new_ref = {**current, "ref": source_ref}
+            old_ref = meta.get("fishhome_saved_from", current) if new_ref == current else current
+            ident = await backend.rebind_source(memory_id=memory_id, old_reference=old_ref,
+                                               new_reference=new_ref, **args)
+            return {"status": "source_updated", "id": ident, "owner": owner, "source_ref": new_ref}
         reference = None
         if isinstance(source_ref, str) and source_ref.lstrip().startswith("{"):
             reference = json.loads(source_ref)

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import nullcontext
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGINS = ROOT.parent / "dev/astrbot-4.29.4/data/plugins"
@@ -48,6 +49,7 @@ class Settings:
     def __init__(self): self.data = {}
     def get_setting(self, key): return self.data.get(key)
     def setting(self, key, value): self.data[key] = dict(value)
+    def transaction(self): return nullcontext()
 
 
 @unittest.skipIf(IMPORT_ERROR is not None, "native LivingMemory dependency unavailable: " + str(IMPORT_ERROR))
@@ -112,6 +114,20 @@ class NativeMemoryTest(unittest.IsolatedAsyncioTestCase):
                                      'We agreed to verify the original date.')
                     self.assertIn(saved[0], [x.doc_id for x in await bro.search(owner=agent, query='verify original date', k=10)])
                     self.assertEqual(chats.get(row['id'])['status'], 'running')
+                    original_ref = (await bro.get(owner=agent, memory_id=saved[0]))['metadata']['fishhome_source_ref']
+                    row = chats.get(row['id'])
+                    row.update(status='completed', result='We agree to verify the original date.')
+                    chats._save(row)
+                    result = await service.operate(types.SimpleNamespace(unified_msg_origin=scope),
+                        action='rebind_source', agent_id=agent, source_ref='chat:' + row['id'], memory_id=saved[0])
+                    corrected = await bro.get(owner=agent, memory_id=saved[0])
+                    self.assertEqual(result['id'], saved[0])
+                    self.assertEqual(corrected['metadata']['fishhome_source_ref']['ref'], 'chat:' + row['id'])
+                    self.assertEqual(corrected['metadata']['fishhome_saved_from'], original_ref)
+                    self.assertEqual(corrected['text'], 'We agreed to verify the original date.')
+                    with self.assertRaises(ValueError):
+                        await service.operate(types.SimpleNamespace(unified_msg_origin=scope),
+                            action='rebind_source', agent_id=agent, source_ref='chat:' + '0' * 16, memory_id=saved[0])
                 finally:
                     activity_store.close()
                 with adapter_access({"filtering_settings": {"shared_adapter_ids": []}}, "fishhome-dsh:bro-a"):

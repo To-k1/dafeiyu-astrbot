@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -15,8 +16,9 @@ from deploy.fish_cost_ledger import Ledger
 from deploy.dsh_bridge.go_relay import GoRelay, GoReceipt, subscription_receipt
 from deploy.dsh_bridge.go_usage import normalize_usage
 from deploy.dsh_bridge.media_asr import transcribe_audio
-from deploy.dsh_bridge.go_video_task import run_search_task, run_video_task
+from deploy.dsh_bridge.go_video_task import run_go_task, run_search_task, run_video_task
 from deploy.dsh_bridge.public_video import PRESET
+from deploy.dsh_bridge.public_search import validate_query, validate_task_query
 
 
 USAGE = {"prompt_tokens": 10, "completion_tokens": 3, "cost": 0,
@@ -25,6 +27,32 @@ BVID = "BV1g8Wq6DEXj"
 
 
 class GoVideoTests(unittest.IsolatedAsyncioTestCase):
+    def test_task_description_and_search_query_have_separate_limits(self):
+        long_query = "资料" * 300
+        self.assertEqual(validate_task_query(long_query), long_query)
+        with self.assertRaises(ValueError):
+            validate_query(long_query)
+        with self.assertRaises(ValueError):
+            validate_task_query("资" * 4001)
+
+    async def test_timeout_reports_last_session_phase(self):
+        async def call(method, request):
+            if method == "session.create":
+                return {"agentPreset": "test", "sessionId": "session"}
+            if method == "session.selectModel":
+                return {"selected": {"provider": PROVIDER, "model": MODEL}}
+            if method == "session.prompt":
+                return {"accepted": True}
+            if method == "session.history":
+                await asyncio.Event().wait()
+            return {}
+
+        phases = []
+        with self.assertRaises(TimeoutError):
+            await run_go_task(SimpleNamespace(call=call), ".", "test", "test", None, .01,
+                              progress=phases.append)
+        self.assertEqual(phases[-1], "waiting_for_result")
+
     def test_official_go_window_is_unknown_until_all_windows_are_present(self):
         self.assertEqual(normalize_usage(None)["status"], "unknown")
         item = {"percent": 100, "limited": True, "resetsAt": 1794789000000}

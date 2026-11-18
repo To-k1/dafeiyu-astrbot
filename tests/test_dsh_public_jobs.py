@@ -146,6 +146,23 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-credential", str(failed))
         self.assertEqual(calls, [SEARCH])
 
+    async def test_long_search_task_retains_phase_after_timeout(self):
+        query = "查证公开资料" * 100
+
+        async def execute(body, started):
+            self.assertEqual(body["query"], query)
+            started("waiting_for_result")
+            raise TimeoutError()
+
+        jobs = PublicJobs(self.root / "jobs", execute)
+        jobs.start()
+        self.addAsyncCleanup(jobs.close)
+        jobs.submit(SEARCH_ID, {"kind": "web", "query": query})
+        await eventually(lambda: jobs.get(SEARCH_ID)["state"] == "failed")
+        reopened = PublicJobs(self.root / "jobs", execute)
+        self.assertEqual(reopened.get(SEARCH_ID)["phase"], "waiting_for_result")
+        self.assertEqual(reopened.get(SEARCH_ID)["failure"]["code"], "timed_out")
+
     async def test_manager_close_marks_running_job_unconfirmed(self):
         async def execute(body, started):
             started()

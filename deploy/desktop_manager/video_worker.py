@@ -22,7 +22,7 @@ from deploy.dsh_bridge.go_profile import KEY_ENV, PROVIDER, render_go_patch
 from deploy.dsh_bridge.desktop_tools import desktop_call, desktop_server, render_desktop_preset
 from deploy.dsh_bridge.go_relay import GoRelay
 from deploy.dsh_bridge.go_video_task import run_desktop_task, run_search_task, run_video_task
-from deploy.dsh_bridge.public_search import render_search_preset, search_server, validate_query
+from deploy.dsh_bridge.public_search import render_search_preset, search_server, validate_task_query
 from deploy.dsh_bridge.public_video import build_server, render_preset, video_reference
 from .windows import impersonate, run_as
 
@@ -146,7 +146,7 @@ class VideoWorker:
                     upstream)
 
     async def search(self, password, key, query, *, upstream=None, background_started=None, agent=None):
-        query = validate_query(query)
+        query = validate_task_query(query)
         if background_started is None and self.slots.locked():
             raise ValueError("DSH 公开任务工作进程均在使用")
         async with self.slots:
@@ -158,7 +158,8 @@ class VideoWorker:
                 evidence = Path(folder) / "sources.jsonl"
                 return await self._run(password, key, search_server(evidence), render_search_preset,
                     lambda client, work, relay: run_search_task(
-                        client, work, query, evidence, relay, timeout=timeout, agent=agent), upstream)
+                        client, work, query, evidence, relay, timeout=timeout, agent=agent,
+                        progress=background_started), upstream, progress=background_started)
 
     async def desktop(self, password, key, desktop_token, instruction, *, agent=None):
         if not isinstance(instruction, str) or not 1 <= len(instruction.strip()) <= 1000:
@@ -173,7 +174,7 @@ class VideoWorker:
                     render_desktop_preset, lambda client, work, relay:
                     run_desktop_task(client, work, instruction.strip(), evidence, relay, agent=agent), None)
 
-    async def _run(self, password, key, server, tool_patch, execute, upstream):
+    async def _run(self, password, key, server, tool_patch, execute, upstream, *, progress=None):
         account = self.account
         session, model_token, media_token = uuid4().hex, secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         relay = GoRelay(key, model_token, session, **({"upstream": upstream} if upstream else {}))
@@ -181,6 +182,8 @@ class VideoWorker:
         await relay_runner.setup()
         job = None
         try:
+            if progress:
+                progress("starting_tools")
             await web.TCPSite(relay_runner, "127.0.0.1", 0).start()
             base_url = f"http://127.0.0.1:{relay_runner.addresses[0][1]}/v1"
             async with media_listener(server, media_token) as media_url:
@@ -200,6 +203,8 @@ class VideoWorker:
                              env={"FISHHOME_VIDEO_JOB": str(work), "DSH_HOME": str(work / "dsh"),
                                   KEY_ENV: model_token, "DSH_PERMISSION_MODE": "workspace-write"})
                 try:
+                    if progress:
+                        progress("connecting_worker")
                     async with ClientSession(timeout=ClientTimeout(total=12), trust_env=False) as http:
                         client = await connect_worker(http, account, password, work / "worker.log", pid)
                         return await execute(client, work, relay)

@@ -153,7 +153,7 @@ class CommissionedFiles:
         return {"id": task["id"], "kind": task["job_kind"], "status": task["state"],
                 "source": task["source"], "question": task["instruction"], "created": task["created"],
                 "delivery": task["delivery"], "cancellation_requested": bool(task.get("cancel_requested")),
-                "summary": task.get("result"),
+                "summary": task.get("result"), "phase": task.get("worker_phase"),
                 "evidence": task.get("media_evidence"), "failure": task.get("failure"),
                 **({"agent": agent_receipt(task["spec"]["agent"])} if task["spec"].get("agent") else {})}
 
@@ -200,6 +200,8 @@ class CommissionedFiles:
         if state not in {"queued", "running", "cancelling", "cancelled", "completed", "failed", "needs_review"}:
             return
         task["state"] = state
+        if isinstance(result.get("phase"), str):
+            task["worker_phase"] = result["phase"]
         if state not in PUBLIC_PENDING:
             task.pop("cancel_requested", None)
         if state in {"failed", "needs_review"}:

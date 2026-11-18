@@ -54,6 +54,97 @@ class Runner:
 
 
 class ChatsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_review_recovers_original_without_paid_continuation(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            roster = DshRoster(store, SCOPE)
+            agent = roster.create("A", "persona")["id"]
+            chats = DshChats(store, SCOPE)
+            job = chats.enqueue("question", agent, "one")
+            runner, lock = Runner(), asyncio.Lock()
+            args = (lambda row: runner, lambda row: "workspace", lambda row: True, None,
+                    lambda scope, ident: lock)
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=AsyncMock(side_effect=TimeoutError)):
+                await chats.dispatch_next(*args)
+            runner.done.add(runner.prompts[0]["requestId"])
+            row = chats.get(job["id"])
+            row.update(status="needs_review", delivery="notified", agent_reply="old failure notice",
+                       failure={"code": "billing_unconfirmed", "detail": "missing"}, memory_protocol_required=True)
+            chats._save(row)
+            memory = unittest.mock.Mock()
+            memory.decode.return_value = {"text": "original answer", "query": "history", "memories": [], "present": False}
+            runner.team_memory = (memory, object())
+            await chats.dispatch_next(*args)
+            result = chats.get(job["id"])
+            self.assertEqual((result["status"], result["result"]), ("completed", "original answer"))
+            self.assertEqual((result["delivery"], result["notification_revision"]), ("pending", "billing_confirmed"))
+            self.assertNotIn("agent_reply", result)
+            self.assertEqual(len(runner.prompts), 1)
+            memory.prepare.assert_not_called()
+            memory.remember_turn.assert_not_called()
+
+    async def test_completed_turn_recovers_delayed_billing_without_resending(self):
+        class DelayedRunner(Runner):
+            billing_ready = False
+            async def go_receipts(self, session):
+                if not self.billing_ready:
+                    return {"receipts": [], "needs_review": False}
+                return await super().go_receipts(session)
+
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            roster = DshRoster(store, SCOPE)
+            agent = roster.create("A", "persona")["id"]
+            chats = DshChats(store, SCOPE)
+            job = chats.enqueue("question", agent, "one")
+            runner, lock = DelayedRunner(), asyncio.Lock()
+            args = (lambda row: runner, lambda row: "workspace", lambda row: True, None,
+                    lambda scope, ident: lock)
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=AsyncMock(side_effect=TimeoutError)):
+                await chats.dispatch_next(*args)
+            runner.done.add(runner.prompts[0]["requestId"])
+            await chats.dispatch_next(*args)
+            review = chats.get(job["id"])
+            self.assertEqual(review["failure"]["code"], "billing_unconfirmed")
+            self.assertIn("question", review["confirmed_turn"]["reply"])
+            same = chats.enqueue("later", agent, "two")
+            await chats.dispatch_next(*args)
+            self.assertEqual(chats.get(same["id"])["status"], "queued")
+            self.assertEqual(len(runner.prompts), 1)
+            runner.billing_ready = True
+            review = chats.get(job["id"])
+            review["billing_retry_after"] = 0
+            chats._save(review)
+            chats = DshChats(store, SCOPE)
+            await chats.dispatch_next(*args)
+            result = chats.get(job["id"])
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["go_receipt_count"], 1)
+            self.assertIn("question", result["result"])
+            self.assertEqual(len(runner.prompts), 1)
+
+    async def test_verified_review_does_not_block_another_session(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            roster = DshRoster(store, SCOPE)
+            agent = roster.create("A", "persona")["id"]
+            chats = DshChats(store, SCOPE)
+            first = chats.enqueue("first", agent, "one")
+            runner, lock = Runner(), asyncio.Lock()
+            args = (lambda row: runner, lambda row: "workspace", lambda row: True, None,
+                    lambda scope, ident: lock)
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=AsyncMock(side_effect=TimeoutError)):
+                await chats.dispatch_next(*args)
+            row = chats.get(first["id"])
+            row.update(status="needs_review", failure={"code": "billing_unconfirmed", "detail": "missing"},
+                       confirmed_turn={"request_id": row["turn"]["request_id"], "reply": "answer"},
+                       billing_retry_after=float("inf"))
+            chats._save(row)
+            session = roster.new_session(agent)
+            second = chats.enqueue("second", agent, "two", session_id=session["id"])
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=AsyncMock(side_effect=TimeoutError)):
+                await chats.dispatch_next(*args)
+            self.assertEqual(chats.get(second["id"])["status"], "running")
+            self.assertEqual(len(runner.prompts), 2)
+            self.assertNotEqual(runner.prompts[0]["sessionId"], runner.prompts[1]["sessionId"])
+
     async def test_restart_queue_fifo_original_reply_and_notification_retry(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
             roster = DshRoster(store, SCOPE)

@@ -2715,7 +2715,8 @@ class BiliActivity(Star):
                 "id": task["id"], "agent": agent_receipt(agent) if agent else None, "status": task["state"],
                 "source_ref": ("public:" if task.get("job_kind") in {"video", "web"} else "task:") + task["id"],
                 "result": task.get("result"), "evidence": task.get("media_evidence"),
-                "report": task.get("report") if task["state"] == "completed" else None, "failure": task.get("failure")})
+                "report": task.get("report") if task["state"] == "completed" else None,
+                "phase": task.get("worker_phase"), "failure": task.get("failure")})
         async with session_lock_manager.acquire_lock(scope):
             cfg = self.cfg()
             if scope != cfg["owner_scope"] or task["owner"] != str(cfg["owner_id"]):
@@ -2738,6 +2739,7 @@ class BiliActivity(Star):
                 report["agent"] = agent_receipt(agent)
             if task.get("job_kind") in {"video", "web"}:
                 report["kind"] = task["job_kind"]
+                report["phase"] = task.get("worker_phase")
                 report["evidence"] = task.get("media_evidence")
             prompt = ("这是你为主人私聊派出的 DSH 工作的完成或核对事件。"
                       "用你的话给主人汇报实际结果；说明未完成或待批准的地方。"
@@ -2964,7 +2966,7 @@ class BiliActivity(Star):
             agent_id(string): 名册 ID 或唯一名字。submit 必填，list 可用来筛选。
             task_id(string): get、pause、resume、cancel 使用的任务 ID。
             kind(string): submit 时选 file、web 或 video。
-            instruction(string): 完整任务。web 填公开搜索问题，video 填要核实的问题。
+            instruction(string): 完整任务。web 可填写至多 4000 字的公开检索说明，video 填要核实的问题。
             source(string): 可选登记文件。video 填公开 B 站链接或 BV。
             project(string): file 的 DSH 项目名称。设项目会用隔离项目 Compute。
             guide_ids(string): JSON 数组，选用本次任务的指南 ID。
@@ -3160,13 +3162,13 @@ class BiliActivity(Star):
         """检索小队原始经历，或由你自行决定保留、纠正和删除有来源的长期记忆。
 
         Args:
-            action(string): search/get 读长期记忆；sources/source 查原始记录；save/update/forget 管理记忆；reconcile 核对不确定写入，不盲目重试。
+            action(string): search/get 读长期记忆；sources/source 查原始记录；save/update/forget 管理记忆；reconcile 核对不确定写入；rebind_source 更正已核实的出处，填写 memory_id 和新的原始记录引用 source_ref，保留记忆正文及原写入来源。
             agent_id(string): 留空是你自己的 LivingMemory；填写已有小弟 ID 或唯一名字则为小弟个人记忆。
             query(string): 搜索当前话题或过去的约定、合作经历。
             source_ref(string): sources 返回的 chat:/meeting:/agent:/task:/public: 引用；管理已有记忆也可填写检索 metadata.fishhome_source_ref 的完整 JSON，保留其个人归属和条目序号。
             content(string): 值得保留的事实或你自己的评价，不超过3000字，不复制所有聊天。记清谁说、谁做，不能把小弟意见当成主人偏好。
             kind(string): fact 为有来源的事实，evaluation 为记忆所属者本人表达的评价。
-            memory_id(number): get 查询已有记忆 ID。
+            memory_id(number): get 或 rebind_source 使用的已有记忆 ID。
         """
         self.check_team(event)
         return canonical(await self.team_memory().operate(event, action=action, agent_id=agent_id,
@@ -3274,9 +3276,12 @@ class BiliActivity(Star):
             if not self.qq_outbox(sender, scope):
                 return None
             receipts = []
+            delivery_key = f"dsh-chat:{scope}:{row['id']}"
+            if revision := row.get("notification_revision"):
+                delivery_key += f":{revision}"
             for index, offset in enumerate(range(0, len(response), 2000)):
                 receipt = await sender.enqueue_text(scope, response[offset:offset + 2000],
-                    f"dsh-chat:{scope}:{row['id']}:{index}")
+                    f"{delivery_key}:{index}")
                 if not (receipt.get("fishhome_queue_id") or receipt.get("message_id")):
                     raise ValueError("QQ 未确认接收聊天回报")
                 receipts.append(receipt)
@@ -3729,7 +3734,7 @@ class BiliActivity(Star):
         """查询公开网页。默认交给 DSH，个人核查可以用 personal。
 
         Args:
-            query(string): 不含私聊或凭据的公开搜索问题，最多 500 字。
+            query(string): 不含私聊或凭据的公开搜索问题，即时搜索最多 500 字，后台任务说明最多 4000 字。
             mode(string): default 获得 DSH 短报告与出处；personal 获取原始搜索摘要。
             background(bool): 主人私聊的长搜索设为 true，先入队再回复结果。
         """
@@ -3739,8 +3744,9 @@ class BiliActivity(Star):
         cfg = self.check_owner(event)
         if self.is_reply_run(event):
             raise PermissionError("评论回复监听不能派发公开搜索")
-        if mode not in {"default", "personal"} or not isinstance(query, str) or not 1 <= len(query.strip()) <= 500:
-            raise ValueError("请提供 1 至 500 字的公开搜索问题")
+        limit = 4000 if background and mode == "default" else 500
+        if mode not in {"default", "personal"} or not isinstance(query, str) or not 1 <= len(query.strip()) <= limit:
+            raise ValueError(f"请提供 1 至 {limit} 字的公开搜索问题")
         client = self.public_search_client(cfg)
         if not client:
             return canonical({"status": "unavailable"})

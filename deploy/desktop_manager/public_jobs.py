@@ -8,7 +8,7 @@ from pathlib import Path
 from time import time
 from traceback import extract_tb
 
-from deploy.dsh_bridge.public_search import validate_query
+from deploy.dsh_bridge.public_search import validate_task_query
 from deploy.dsh_bridge.public_video import video_reference
 
 from .windows import write_json
@@ -53,7 +53,7 @@ def validate_public_job(body):
     kind = body.get("kind")
     fields = body.keys() - {"agent"}
     if kind == "web" and fields == {"kind", "query"}:
-        spec = {"kind": kind, "query": validate_query(body["query"])}
+        spec = {"kind": kind, "query": validate_task_query(body["query"])}
     elif kind == "video" and fields == {"kind", "reference", "question"}:
         reference, question = body["reference"], body["question"]
         if not isinstance(reference, str) or not 1 <= len(reference) <= 500:
@@ -105,7 +105,7 @@ class PublicJobs:
 
     @staticmethod
     def _status(row):
-        return {key: row[key] for key in ("id", "state", "created", "updated", "report", "failure") if key in row}
+        return {key: row[key] for key in ("id", "state", "phase", "created", "updated", "report", "failure") if key in row}
 
     def get(self, ident):
         row = self._load(ident)
@@ -189,8 +189,11 @@ class PublicJobs:
         if row is None or row["state"] != "queued":
             return
 
-        def started():
-            self._save(row, state="running")
+        def started(phase=None):
+            changes = {"state": "running"}
+            if phase is not None:
+                changes["phase"] = phase
+            self._save(row, **changes)
 
         try:
             report = await self.execute(row["body"], started)

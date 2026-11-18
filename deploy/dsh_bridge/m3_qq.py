@@ -206,7 +206,7 @@ class Main(Star):
             state = "已达限额" if window["limited"] else "尚可用"
             rows.append(f"{label[key]} · 官方用量 {window['percent']:g}% · {state} · {when:%m-%d %H:%M} 重置")
         if len(rows) == 1:
-            rows.append("暂时无法读取官方余量，请检查 OpenCode 本机登录。")
+            rows.append(value.get("reason") or "暂时无法读取官方余量，请检查 OpenCode 本机服务。")
         await event.send(event.plain_result("\n".join(rows)))
 
     def life_client(self, scope, source=None, *, standalone=False, history_workspace=None):
