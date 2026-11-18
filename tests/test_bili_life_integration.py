@@ -582,6 +582,29 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = json.loads(await self.plugin.file_research(event, "create", instruction="起草观察计划"))
         self.assertEqual((result["status"], result["source"]), ("queued", None))
 
+    async def test_queued_go_file_run_does_not_require_or_consume_personal_activity_budget(self):
+        store = self.plugin.store
+        goal = store.life.create_goal(SCOPE, "文件研究", "保留出处", "汇总样例", "go-budget-goal")
+        store.life.update_goal(SCOPE, goal["id"], checkpoint={"personal_cost_wait": {"resume_after": datetime.now().timestamp() + 3600}})
+        plan = {"goal_id": goal["id"], "cwd": r"C:\FishHome\approved", "source": "sample.csv",
+                "instruction": "汇总样例"}
+        self.config.update(life_decision_enabled=True, dnd_ranges=[], dsh_life_task=plan)
+        self.save_config()
+        client = types.SimpleNamespace(model_route="go", close=AsyncMock())
+        self.plugin.context = types.SimpleNamespace(**{dsh_task.BRIDGE: lambda scope: client})
+        self.plugin.make_event = AsyncMock(side_effect=lambda run_id: FakeEvent(run_id=run_id))
+        budget = self.plugin.activity_budget()
+        with patch.object(budget, "snapshot", return_value={"remaining_seconds": 0, "remaining_model_calls": 0}), \
+                patch.object(budget, "start_run") as charge, patch.object(budget, "finish_run") as settle, \
+                patch.object(main, "run_file_task", new_callable=AsyncMock) as execute:
+            execute.return_value = ("completed", "Done")
+            self.assertTrue(self.plugin.life_ready(self.plugin.cfg()))
+            await self.plugin.run_activity("once")
+        execute.assert_awaited_once()
+        self.assertEqual(execute.await_args.args[3], goal["id"])
+        charge.assert_not_called()
+        settle.assert_not_called()
+
     async def test_dsh_peak_defers_expensive_goal_and_reoffers_after_noon(self):
         store = self.plugin.store
         goal = store.life.create_goal(SCOPE, "文件研究", "保留出处", "汇总样例", "peak-goal")

@@ -1,4 +1,4 @@
-"""Submit a link-only public-video task and return bounded, evidenced results."""
+"""Run a read-only public-media or desktop task and return its evidenced report."""
 
 import asyncio
 import json
@@ -31,7 +31,7 @@ def last_summary(events):
             text = "".join(block.get("text", "") for block in event["data"]["message"]["content"]
                            if block["type"] == "text").strip()
             if text:
-                return text[:1200]
+                return text
     raise ValueError("DSH 未返回报告")
 
 

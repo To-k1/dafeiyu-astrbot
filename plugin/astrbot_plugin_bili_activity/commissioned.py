@@ -279,7 +279,7 @@ class CommissionedFiles:
                             client, task, save, may_submit, control)
                 finally:
                     await client.close()
-                task.update(state="completed", result=report[:1200], usage=usage)
+                task.update(state="completed", result=report, usage=usage)
             except FileInterrupted as exc:
                 task.pop("requested_control", None)
                 if exc.action == "pause":
@@ -326,6 +326,15 @@ class CommissionedFiles:
             (len(prefix), prefix)).fetchall()
         for key, raw in rows:
             task = json.loads(raw)
+            if parts := task.get("delivery_parts"):
+                receipts = [lookup(part["queue_id"]) if "queue_id" in part else {"state": "sent", **part}
+                            for part in parts]
+                if all(receipt and receipt["state"] not in {"pending", "sending"} for receipt in receipts):
+                    messages = [str(receipt["message_id"]) for receipt in receipts if receipt.get("message_id")]
+                    state = next((receipt["state"] for receipt in receipts if receipt["state"] != "sent"), "sent")
+                    self.store.setting(key, {**task, "delivery": state, "message_id": messages[0] if messages else None,
+                                             "message_ids": messages})
+                continue
             receipt = lookup(task["queue_id"])
             if receipt and receipt["state"] not in {"pending", "sending"}:
                 self.store.setting(key, {**task, "delivery": receipt["state"], "message_id": receipt["message_id"]})
@@ -355,8 +364,30 @@ class CommissionedFiles:
         if not still_allowed(task) or (not enqueue and not ready()):
             return
         if enqueue and task.get("agent_reply"):
+            reply = task["agent_reply"]
+            if len(reply) > 2000:
+                parts = []
+                try:
+                    for index, offset in enumerate(range(0, len(reply), 2000)):
+                        receipt = await enqueue(scope, reply[offset:offset + 2000], f"{key}:{index}")
+                        if queue_id := receipt.get("fishhome_queue_id"):
+                            parts.append({"queue_id": queue_id})
+                        elif message_id := receipt.get("message_id"):
+                            parts.append({"message_id": str(message_id)})
+                        else:
+                            return
+                except (OSError, RuntimeError, ValueError) as exc:
+                    if getattr(exc, "state", None):
+                        self.store.setting(key, {**task, "delivery": exc.state, "delivery_parts": parts})
+                    return
+                if any("queue_id" in part for part in parts):
+                    self.store.setting(key, {**task, "delivery": "queued", "delivery_parts": parts})
+                else:
+                    messages = [part["message_id"] for part in parts]
+                    self.store.setting(key, {**task, "delivery": "sent", "message_id": messages[0], "message_ids": messages})
+                return
             try:
-                receipt = await enqueue(scope, task["agent_reply"], key)
+                receipt = await enqueue(scope, reply, key)
             except (OSError, RuntimeError, ValueError) as exc:
                 if getattr(exc, "state", None):
                     self.store.setting(key, {**task, "delivery": exc.state})

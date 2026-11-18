@@ -92,6 +92,7 @@ class MemoryWiringTests(unittest.IsolatedAsyncioTestCase):
         from bili_activity_test.dsh_task import GoQuotaWaiting
         for repaired, expected, error in [
             ('<fishhome_memory>{"remember":[{"text":"约定","kind":"fact"}]}</fishhome_memory>', 1, False),
+            ('下面是补充格式。<fishhome_memory>{"remember":[]}</fishhome_memory>', 0, False),
             ('仍然没有格式', 0, True),
         ]:
             with self.subTest(repaired=repaired), tempfile.TemporaryDirectory() as folder:
@@ -130,6 +131,48 @@ class MemoryWiringTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len({p['sessionId'] for p in runner.prompts}), 1)
                     if not error:
                         self.assertEqual(row['go_receipt_count'], 2)
+
+    async def test_delayed_billing_for_footer_repair_delivers_original_answer(self):
+        class DelayedRepairRunner(Runner):
+            billing_ready = False
+
+            async def go_receipts(self, session):
+                bill = await super().go_receipts(session)
+                if not self.billing_ready:
+                    bill['receipts'] = bill['receipts'][:1]
+                return bill
+
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            agent = DshRoster(store, SCOPE).create('A', 'persona')['id']
+            service = TeamMemory(store, SimpleNamespace(), folder)
+            service.prepare = AsyncMock(return_value=GUIDANCE)
+            service.remember_turn = AsyncMock()
+            runner = DelayedRepairRunner()
+            runner.team_memory = (service, SCOPE)
+            jobs = DshChats(store, SCOPE)
+            job = jobs.enqueue('会议得出了什么？', agent, 'source')
+            original = '完整答复。原始出处是 meeting:record。'
+            replies = iter([original, '这里只补充协议。<fishhome_memory>{"remember":[]}</fishhome_memory>'])
+
+            async def complete(client, turn):
+                client.done.add(turn['request_id'])
+                return next(replies)
+
+            lock = asyncio.Lock()
+            args = (lambda _: runner, lambda _: 'workspace', lambda _: True, None, lambda *_: lock)
+            with patch('bili_activity_test.dsh_chats._wait_for_turn', side_effect=complete):
+                await jobs.dispatch_next(*args)
+                await jobs.dispatch_next(*args)
+                self.assertEqual(jobs.get(job['id'])['failure']['code'], 'billing_unconfirmed')
+                runner.billing_ready = True
+                await jobs.dispatch_next(*args)
+            row = jobs.get(job['id'])
+            self.assertEqual(row['status'], 'completed')
+            self.assertEqual(row['result'], original)
+            self.assertEqual(row['go_receipt_count'], 2)
+            self.assertEqual(len(runner.prompts), 2)
+            self.assertNotIn('pending_memory_prompt', row)
+            service.remember_turn.assert_not_awaited()
 
     async def test_repair_query_saves_before_lookup(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:

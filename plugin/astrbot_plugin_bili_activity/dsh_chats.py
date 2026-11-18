@@ -268,8 +268,11 @@ class DshChats:
             reply = decoded.get("text") or reply
             row["memory_error"] = {"stage": "billing_recovery", "detail": "memory_actions_not_replayed"}
             count += sum(item["go_receipt_count"] for item in row.get("memory_queries", []))
-            if row.get("memory_repair", {}).get("stage") == "pending":
-                count += row["memory_repair"]["original_count"]
+            if is_repair:
+                reply = repair["original_reply"]
+                count += repair["original_count"]
+                repair["stage"] = "completed"
+                row.pop("pending_memory_prompt", None)
             self._save(row)
         elif agent_id and (memory := getattr(client, "team_memory", None)):
             decoded = memory[0].decode(reply)
@@ -305,9 +308,7 @@ class DshChats:
                 parsed.append(turn["request_id"])
             if decoded.get("error"):
                 row["memory_error"] = {"stage": "protocol", "detail": decoded["error"]}
-            reply = decoded["text"]
-            if is_repair:
-                reply = reply.strip() or repair["original_reply"]
+            reply = repair["original_reply"] if is_repair else decoded["text"]
             save_notice = ("此前回合记忆已保存并回读确认，记录 ID：" + str(row["memory_saved"])
                            if row.get("memory_saved") else "")
             if decoded["memories"]:

@@ -5,7 +5,6 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -105,17 +104,35 @@ class GoVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(before, ledger.snapshot())
 
     async def test_search_only_returns_cited_provider_results_without_snippets(self):
+        summary = "结论。" * 410 + "\n来源：https://example.org/primary"
+
+        async def call(method, request):
+            if method == "session.create":
+                return {"agentPreset": request["agentPreset"], "sessionId": "search"}
+            if method == "session.selectModel":
+                return {"selected": {"provider": PROVIDER, "model": MODEL}}
+            if method == "session.prompt":
+                call.request = request
+                return {"accepted": True}
+            if method == "session.history":
+                return {"events": [
+                    {"type": "user/message", "data": {"source": {"kind": "user", "rpcId": call.request["requestId"]}}},
+                    {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": summary}]}}},
+                    {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
+                ]}
+            raise AssertionError(method)
+
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / "sources.jsonl"
             evidence.write_text(json.dumps([
                 {"url": "https://example.org/other", "title": "Unused", "snippet": "long excerpt"},
                 {"url": "https://example.org/primary", "title": "Primary", "snippet": "not in the fish context"},
             ]) + "\n", encoding="utf-8")
-            with patch("deploy.dsh_bridge.go_video_task.run_go_task", new_callable=AsyncMock) as run:
-                run.return_value = {"summary": "I read a search excerpt for https://example.org/primary"}
-                result = await run_search_task(None, directory, "public information", evidence, None)
-                self.assertIn("public information", run.await_args.args[3])
-                self.assertNotIn("long excerpt", run.await_args.args[3])
+            relay = SimpleNamespace(failure=None, receipts=[GoReceipt("go", Decimal("0.00031"), 10, 3)])
+            result = await run_search_task(SimpleNamespace(call=call), directory, "public information", evidence, relay)
+            self.assertIn("public information", call.request["content"][0]["text"])
+            self.assertNotIn("long excerpt", call.request["content"][0]["text"])
+            self.assertEqual(result["summary"], summary)
             self.assertEqual(result["evidence"], [{"url": "https://example.org/primary", "title": "Primary"}])
 
     async def test_relay_requires_go_receipts_and_keeps_real_key_out_of_worker(self):

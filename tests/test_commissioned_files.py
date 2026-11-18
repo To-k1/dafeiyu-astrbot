@@ -12,11 +12,13 @@ from bili_activity_test.dsh_roster import DshRoster
 
 SCOPE = "qq:FriendMessage:12345"
 PLAN = {"cwd": r"C:\Runner\commission-files", "source": "sample.csv", "instruction": "Summarize the sample."}
+FILE_REPORT = "sample.csv has two rows.\n" + "Checked both rows. " * 70 + "FILE-EOF"
 
 
 class FileRunner:
-    def __init__(self, task, preset="fishhome-files"):
+    def __init__(self, task, preset="fishhome-files", report="sample.csv has two rows."):
         self.task, self.preset = task, preset
+        self.report = report
         self.calls = []
 
     async def call(self, method, args):
@@ -36,7 +38,7 @@ class FileRunner:
             ]}
         if method == "workspaceFiles.read":
             path = args["path"]
-            content = {self.task["report"]: "sample.csv has two rows.",
+            content = {self.task["report"]: self.report,
                        self.task["sources"]: '{"source":"sample.csv"}',
                        self.task["source"]: "a,b\n1,2\n"}
             return {"text": content[path], "eof": True, "absolutePath": str(PureWindowsPath(PLAN["cwd"]) / path)}
@@ -49,6 +51,29 @@ class FileRunner:
 
 
 class CommissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_public_reply_queues_every_part_and_waits_for_all_receipts(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            accepted = jobs.accept_public(SCOPE, '12345', 'search-long', {'kind': 'web', 'query': 'Python pathlib'})
+            report = '长报告。' * 700 + 'WEB-EOF'
+            call = AsyncMock(side_effect=lambda _, ident, body: {
+                'id': ident, 'state': 'completed', 'report': {'summary': report}})
+            enqueue = AsyncMock(side_effect=[{'fishhome_queue_id': 'first'}, {'fishhome_queue_id': 'last'}])
+            await jobs.dispatch_public(SCOPE, '12345', call, lambda task, result: (result['summary'], {}),
+                                       AsyncMock(), lambda _: True, ready=lambda: False,
+                                       wake=AsyncMock(return_value=report), enqueue=enqueue)
+            self.assertEqual(''.join(q.args[1] for q in enqueue.await_args_list), report)
+            self.assertTrue(all(len(q.args[1]) <= 2000 for q in enqueue.await_args_list))
+            self.assertEqual(len({q.args[2] for q in enqueue.await_args_list}), 2)
+            key = jobs._key(SCOPE, accepted['id'])
+            receipts = {'first': {'state': 'sent', 'message_id': '1'}, 'last': {'state': 'pending'}}
+            jobs.settle_outbox(SCOPE, receipts.get)
+            self.assertEqual(store.get_setting(key)['delivery'], 'queued')
+            receipts['last'] = {'state': 'sent', 'message_id': '2'}
+            jobs.settle_outbox(SCOPE, receipts.get)
+            self.assertEqual(store.get_setting(key)['delivery'], 'sent')
+            self.assertEqual(store.get_setting(key)['message_ids'], ['1', '2'])
+
     async def test_offline_reply_does_not_hold_up_the_next_public_completion(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
             jobs = CommissionedFiles(store)
@@ -274,7 +299,7 @@ class CommissionTests(unittest.IsolatedAsyncioTestCase):
             jobs = CommissionedFiles(store)
             jobs.accept(SCOPE, "12345", "1", PLAN)
             task = jobs.list(SCOPE, "12345")[0]
-            runner = FileRunner(task, preset="fishhome-compute")
+            runner = FileRunner(task, preset="fishhome-compute", report=FILE_REPORT)
             runner.compute_enabled = True
             send = AsyncMock(return_value={"message_id": "42"})
             await jobs.dispatch_next(SCOPE, "12345", lambda _: runner, send, lambda _: True)
@@ -285,7 +310,8 @@ class CommissionTests(unittest.IsolatedAsyncioTestCase):
             row = jobs.list(SCOPE, "12345")[0]
             self.assertEqual((row["state"], row["billing"]), ("completed", "interaction"))
             self.assertEqual(row["usage"], {"input": 50, "output": 20})
-            self.assertIn("sample.csv has two rows.", send.call_args.args[1])
+            self.assertEqual(row["result"], FILE_REPORT)
+            self.assertIn(FILE_REPORT, send.call_args.args[1])
 
     async def test_accept_restart_execute_verify_and_deliver_once(self):
         with tempfile.TemporaryDirectory() as folder:

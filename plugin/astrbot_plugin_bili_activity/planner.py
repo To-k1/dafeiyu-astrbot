@@ -406,10 +406,16 @@ class LifePlanner:
                                "topic": "", **fields})
 
         curiosity_runs_today = self._curiosity_runs_today(scope, now)
+        go_goals = cfg.get("dsh_go_goals", {})
 
         for goal in goals:
             gid = goal["id"]
-            cost_wait = goal.get("checkpoint", {}).get("personal_cost_wait", {})
+            work = works.get(gid)
+            action = "writing" if work and work["phase"] == "write" and not goal.get("origin_id") else "research"
+            go_file = action in go_goals.get(gid, ())
+            if cfg.get("dsh_only") and not go_file:
+                continue
+            cost_wait = {} if go_file else goal.get("checkpoint", {}).get("personal_cost_wait", {})
             if (type(cost_wait.get("resume_after")) in (int, float) and cost_wait["resume_after"] > now):
                 excluded.append({"key": "goal:" + gid, "reason": "personal_step_waiting_low_cost"})
                 continue
@@ -461,11 +467,9 @@ class LifePlanner:
             if goal["status"] not in {"ready", "paused"}:
                 excluded.append({"key": "goal:" + gid, "reason": "goal_" + goal["status"]})
                 continue
-            work = works.get(gid)
             if work and not cfg["workshop_enabled"]:
                 excluded.append({"key": "goal:" + gid, "reason": "workshop_disabled"})
                 continue
-            action = "writing" if work and work["phase"] == "write" else "research"
             if phone_busy and action != "writing":
                 excluded.append({"key": "goal:" + gid, "reason": "device_busy"})
                 continue
@@ -640,6 +644,9 @@ class LifePlanner:
         else:
             excluded.append({"key": "explore", "reason": "device_busy" if phone_busy else "goal_capacity"})
 
+        if cfg.get("dsh_only"):
+            candidates = [candidate for candidate in candidates
+                          if candidate["action"] in go_goals.get(candidate.get("goal_id"), ())]
         ranked = sorted(candidates, key=lambda c: (-c["score"], c["key"]))
         chosen = ranked[0] if ranked else {
             "action": "rest", "key": "rest", "fingerprint": "", "goal_id": None,

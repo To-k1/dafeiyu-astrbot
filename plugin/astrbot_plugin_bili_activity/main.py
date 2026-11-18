@@ -1575,7 +1575,28 @@ class BiliActivity(Star):
                 and not Projects(self.store).due(scope, cfg)):
             return False
         budget = self.activity_budget().snapshot(scope, cfg)
-        return budget["remaining_seconds"] > 0 and budget["remaining_model_calls"] > 0
+        if budget["remaining_seconds"] > 0 and budget["remaining_model_calls"] > 0:
+            return True
+        return bool(cfg["life_decision_enabled"] and self.pending_go_file_goals(scope, cfg)
+                    and self.dsh_model_route(DSH_LIFE_BRIDGE, scope) == "go")
+
+    def life_file_plan(self, scope, goal_id, cfg):
+        plan = cfg["dsh_life_task"]
+        if plan and plan["goal_id"] == goal_id:
+            return plan
+        if cfg["dsh_agent_tasks_enabled"]:
+            return self.store.get_setting(DSH_PLAN_PREFIX + dsh_task_key(scope, goal_id))
+        return None
+
+    def pending_go_file_goals(self, scope, cfg):
+        pending = {}
+        for goal in self.store.life.goals(scope):
+            goal_id = goal["id"]
+            plan = self.life_file_plan(scope, goal_id, cfg)
+            task = self.store.get_setting(dsh_task_key(scope, goal_id), {})
+            if plan and task.get("state") not in {"completed", "expired"} and task.get("model_route", "go") == "go":
+                pending[goal_id] = ("research", "writing") if plan.get("agent_selected") else ("research",)
+        return pending
 
     def sync_goal_approvals(self, scope):
         for goal in self.store.life.goals(scope):
@@ -1894,7 +1915,9 @@ class BiliActivity(Star):
         reviewing = None
         choice = None
         dsh_run = False
-        dsh_plan = cfg["dsh_life_task"]
+        go_file_run = False
+        file_go = False
+        dsh_plan = None
         if life_mode and cfg["life_decision_enabled"]:
             if not cfg["enabled"] or cfg["dnd_ranges"] is None or quiet_now(cfg["dnd_ranges"]):
                 return
@@ -1913,21 +1936,24 @@ class BiliActivity(Star):
                         await reader.close()
                 except (OSError, TypeError, ValueError, KeyError):
                     logger.debug("Go subscription status unavailable during planning")
-            choice = self.life_planner().choose(scope, {**cfg, "dsh_file_go": file_go, "dsh_go_available": available},
+            go_goals = self.pending_go_file_goals(scope, cfg) if file_go else {}
+            planning = {**cfg, "dsh_file_go": file_go, "dsh_go_available": available, "dsh_go_goals": go_goals}
+            budget = self.activity_budget().snapshot(scope, cfg)
+            if file_go and (budget["remaining_seconds"] <= 0 or budget["remaining_model_calls"] <= 0):
+                planning["dsh_only"] = True
+            choice = self.life_planner().choose(scope, planning,
                                                  phone_busy=bool(getattr(self.gate, "owner", None)))
             if choice["action"] == "rest":
                 self.life_planner().record(scope, run_id, choice)
                 return
             writing = self.workshop_store().get(scope, choice["work_id"]) if choice["action"] == "writing" else None
             reviewing = choice if choice["action"] == "project_review" else None
-            if choice["action"] in {"research", "writing"} and cfg["dsh_agent_tasks_enabled"] and not (
-                    dsh_plan and dsh_plan["goal_id"] == choice["goal_id"]):
-                dsh_plan = self.store.get_setting(DSH_PLAN_PREFIX + dsh_task_key(scope, choice["goal_id"]))
-            if (dsh_plan and dsh_plan["goal_id"] == choice["goal_id"]
-                    and (choice["action"] == "research"
-                         or (choice["action"] == "writing" and dsh_plan.get("agent_selected")))):
+            if choice["action"] in {"research", "writing"}:
+                dsh_plan = self.life_file_plan(scope, choice["goal_id"], cfg)
+            if dsh_plan and (choice["action"] == "research" or dsh_plan.get("agent_selected")):
                 saved = self.store.get_setting(dsh_task_key(scope, choice["goal_id"]), {})
                 dsh_run = saved.get("state") not in {"completed", "expired"}
+                go_file_run = dsh_run and choice["action"] in go_goals.get(choice["goal_id"], ())
                 if dsh_run and trigger != "once" and not saved.get("session_id"):
                     if saved.get("state") == "deferred":
                         if ((not file_go and saved["resume_after"] > time.time())
@@ -1935,8 +1961,8 @@ class BiliActivity(Star):
                             return
                     elif not dsh_plan.get("agent_selected"):
                         return
-        duration = cfg["max_minutes"] * 60
-        if choice and choice.get("rhythm", {}).get("enabled"):
+        duration = 300 if go_file_run else cfg["max_minutes"] * 60
+        if not go_file_run and choice and choice.get("rhythm", {}).get("enabled"):
             rhythm = choice["rhythm"]
             duration = min(duration, rhythm["max_seconds"], rhythm["active_until"] - time.time())
             if duration <= 0:
@@ -1945,10 +1971,11 @@ class BiliActivity(Star):
             if not hasattr(self, "life_runs"):
                 self.life_runs, self.run_goals = set(), {}
                 self.run_curiosity_attempted = set()
-            try:
-                duration = self.activity_budget().start_run(scope, run_id, duration, cfg)
-            except BudgetExceeded:
-                return
+            if not go_file_run:
+                try:
+                    duration = self.activity_budget().start_run(scope, run_id, duration, cfg)
+                except BudgetExceeded:
+                    return
             self.life_runs.add(run_id)
         if choice:
             if not hasattr(self, "decision_runs"):
@@ -1989,7 +2016,7 @@ class BiliActivity(Star):
                     if factory is None:
                         status, summary = "needs_review", "DSH 连接未配置，目标已保留。"
                         return
-                    if choice.get("rhythm", {}).get("enabled"):
+                    if not go_file_run and choice.get("rhythm", {}).get("enabled"):
                         duration = min(duration, choice["rhythm"]["active_until"] - time.time(),
                                        choice["at"] + choice["rhythm"]["max_seconds"] - time.time())
                     if duration <= 0:
@@ -2182,7 +2209,8 @@ class BiliActivity(Star):
             status, summary = "cancelled", "活动已停止；已取得内容保留。"
             raise
         except TimeoutError:
-            status, summary = "timeout", "达到活动时间上限；已取得内容保留。"
+            status = "timeout"
+            summary = "DSH 文件工作进程未在执行期限内交付；已取得内容保留。" if go_file_run else "达到活动时间上限；已取得内容保留。"
         except BudgetExceeded:
             status, summary = "budget_exhausted", "达到活动预算；已取得内容和下一步保留。"
         except Exception as exc:
@@ -2219,7 +2247,8 @@ class BiliActivity(Star):
                 except (Exception, asyncio.CancelledError):
                     pass
             if life_mode:
-                self.activity_budget().finish_run(scope, run_id)
+                if not go_file_run:
+                    self.activity_budget().finish_run(scope, run_id)
                 self.life_runs.discard(run_id)
                 self.run_goals.pop(run_id, None)
                 getattr(self, "run_curiosity_attempted", set()).discard(run_id)

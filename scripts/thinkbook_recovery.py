@@ -8,7 +8,7 @@ from http.client import HTTPConnection
 from http.cookies import SimpleCookie
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
@@ -22,7 +22,8 @@ from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-FORMAT = 'fishhome-thinkbook-recovery-v1'
+LEGACY_FORMAT = 'fishhome-thinkbook-recovery-v1'
+FORMAT = 'fishhome-thinkbook-recovery-v2'
 ASTRO = 'dev/astrbot-4.29.4/data'
 NAPCAT = 'dev/napcat-4.18.38'
 RUNNER = ('DSH', 'DSH-Commission', 'm3-file-check', 'commission-files')
@@ -30,6 +31,109 @@ MANAGER = ('settings.json', 'credentials.bin', 'bili')
 ACTIVITY = 'plugin_data/astrbot_plugin_bili_activity/activity.sqlite3'
 WRITERS = ('astrbot', 'dsh_commission', 'dsh', 'bili', 'budget')
 PROACTIVE = 'plugins/astrbot_plugin_proactive_chat'
+BRIDGE = 'plugin_data/astrbot_plugin_dsh_bridge/m3.json'
+WORKSPACE_DIRS = ('dsh/life', 'dsh/commission', 'shared', 'dsh/projects')
+WORKSPACE_REQUIRED = frozenset('workspaces/' + name for name in WORKSPACE_DIRS[:3])
+WORKSPACE_PARENTS = {'workspaces', 'workspaces/dsh'}
+COMPUTE_CACHE = {'.fishhome-wheels', '.fishhome-deps'}
+
+
+def workspace_root(root, data):
+    config = data / BRIDGE
+    if not config.is_file():
+        return None
+    settings = json.loads(config.read_text(encoding='utf-8-sig'))
+    configured = settings.get('dsh_workspaces_root')
+    if not configured:
+        return None
+    expected = root.parent / 'workspaces'
+    if Path(configured) != expected or expected.resolve() != expected:
+        raise ValueError('DSH 工作区需要位于安装目录旁的 workspaces 普通目录。')
+    for field, name in zip(('life_workspace', 'commission_workspace', 'shared_workspace'), WORKSPACE_DIRS):
+        if settings.get(field) and Path(settings[field]) != expected / name:
+            raise ValueError(f'DSH 当前工作区与还原范围不一致：{name}')
+    return expected
+
+
+def validate_workspace_layout(root):
+    # The managed root is swapped as a unit; unknown siblings must not silently disappear.
+    for parent, children in ((root, {'dsh', 'shared'}), (root / 'dsh', {'life', 'commission', 'projects'})):
+        if parent.exists() and (parent.resolve() != parent or
+                any(item.name not in children for item in parent.iterdir())):
+            raise ValueError('DSH 工作区有还原范围之外的目录或文件，请先保存。')
+
+
+def copy_workspaces(source, target, *, compute_enabled=False):
+    from deploy.desktop_manager.compute import ACCOUNT, acl, sid
+
+    target.mkdir()
+    acl(target, '/inheritance:r', '/grant:r', f'*{sid(os.environ["USERNAME"])}:(OI)(CI)F',
+        '*S-1-5-18:(OI)(CI)F', f'*{sid("FishHomeRunner")}:(OI)(CI)M')
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    projects = target / 'dsh/projects'
+    if compute_enabled and projects.is_dir():
+        acl(projects, '/grant:r', f'*{sid(ACCOUNT)}:(OI)(CI)M')
+
+
+def workspace_inventory(manifest, files):
+    from scripts.native_archive import path_parts
+
+    if manifest.get('format') == LEGACY_FORMAT:
+        return []
+    folders = manifest.get('workspace_dirs')
+    prefixes = tuple('workspaces/' + name + '/' for name in WORKSPACE_DIRS)
+    if not isinstance(folders, list) or any(not isinstance(name, str) for name in folders):
+        raise ValueError('还原包缺少 DSH 工作区目录清单。')
+    valid_roots = WORKSPACE_PARENTS.union(prefix.rstrip('/') for prefix in prefixes)
+    for name in folders:
+        path_parts(name)
+        if name not in valid_roots and not name.startswith(prefixes):
+            raise ValueError('还原包包含未知的 DSH 工作区目录。')
+    file_paths = [name for name in files if name.startswith('workspaces/')]
+    all_paths = folders + file_paths
+    folder_set = set(folders)
+    if (not (WORKSPACE_REQUIRED | WORKSPACE_PARENTS) <= folder_set
+            or len({name.casefold() for name in all_paths}) != len(all_paths)
+            or any(str(PurePosixPath(name).parent) not in folder_set
+                   for name in all_paths if name != 'workspaces')
+            or any(not name.startswith(prefixes) for name in file_paths)):
+        raise ValueError('还原包的 DSH 工作区清单不完整或重复。')
+    return folders
+
+
+def add_to_archive(bundle, source, name, skip=(), directories=None):
+    info = source.lstat()
+    if source.is_symlink() or getattr(info, 'st_file_attributes', 0) & 1024:
+        raise RuntimeError('还原范围内存在 Windows 链接，请先检查该目录。')
+    if stat.S_ISDIR(info.st_mode):
+        if directories is not None:
+            directories.append(name)
+        for child in sorted(source.iterdir()):
+            if child.name not in skip and child.name != '__pycache__' and not child.name.endswith('-shm'):
+                add_to_archive(bundle, child, f'{name}/{child.name}', directories=directories)
+    elif stat.S_ISREG(info.st_mode):
+        bundle.write(source, name)
+    else:
+        raise RuntimeError('还原范围内存在非常规文件。')
+
+
+def add_workspaces(bundle, root):
+    directories = sorted(WORKSPACE_PARENTS)
+    for name in WORKSPACE_DIRS:
+        source = root / name
+        if name == 'dsh/projects' and not source.exists():
+            continue
+        if not source.is_dir() or source.resolve() != source:
+            raise ValueError(f'缺少普通 DSH 工作区：{name}')
+        archive_name = f'workspaces/{name}'
+        if name == 'dsh/projects':
+            directories.append(archive_name)
+            for project in sorted(source.iterdir()):
+                add_to_archive(bundle, project, f'{archive_name}/{project.name}',
+                               skip=COMPUTE_CACHE, directories=directories)
+        else:
+            add_to_archive(bundle, source, archive_name, directories=directories)
+    return directories
 
 
 def verify(archive, destination=None):
@@ -45,10 +149,11 @@ def verify(archive, destination=None):
         required = {f'install/{ASTRO}/cmd_config.json', f'install/{ASTRO}/data_v4.db',
                     f'install/{ASTRO}/{ACTIVITY}', 'manager/settings.json', 'manager/credentials.bin',
                     'runner/m3-file-check/.m3-root'}
-        if manifest.get('format') != FORMAT or not required <= files or set(manifest.get('files', ())) != files:
+        if manifest.get('format') not in {LEGACY_FORMAT, FORMAT} or not required <= files or set(manifest.get('files', ())) != files:
             raise ValueError('ThinkBook 还原包清单不完整。')
+        workspace_dirs = workspace_inventory(manifest, files)
         prefixes = (f'install/{ASTRO}/', f'install/{NAPCAT}/napcat/config/', 'manager/bili/',
-                    *(f'runner/{name}/' for name in RUNNER))
+                    *(f'runner/{name}/' for name in RUNNER), *(['workspaces/'] if workspace_dirs else []))
         for name in names:
             path_parts(name)
             if name not in required | {'manifest.json', f'install/{NAPCAT}/config.json'} and not name.startswith(prefixes):
@@ -61,6 +166,8 @@ def verify(archive, destination=None):
         if destination is not None:
             with staged_directory(destination) as stage:
                 bundle.extractall(stage)
+                for name in workspace_dirs:
+                    (stage / name).mkdir(parents=True, exist_ok=True)
                 for file in stage.rglob('*'):
                     if file.is_file() and file.suffix in {'.db', '.sqlite3'}:
                         with file.open('rb') as stream:
@@ -96,6 +203,9 @@ def capture(root, archive):
     if not password:
         raise RuntimeError('ThinkBook 控制台尚未保存 Runner 凭据。')
     data = root / ASTRO
+    workspaces = workspace_root(root, data)
+    if workspaces is not None:
+        validate_workspace_layout(workspaces)
 
     def runner_profile(handle):
         return Path(win32profile.GetUserProfileDirectory(handle)) / 'AppData/Local/FishHome'
@@ -163,22 +273,10 @@ def capture(root, archive):
         phase = '恢复' if target == 'running' else '停止'
         raise RuntimeError(f'ThinkBook 服务未能{phase}：{", ".join(waiting)}。')
 
-    def add(bundle, source, name, skip=()):
-        info = source.lstat()
-        if source.is_symlink() or getattr(info, 'st_file_attributes', 0) & 1024:
-            raise RuntimeError('还原范围内存在 Windows 链接，请先检查该目录。')
-        if stat.S_ISDIR(info.st_mode):
-            for child in sorted(source.iterdir()):
-                if child.name not in skip and child.name != '__pycache__' and not child.name.endswith('-shm'):
-                    add(bundle, child, f'{name}/{child.name}')
-        elif stat.S_ISREG(info.st_mode):
-            bundle.write(source, name)
-        else:
-            raise RuntimeError('还原范围内存在非常规文件。')
-
     status = services()
+    writers = WRITERS + (('compute',) if workspaces is not None and 'compute' in status else ())
     if any(status[name]['state'] not in {'running', 'stopped'} or
-           status[name]['state'] == 'running' and not status[name]['recognized'] for name in WRITERS):
+           status[name]['state'] == 'running' and not status[name]['recognized'] for name in writers):
         raise RuntimeError('请等 ThinkBook 服务启动完成并检查有无端口冲突。')
     idle(status)
     stopped = []
@@ -186,33 +284,39 @@ def capture(root, archive):
     partial = archive.with_suffix('.partial')
     try:
         try:
-            for name in WRITERS:
+            for name in writers:
                 if status[name]['state'] == 'running':
                     stopped.append(name)
                     api(f'/api/services/{name}/stop', True)
-            wait_for(WRITERS, 'stopped')
+            wait_for(writers, 'stopped')
             idle(services())
             with ZipFile(partial, 'x', compression=ZIP_DEFLATED, compresslevel=3) as bundle:
-                add(bundle, data, f'install/{ASTRO}', skip=('plugins', 'temp'))
+                add_to_archive(bundle, data, f'install/{ASTRO}', skip=('plugins', 'temp'))
                 if (data / PROACTIVE).is_dir():
-                    add(bundle, data / PROACTIVE, f'install/{ASTRO}/{PROACTIVE}', skip=('.git',))
+                    add_to_archive(bundle, data / PROACTIVE, f'install/{ASTRO}/{PROACTIVE}', skip=('.git',))
                 cat = root / NAPCAT
-                add(bundle, cat / 'napcat/config', f'install/{NAPCAT}/napcat/config')
+                add_to_archive(bundle, cat / 'napcat/config', f'install/{NAPCAT}/napcat/config')
                 if (cat / 'config.json').is_file():
-                    add(bundle, cat / 'config.json', f'install/{NAPCAT}/config.json')
+                    add_to_archive(bundle, cat / 'config.json', f'install/{NAPCAT}/config.json')
                 for name in MANAGER:
                     source = state / name
                     if name != 'bili' or source.exists():
-                        add(bundle, source, f'manager/{name}')
+                        add_to_archive(bundle, source, f'manager/{name}')
                 try:
                     with impersonate('FishHomeRunner', password) as handle:
                         profile = runner_profile(handle)
                         for name in RUNNER:
-                            add(bundle, profile / name, f'runner/{name}')
+                            add_to_archive(bundle, profile / name, f'runner/{name}')
                 except OSError as exc:
                     raise RuntimeError(f'无法备份 ThinkBook 文件工作区（Windows {exc.winerror}）。') from None
-                bundle.writestr('manifest.json', json.dumps({'format': FORMAT, 'captured_utc': stamp,
-                    'source_root': str(root), 'source_account': os.environ['USERNAME'], 'files': bundle.namelist()}, indent=2))
+                manifest = {'format': FORMAT if workspaces is not None else LEGACY_FORMAT,
+                    'captured_utc': stamp, 'source_root': str(root), 'source_account': os.environ['USERNAME'],
+                    'files': bundle.namelist()}
+                if workspaces is not None:
+                    manifest['workspace_dirs'] = add_workspaces(bundle, workspaces)
+                    manifest['files'] = bundle.namelist()
+                    workspace_inventory(manifest, manifest['files'])
+                bundle.writestr('manifest.json', json.dumps(manifest, indent=2))
         finally:
             restart_failed = []
             for name in reversed(stopped):
@@ -237,7 +341,7 @@ def restore_installation(archive, root):
     from deploy.desktop_manager.windows import Credentials, impersonate
 
     # Existing absolute workspace references and DPAPI state belong to this installation and Windows user.
-    protected_ports = {6185, 6196, 6197, 6199, 6099, 59934, 59935, 8011, 8767}
+    protected_ports = {6185, 6196, 6197, 6199, 6099, 59934, 59935, 59936, 8011, 8767}
     if any(row.laddr and row.laddr.port in protected_ports and row.status == 'LISTEN'
            for row in psutil.net_connections('tcp')):
         raise RuntimeError('还原前请停止 FishHome 服务并退出托盘。')
@@ -251,6 +355,12 @@ def restore_installation(archive, root):
         manifest = verify(archive, staged)
         if Path(manifest['source_root']).resolve() != root or manifest['source_account'] != os.environ['USERNAME']:
             raise RuntimeError('请使用原 ThinkBook 的 FishHomeOps 账户和原安装目录还原。')
+        workspaces = None
+        if manifest['format'] == FORMAT:
+            workspaces = workspace_root(root, staged / 'install' / ASTRO)
+            if workspaces is None:
+                raise ValueError('还原包没有 DSH 工作区配置。')
+            validate_workspace_layout(workspaces)
         creds = Credentials(staged / 'manager/credentials.bin')
         password = creds.values['runner_password']
         tag = '.before-restore-' + uuid4().hex[:10]
@@ -294,6 +404,9 @@ def restore_installation(archive, root):
                     if source.exists():
                         copy = shutil.copytree if source.is_dir() else shutil.copyfile
                         replace(state / name, lambda dest: copy(source, dest))
+                if workspaces is not None:
+                    replace(workspaces, lambda dest: copy_workspaces(staged / 'workspaces', dest,
+                            compute_enabled=bool(creds.values.get('compute_password'))))
                 runner_start = len(moves)
                 with impersonate('FishHomeRunner', password) as handle:
                     profile = Path(win32profile.GetUserProfileDirectory(handle)) / 'AppData/Local/FishHome'
