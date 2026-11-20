@@ -1,6 +1,7 @@
 """Durable local queue for the existing public-video and search workers."""
 
 import asyncio
+from plugin.astrbot_plugin_bili_activity.dsh_cards import validate_background
 import json
 import logging
 import re
@@ -10,6 +11,8 @@ from traceback import extract_tb
 
 from deploy.dsh_bridge.public_search import validate_task_query
 from deploy.dsh_bridge.public_video import video_reference
+from deploy.dsh_bridge.go_relay import GoSubscriptionWaiting
+from deploy.dsh_bridge.go_video_task import GoReportError
 
 from .windows import write_json
 
@@ -30,12 +33,14 @@ def validate_agent(agent):
     def text(value, limit):
         return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
 
-    if (not isinstance(agent, dict) or agent.keys() != {"id", "name", "version", "persona", "guides"}
+    if (not isinstance(agent, dict) or agent.keys() - {"background"} != {"id", "name", "version", "persona", "guides"}
             or not isinstance(agent["id"], str) or not re.fullmatch(r"[0-9a-f]{16}", agent["id"])
             or not text(agent["name"], 60) or not text(agent["persona"], 16000)
             or type(agent["version"]) is not int or agent["version"] < 1
             or not isinstance(agent["guides"], list) or len(agent["guides"]) > 8):
         raise ValueError("小弟身份或人格快照无效")
+    if "background" in agent:
+        validate_background(agent["background"])
     for guide in agent["guides"]:
         if (not isinstance(guide, dict) or guide.keys() != {"id", "title", "version", "text"}
                 or not text(guide["id"], 64) or not text(guide["title"], 100)
@@ -70,13 +75,12 @@ def validate_public_job(body):
 
 
 class PublicJobs:
-    def __init__(self, directory, execute, *, parallel=2):
+    def __init__(self, directory, execute, *, quota_available=None):
         self.directory = directory
         self.execute = execute
-        self.parallel = parallel
-        self._queue = asyncio.Queue()
-        self._workers = []
+        self.quota_available = quota_available
         self._active = {}
+        self._started = False
         self._closing = False
 
     def _path(self, ident):
@@ -93,7 +97,7 @@ class PublicJobs:
         except (ValueError, UnicodeError):
             row = None
         if (not isinstance(row, dict) or row.get("id") != ident or not isinstance(row.get("state"), str)
-                or (row["state"] == "queued" and
+                or (row["state"] in {"queued", "go_wait"} and
                     (not isinstance(row.get("created"), (int, float)) or not isinstance(row.get("body"), dict)))):
             return {"id": ident, "state": "needs_review",
                     "failure": {"code": "unreadable_record", "detail": "任务记录无法读取，需人工核对。"}}
@@ -125,7 +129,8 @@ class PublicJobs:
         self.directory.mkdir(parents=True, exist_ok=True)
         row = {"id": ident, "state": "queued", "created": time(), "body": body}
         self._save(row)
-        self._queue.put_nowait(ident)
+        if self._started:
+            self._launch(ident)
         return self._status(row)
 
     def cancel(self, ident):
@@ -136,17 +141,20 @@ class PublicJobs:
             self._save(row)
             return self._status(row)
         state = row["state"]
-        if state == "queued":
+        if state in {"queued", "go_wait"}:
             self._save(row, state="cancelled")
         elif state == "running":
             self._save(row, state="cancelling")
-        if state in {"queued", "running"}:
+        if state in {"queued", "go_wait", "running"}:
             task = self._active.get(ident)
             if task:
                 task.cancel()
         return self._status(row)
 
     def start(self):
+        if self._started or self._closing:
+            return
+        self._started = True
         queued = []
         for path in self.directory.glob("*.json"):
             if not JOB_ID.fullmatch(path.stem):
@@ -156,37 +164,31 @@ class PublicJobs:
                 continue
             if row["state"] in ACTIVE:
                 self._save(row, state="needs_review", failure=UNKNOWN)
-            elif row["state"] == "queued":
+            elif row["state"] in {"queued", "go_wait"}:
                 queued.append((row["created"], row["id"]))
         for _, ident in sorted(queued):
-            self._queue.put_nowait(ident)
-        self._workers = [asyncio.create_task(self._consume()) for _ in range(self.parallel)]
+            self._launch(ident)
 
     async def close(self):
         self._closing = True
-        for task in self._workers:
+        running = list(self._active.values())
+        for task in running:
             task.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
+        await asyncio.gather(*running, return_exceptions=True)
 
-    async def _consume(self):
-        while not self._closing:
-            ident = await self._queue.get()
-            task = asyncio.create_task(self._run(ident))
-            self._active[ident] = task
-            try:
-                await task
-            except asyncio.CancelledError:
-                if self._closing:
-                    raise
-            except OSError:
-                logger.exception("Could not store public DSH job status: %s", ident)
-            finally:
-                self._active.pop(ident, None)
-                self._queue.task_done()
+    def _launch(self, ident):
+        task = asyncio.create_task(self._run(ident))
+        self._active[ident] = task
+        task.add_done_callback(lambda finished: self._finished(ident, finished))
+
+    def _finished(self, ident, task):
+        self._active.pop(ident, None)
+        if not task.cancelled() and (exc := task.exception()):
+            logger.error("Could not store public DSH job status: %s", ident, exc_info=exc)
 
     async def _run(self, ident):
         row = self._load(ident)
-        if row is None or row["state"] != "queued":
+        if row is None or row["state"] not in {"queued", "go_wait"}:
             return
 
         def started(phase=None):
@@ -196,7 +198,17 @@ class PublicJobs:
             self._save(row, **changes)
 
         try:
-            report = await self.execute(row["body"], started)
+            while True:
+                if row["state"] == "go_wait":
+                    if not self.quota_available:
+                        return
+                    await self._await_quota()
+                    # Keep go_wait on disk until the worker actually starts, so a restart can resume it.
+                try:
+                    report = await self.execute(row["body"], started)
+                    break
+                except GoSubscriptionWaiting:
+                    self._save(row, state="go_wait", phase="waiting_for_go_quota")
             expected = {"video": "dsh_video", "web": "dsh_web_search"}[row["body"]["kind"]]
             if not isinstance(report, dict) or report.get("kind") != expected:
                 raise ValueError("DSH report kind does not match job")
@@ -217,6 +229,8 @@ class PublicJobs:
                 return
             if isinstance(exc, PublicJobUnavailable):
                 failure = {"code": "unavailable", "detail": "该公开资料工作进程当前不可用。"}
+            elif isinstance(exc, GoReportError):
+                failure = {"code": exc.code, "detail": str(exc), **({"evidence": exc.evidence} if exc.evidence else {})}
             elif isinstance(exc, TimeoutError):
                 failure = {"code": "timed_out", "detail": "任务在执行期限内未交付结果。"}
             else:
@@ -227,3 +241,9 @@ class PublicJobs:
             self._save(current, state="failed", failure=failure)
         else:
             self._save(row, state="completed", report=report)
+
+    async def _await_quota(self):
+        while True:
+            await asyncio.sleep(60)
+            if await self.quota_available():
+                return

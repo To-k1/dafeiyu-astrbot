@@ -1,10 +1,12 @@
+import asyncio
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import PureWindowsPath
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from test_bili_activity import core
+from test_bili_activity import core, main
 from bili_activity_test.commissioned import CommissionedFiles
 from bili_activity_test.dsh_task import DshTaskFailure, execute_text_turn
 from bili_activity_test.dsh_roster import DshRoster
@@ -51,6 +53,225 @@ class FileRunner:
 
 
 class CommissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_branches_preserve_source_and_control_only_the_selected_tree(self):
+        from bili_activity_test.team_delegation import prepare, references
+
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+                jobs = CommissionedFiles(store)
+                owner = "12345"
+                bot = object.__new__(main.BiliActivity)
+                bot.store = store
+                bot.context = SimpleNamespace()
+                setattr(bot.context, main.COMMISSION_BRIDGE, lambda *args: PLAN["cwd"])
+                bot.cfg = lambda: {"owner_scope": SCOPE, "owner_id": owner}
+                bot.start_commission_worker = lambda *_: None
+                spec = {"kind": "python", "source": "sample.csv", "instruction": "Calculate the count sum."}
+                other = {"kind": "file", "source": "sample.csv", "instruction": "Read the column names."}
+                parent = prepare([spec, other], actor="partner", request_id="turn-1", receipt_count=1,
+                    parent={"ref": "chat:root", "autonomous": False})
+                first, sibling = parent["children"]
+
+                def dispatch(action, child, parent_job=parent):
+                    return bot.local_tool_job(SCOPE, action, parent_job, child)
+
+                invalid = prepare([{**spec, "source": "another.csv"}], actor="partner", request_id="turn-2", receipt_count=1,
+                    parent={"ref": "task:parent", "source": "sample.csv", "shared": False, "compute": True, "autonomous": False})
+                self.assertEqual(dispatch("PUT", invalid["children"][0], invalid)["state"], "failed")
+                first.update(dispatch("PUT", first))
+                self.assertEqual(dispatch("PUT", first)["reference"], first["reference"])
+                sibling.update(dispatch("PUT", sibling))
+
+                def row(child):
+                    return store.get_setting(jobs._key(SCOPE, child["reference"].removeprefix("task:")))
+
+                parent_row = row(first)
+                blocked = {row(sibling)["id"]}
+                runners = {}
+                def make(_scope):
+                    class LocalRunner(FileRunner):
+                        async def call(self, method, args):
+                            if method == "session.create":
+                                self.calls.append((method, args))
+                                return {"sessionId": self.task_id, "agentPreset": args["agentPreset"]}
+                            if method == "workspaceFiles.read":
+                                self.calls.append((method, args))
+                                return {"text": "a,b\n1,2\n", "eof": True,
+                                        "absolutePath": str(PureWindowsPath(PLAN["cwd"]) / args["path"])}
+                            return await super().call(method, args)
+                    runner = LocalRunner({})
+                    runner.task_id = "test-" + str(len(runners))
+                    runners[runner.task_id] = runner
+                    runner.compute_enabled = True
+                    runner.model_route = "go"
+                    runner.go_receipts = AsyncMock(return_value={"receipts": [{"source": "go"}]})
+                    async def delegate_local(action, job, child):
+                        return dispatch(action, child, job)
+                    runner.delegate_local = delegate_local
+                    runner.delegate_kinds = ("file", "python")
+                    return runner
+
+                async def wait(_client, task, _control):
+                    if task["id"] == parent_row["id"] and not task.get("tool_delegations"):
+                        return '<fishhome_delegate>[{"kind":"file","source":"sample.csv","instruction":"Extract the count rows."}]</fishhome_delegate>'
+                    return "From sample.csv: item and count, 2 and 3."
+
+                send = AsyncMock()
+                args = (SCOPE, owner, make, send, lambda task: task["id"] not in blocked)
+                with patch("bili_activity_test.dsh_task._wait_for_turn", new=wait):
+                    await jobs.dispatch_next(*args)
+                    updated = row(first)
+                    grandchild = updated["tool_delegations"][0]["children"][0]
+                    self.assertEqual(row(grandchild)["delegation"]["parent"], first["reference"])
+                    self.assertEqual(row(grandchild)["delegation"]["actor"], "partner")
+                    self.assertNotIn("agent", row(grandchild))
+                    self.assertEqual(runners[updated["session_id"]].calls[0][1]["agentPreset"], "fishhome-local-compute")
+                    self.assertIn("a,b", str(runners[updated["session_id"]].calls))
+
+                    self.assertTrue(jobs.request_running_control(SCOPE, owner, updated["id"], "pause", internal=True))
+                    blocked.clear()
+                    blocked.add(row(grandchild)["id"])
+                    await jobs.dispatch_next(*args)
+                    self.assertEqual(row(first)["state"], "paused")
+                    self.assertEqual(row(grandchild)["state"], "paused")
+                    self.assertEqual(row(sibling)["state"], "completed")
+                    if cancel:
+                        self.assertTrue(jobs.cancel(SCOPE, owner, updated["id"], internal=True))
+                    else:
+                        self.assertTrue(jobs.pause_or_resume(SCOPE, owner, updated["id"], resume=True, internal=True))
+                    blocked.clear()
+                    for _ in range(3):
+                        await jobs.dispatch_next(*args)
+                expected = "cancelled" if cancel else "completed"
+                self.assertEqual(row(first)["state"], expected)
+                self.assertEqual(row(grandchild)["state"], expected)
+                self.assertEqual(row(sibling)["state"], "completed")
+                self.assertEqual(references(row(first)["tool_delegations"]), [grandchild["reference"]])
+                self.assertEqual(dispatch("GET", sibling)["report"]["evidence"][0]["source"], "sample.csv")
+                send.assert_not_awaited()
+
+    async def test_only_explicit_owner_go_commission_delivers_original_when_agent_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            original = FILE_REPORT + ("\nAdditional original detail." * 40)
+            candidate = jobs.accept(SCOPE, "12345", "explicit", PLAN, require_go=True, wake_agent=True)
+            implicit = jobs.accept(SCOPE, "12345", "author", PLAN, via_agent=True, require_go=True, wake_agent=True)
+            unverified = jobs.accept(SCOPE, "12345", "unverified", PLAN, require_go=True, wake_agent=True)
+            for ident in (candidate, implicit, unverified):
+                key = jobs._key(SCOPE, ident)
+                task = store.get_setting(key)
+                task.update(state="completed", result=original, usage={"billing_source": "go",
+                            "go_receipts": [] if ident == unverified else [{"source": "go"}]})
+                store.setting(key, task)
+
+            send = AsyncMock()
+            wake = AsyncMock(side_effect=RuntimeError("Agent could not complete with a 402"))
+            enqueue = AsyncMock(side_effect=[{"fishhome_queue_id": "first"}, {"fishhome_queue_id": "last"}])
+            args = (SCOPE, "12345", None, send, lambda _task: True)
+            await jobs.dispatch_next(*args, wake=wake, enqueue=enqueue, ready=lambda: False)
+            queued = "".join(call.args[1] for call in enqueue.call_args_list)
+            self.assertIn("肥鱼尚未复核", queued)
+            self.assertTrue(queued.endswith(original))
+            self.assertEqual(enqueue.await_count, 2)
+            self.assertEqual(wake.await_count, 3)
+            await jobs.dispatch_next(*args, wake=wake, enqueue=enqueue, ready=lambda: False)
+            self.assertEqual(enqueue.await_count, 2)
+            self.assertEqual(wake.await_count, 3)
+            task = store.get_setting(jobs._key(SCOPE, candidate))
+            self.assertEqual(task["delivery"], "queued")
+            self.assertIn("original_delivery", task)
+            self.assertNotIn("agent_consumed_at", task)
+            for ident in (implicit, unverified):
+                self.assertEqual(store.get_setting(jobs._key(SCOPE, ident))["delivery"], "pending")
+            send.assert_not_awaited()
+
+    async def test_named_file_resumes_from_tool_receipt_and_can_cancel_while_paused(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+                jobs = CommissionedFiles(store)
+                roster = DshRoster(store, SCOPE)
+                agent = roster.snapshot(roster.create("取证鱼", "仔细核对来源")['id'])
+                ident = jobs.accept(SCOPE, "12345", "file", PLAN, agent=agent, require_go=True)
+                key = jobs._key(SCOPE, ident)
+                runner = FileRunner(store.get_setting(key))
+                runner.model_route = "go"
+                runner.delegate_kinds = ("web",)
+                runner.go_receipts = AsyncMock(return_value={"receipts": [1]})
+                work_calls = []
+
+                async def worker(method, job_id, body=None):
+                    work_calls.append(method)
+                    if method == "DELETE":
+                        return {"id": job_id, "state": "cancelled"}
+                    if method == "PUT":
+                        return {"id": job_id, "state": "running"}
+                    if len(work_calls) == 1:
+                        return {"id": job_id, "state": "not_found"}
+                    return {"id": job_id, "state": "completed", "report": {
+                        "kind": "dsh_web_search", "summary": "资料已核", "billing": [{"source": "go"}],
+                        "evidence": [{"url": "https://docs.python.org/3/"}]}}
+
+                runner.delegate_public = worker
+                args = (SCOPE, "12345", lambda _scope: runner, AsyncMock(return_value={"message_id": "1"}),
+                        lambda _task: True)
+                wait = AsyncMock(side_effect=['<fishhome_delegate>[{"kind":"web","query":"查公开资料"}]</fishhome_delegate>',
+                                              "文件已写好"])
+                with patch("bili_activity_test.dsh_task._wait_for_turn", new=wait):
+                    await jobs.dispatch_next(*args)
+                    self.assertEqual(store.get_setting(key)["state"], "submitted")
+                    self.assertTrue(jobs.request_running_control(SCOPE, "12345", ident, "pause"))
+                    await jobs.dispatch_next(*args)
+                    self.assertEqual(store.get_setting(key)["state"], "paused")
+                    self.assertEqual(work_calls, ["GET", "PUT"])
+                    if cancel:
+                        self.assertTrue(jobs.cancel(SCOPE, "12345", ident))
+                    else:
+                        self.assertTrue(jobs.pause_or_resume(SCOPE, "12345", ident, resume=True))
+                    await jobs.dispatch_next(*args)
+                row = store.get_setting(key)
+                self.assertEqual(row["state"], "cancelled" if cancel else "completed")
+                self.assertEqual(work_calls[-1], "DELETE" if cancel else "GET")
+                prompts = [args for method, args in runner.calls if method == "session.prompt"]
+                self.assertEqual(len(prompts), 1 if cancel else 2)
+                if not cancel:
+                    self.assertEqual(prompts[0]["sessionId"], prompts[1]["sessionId"])
+                    self.assertIn("https://docs.python.org/3/", prompts[1]["content"][0]["text"])
+
+    async def test_scheduler_runs_independent_files_but_orders_shared_writers(self):
+        started = []
+
+        async def execute(_client, task, _save, may_submit, _control):
+            self.assertTrue(may_submit())
+            started.append(task["source_message_id"])
+            await asyncio.sleep(0)
+            return "done", {}
+
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            shared = {"cwd": r"D:\FishHome\workspaces\shared", "source": None,
+                      "instruction": "Edit the shared draft.", "shared": True, "agent_selected": True}
+            for ident, plan in (("a", shared), ("b", shared), ("c", PLAN), ("d", PLAN)):
+                jobs.accept(SCOPE, "12345", ident, plan)
+            client = AsyncMock()
+            args = (SCOPE, "12345", lambda _scope: client, AsyncMock(return_value={"message_id": "1"}),
+                    lambda _task: True)
+            with patch("bili_activity_test.commissioned.execute_file_task", new=execute):
+                await jobs.dispatch_next(*args)
+                self.assertCountEqual(started, ["a", "c", "d"])
+                await jobs.dispatch_next(*args)
+                self.assertEqual(started[-1], "b")
+
+    async def test_public_display_limit_does_not_limit_dispatch(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            for ident in range(12):
+                jobs.accept_public(SCOPE, "12345", f"web-{ident}", {"kind": "web", "query": f"query {ident}"})
+            self.assertEqual(len(jobs.list(SCOPE, "12345", job_kind="public")), 10)
+            call = AsyncMock(side_effect=lambda method, ident, body: {"id": ident, "state": "running"})
+            await jobs.dispatch_public(SCOPE, "12345", call, None, None, lambda _: True,
+                                       ready=lambda: True, wake=None)
+            self.assertEqual(call.await_count, 12)
+
     async def test_long_public_reply_queues_every_part_and_waits_for_all_receipts(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
             jobs = CommissionedFiles(store)
@@ -202,6 +423,25 @@ class CommissionTests(unittest.IsolatedAsyncioTestCase):
             job = jobs.list(SCOPE, "12345")[0]
             self.assertEqual((job["state"], job["source"]), ("completed", "shared/sample.csv"))
             self.assertEqual([args["path"] for method, args in runner.calls if method == "workspaceFiles.read"].count("sample.csv"), 2)
+
+    async def test_source_read_failure_keeps_native_session_and_does_not_submit_prompt(self):
+        class BlockedRunner(FileRunner):
+            async def call(self, method, args):
+                if method == "workspaceFiles.read":
+                    raise PermissionError("Windows refused workspace source")
+                return await super().call(method, args)
+
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            jobs = CommissionedFiles(store)
+            jobs.accept(SCOPE, "12345", "blocked", {**PLAN, "cwd": r"C:\Owner\shared",
+                        "source": "shared/qq-zip/task-x/001-tide.csv"})
+            runner = BlockedRunner(jobs.list(SCOPE, "12345")[0])
+            await jobs.dispatch_next(SCOPE, "12345", lambda _: runner,
+                                     AsyncMock(return_value={"message_id": "42"}), lambda _: True)
+            job = jobs.list(SCOPE, "12345")[0]
+            self.assertEqual(job["failure"]["code"], "source_read")
+            self.assertTrue(job["session_id"])
+            self.assertNotIn("session.prompt", [method for method, _ in runner.calls])
 
     async def test_agent_job_returns_inline_or_sends_one_natural_receipt_after_timeout(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:

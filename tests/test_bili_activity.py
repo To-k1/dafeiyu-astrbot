@@ -647,8 +647,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             learning_enabled=True,
         )
         self.plugin.control.write_text(json.dumps(self.config))
+        (self.plugin.store.folder / "shared-language.json").write_text(json.dumps({
+            "enabled": True, "filename": "language.txt", "text": "测试角色的共同语言"
+        }), encoding="utf-8")
         owner_req = types.SimpleNamespace(system_prompt="基础人格", func_tool=ToolSet(), contexts=[])
         await self.plugin.guard_phone(FakeEvent(), owner_req)
+        self.assertTrue(owner_req.system_prompt.startswith("基础人格"))
+        self.assertIn("测试角色的共同语言", owner_req.system_prompt)
         self.assertIn("【自身虚拟手机与应用能力认知】", owner_req.system_prompt)
         self.assertIn("com.ss.android.ugc.aweme", owner_req.system_prompt)
         self.assertIn("go_home", owner_req.system_prompt)
@@ -664,6 +669,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         other_req = types.SimpleNamespace(system_prompt="基础人格", func_tool=ToolSet(), contexts=[])
         await self.plugin.guard_phone(FakeEvent(scope=OTHER_SCOPE), other_req)
         self.assertNotIn("【自身虚拟手机与应用能力认知】", other_req.system_prompt)
+        self.assertNotIn("测试角色的共同语言", other_req.system_prompt)
 
     async def test_true_owner_scope_is_required_even_for_background_event(self):
         with self.assertRaises(PermissionError):

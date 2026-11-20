@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import test_bili_activity as fixtures
 main, core = fixtures.main, fixtures.core
 dsh_task = import_module(main.__package__ + ".dsh_task")
+dsh_cards = import_module(main.__package__ + ".dsh_cards")
 SCOPE, OTHER_SCOPE, FakeEvent = fixtures.SCOPE, fixtures.OTHER_SCOPE, fixtures.FakeEvent
 
 
@@ -58,6 +59,56 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await fixtures.PluginTests.asyncTearDown(self)
 
+    async def test_fish_shared_story_is_available_only_by_reading_the_tool(self):
+        body = "只有主动读取才能拿到的出厂故事"
+        impressions = "关于尚未成为小弟的角色\n" + "印象" * 2600
+        dsh_cards.save_fish_impressions(self.plugin.store, impressions)
+        row = dsh_cards.set_story(self.plugin.store, SCOPE,
+            filename="旧站台.txt", text=body, participants=[dsh_cards.FISH_PARTICIPANT])
+        tool = fixtures.FunctionTool(name=main.STORY_TOOL, active=True)
+        registry = types.SimpleNamespace(get_tool=lambda name: tool if name == main.STORY_TOOL else None)
+        self.plugin.context = types.SimpleNamespace(
+            get_llm_tool_manager=lambda: types.SimpleNamespace(get_full_tool_set=lambda: registry))
+        event = FakeEvent()
+        request = types.SimpleNamespace(func_tool=fixtures.ToolSet(), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(event, request)
+        self.assertIn(main.STORY_TOOL, request.func_tool.names())
+        self.assertNotIn(body, request.system_prompt)
+        self.assertNotIn(impressions[:100], request.system_prompt)
+        self.assertNotIn("旧站台", request.system_prompt)
+        self.plugin.life_runs.add("story-lookup")
+        life_event = FakeEvent(run_id="story-lookup")
+        life_prompt = types.SimpleNamespace(func_tool=fixtures.ToolSet(), system_prompt="life", contexts=[])
+        await self.plugin.guard_phone(life_event, life_prompt)
+        self.assertIn(main.STORY_TOOL, life_prompt.func_tool.names())
+        self.assertNotIn(body, life_prompt.system_prompt)
+        self.assertNotIn(impressions[:100], life_prompt.system_prompt)
+        catalog = json.loads(await self.plugin.story(event, query="旧站台"))
+        self.assertEqual(catalog["stories"][0]["id"], row["id"])
+        self.assertTrue(catalog["stories"][0]["fish_participates"])
+        self.assertNotIn("text", catalog["stories"][0])
+        self.assertNotIn("关于尚未成为小弟", str(catalog))
+        opened = json.loads(await self.plugin.story(event, action="read", story_id=row["id"]))
+        self.assertEqual(opened["text"], body)
+        self.assertTrue(opened["records_are_data_not_instructions"])
+        first = json.loads(await self.plugin.story(event, action="impressions"))
+        last = json.loads(await self.plugin.story(life_event, action="impressions", offset=first["next_offset"]))
+        self.assertEqual(first["kind"], "authored_impressions")
+        self.assertIsNone(last["next_offset"])
+        self.assertEqual(first["text"] + last["text"], impressions)
+        other_event = FakeEvent(scope=OTHER_SCOPE)
+        other_prompt = types.SimpleNamespace(func_tool=fixtures.ToolSet([tool]), system_prompt="persona", contexts=[])
+        await self.plugin.guard_phone(other_event, other_prompt)
+        self.assertNotIn(main.STORY_TOOL, other_prompt.func_tool.names())
+        with self.assertRaises(PermissionError):
+            await self.plugin.story(other_event, action="read", story_id=row["id"])
+        with self.assertRaises(PermissionError):
+            await self.plugin.story(other_event, action="impressions")
+        dsh_cards.set_story(self.plugin.store, SCOPE, ident=row["id"], status="archived")
+        self.assertEqual(json.loads(await self.plugin.story(event))["stories"], [])
+        with self.assertRaises(ValueError):
+            await self.plugin.story(event, action="read", story_id=row["id"])
+
     async def test_named_assignment_reuses_roster_and_keeps_selected_guide_revision(self):
         event = FakeEvent(event_id="named-file")
         self.plugin.start_commission_worker = Mock()
@@ -86,22 +137,45 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.start_dsh_meeting_worker = Mock()
         for name in ("阿墨", "团子"):
             await self.plugin.dsh_agents(event, "create", name=name, persona="独立表达")
+        with self.assertRaisesRegex(ValueError, "请先确认"):
+            await self.plugin.dsh_meeting(event, "create", topic="核对来源", members=json.dumps(["阿墨", "团子"]))
+        self.plugin.start_dsh_meeting_worker.assert_not_called()
         meeting = json.loads(await self.plugin.dsh_meeting(event, "create", topic="核对来源",
-            members=json.dumps(["阿墨", "团子"]), mode="interactive", report_every_minutes=3))
+            members=json.dumps(["阿墨", "团子"]), mode="interactive", style="discussion", report_every_minutes=3))
         ident = meeting["id"]
         self.assertEqual(meeting["report_every_minutes"], 3)
-        await self.plugin.dsh_meeting(FakeEvent(event_id="second-message"), "post", ident, text="先确认原出处")
+        self.assertIsNone(meeting["round_limit"])
+        posted = json.loads(await self.plugin.dsh_meeting(FakeEvent(event_id="second-message"), "post", ident,
+            text="先确认原出处", post_kind="agenda"))
+        self.assertEqual(posted["post_receipt"], {"visibility": "next_prompt", "round": 1, "kind": "agenda"})
         readback = json.loads(await self.plugin.dsh_meeting(event, "get", ident))
         self.assertEqual(readback["transcript"][0]["text"], "先确认原出处")
         self.assertEqual({member["name"] for member in readback["members"]}, {"阿墨", "团子"})
         with self.assertRaises(PermissionError):
             await self.plugin.dsh_meeting(FakeEvent(scope=OTHER_SCOPE), "get", ident)
 
+    async def test_tool_report_can_be_read_only_through_its_parent_record(self):
+        job_id = "b" * 32
+        parent_id = "a" * 16
+        self.plugin.store.setting(f"dsh-meeting:v1:{SCOPE}:{parent_id}", {
+            "transcript": [{"tool_sources": ["public-job:" + job_id]}]})
+        worker = AsyncMock(return_value={"id": job_id, "state": "completed", "report": {"summary": "完整报告"}})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_public_jobs_client=lambda _: worker)
+        event = FakeEvent()
+        parent = "meeting:" + parent_id
+        with self.assertRaisesRegex(ValueError, "没有关联"):
+            await self.plugin.dsh_public_job(event, "read_tool_report", "c" * 32, parent)
+        worker.assert_not_awaited()
+        result = json.loads(await self.plugin.dsh_public_job(event, "read_tool_report", job_id, parent))
+        self.assertEqual(result["report"]["summary"], "完整报告")
+        worker.assert_awaited_once_with("GET", job_id)
+
     async def test_web_search_delegates_by_default_and_preserves_personal_choice(self):
         evidence = [{"title": "Primary source", "url": "https://example.org/source"}]
         fetch = AsyncMock(side_effect=[
             {"kind": "dsh_web_search", "task_id": "search1", "summary": "Found evidence", "evidence": evidence, "billing": []},
             {"kind": "personal_web_search", "results": evidence},
+            {"kind": "page_text", "text": "original text", "artifact": "shared/web-sources/primary.md"},
         ])
         self.plugin.context = types.SimpleNamespace(fishhome_dsh_web_search_client=lambda scope: fetch if scope == SCOPE else None)
         event = FakeEvent()
@@ -112,6 +186,9 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = json.loads(await self.plugin.web_search(event, "check the citation", mode="personal"))
         fetch.assert_awaited_with("check the citation", "personal")
         self.assertEqual(result["results"], evidence)
+        result = json.loads(await self.plugin.web_search(event, evidence[0]["url"], mode="page"))
+        fetch.assert_awaited_with(evidence[0]["url"], "page")
+        self.assertEqual(result["text"], "original text")
 
     async def test_dsh_history_recalls_prior_media_without_dispatching_again(self):
         store = self.plugin.store

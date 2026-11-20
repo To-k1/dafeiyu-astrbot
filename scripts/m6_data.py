@@ -11,7 +11,9 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from deploy.memory_observatory.activity_reader import read_activity
-from deploy.memory_observatory.livingmemory_reader import limited_summary, read_snapshot, scope_key, version_from_file
+from deploy.memory_observatory.livingmemory_reader import (
+    limited_summary, prefer_configured_scope, read_snapshot, scope_key, version_from_file,
+)
 
 from .mock_backup import read_only, staged_directory
 from .native_archive import ACTIVITY, LM, restore, utc_now, verify
@@ -55,7 +57,7 @@ def room_activity(snapshot):
 def room_bundle(root):
     memory, metadata, activity = sources(root)
     return {"format": ROOM_FORMAT, "connection": "ready", "source": socket.gethostname(), "captured_at": utc_now(),
-            "memory": read_snapshot(memory, version_from_file(metadata), summaries_only=True),
+            "memory": prefer_configured_scope(read_snapshot(memory, version_from_file(metadata), summaries_only=True), root),
             "activity": room_activity(read_activity(activity))}
 
 

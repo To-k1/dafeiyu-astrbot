@@ -80,10 +80,11 @@ class ObservatoryServer(ThreadingHTTPServer):
                 self.activity_state = "stale" if self.activity_snapshot else "unavailable"
 
     def view(self, scope=None, **kwargs):
-        scopes = {m["scope"] for m in self.snapshot["memories"]}
-        if scope not in scopes:
-            scope = self.snapshot["memories"][0]["scope"] if scopes else None
-        view = project(self.snapshot, scope=scope, **kwargs)
+        preferred = (self.connection or {}).get("preferred_scope")
+        records = self.snapshot["memories"]
+        if scope is None:
+            scope = preferred or (records[0]["scope"] if records else None)
+        view = project(self.snapshot, scope=scope, preferred_scope=preferred, **kwargs)
         view["demo"] = self.demo
         if self.connection is not None:
             view["connection"] = self.connection.copy()
@@ -242,11 +243,9 @@ class Handler(BaseHTTPRequestHandler):
                     view["demo"] = True
             elif path == "/api/project":
                 with self.server.lock:
-                    view = project(self.server.snapshot, scope=body.get("scope"), days=body.get("days", 0),
-                                   query=body.get("query", ""), rehearsed=body.get("rehearsed", []), pinned=body.get("pinned", []))
-                    view["demo"] = self.server.demo
-                    if self.server.connection is not None:
-                        view["connection"] = self.server.connection.copy()
+                    view = self.server.view(body.get("scope"), days=body.get("days", 0),
+                                            query=body.get("query", ""), rehearsed=body.get("rehearsed", []),
+                                            pinned=body.get("pinned", []))
             elif path == "/api/livingmemory/refresh":
                 if self.server.source is None:
                     self.send(409, {"error": "此服务未配置 LivingMemory 只读源"})
@@ -258,7 +257,9 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot, info = self.server.source.load()
                     with self.server.lock:
                         self.server.snapshot, self.server.connection = snapshot, info
-                        view = self.server.view(body.get("scope"))
+                        requested = body.get("scope")
+                        scopes = {m["scope"] for m in snapshot["memories"]}
+                        view = self.server.view(requested if requested in scopes else None)
                 except SourceError:
                     with self.server.lock:
                         self.server.connection = {**self.server.connection, "state": "stale"}

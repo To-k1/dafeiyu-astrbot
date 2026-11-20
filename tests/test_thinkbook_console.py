@@ -86,3 +86,51 @@ class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await browser.get("/api/snapshot", headers={**host, "Origin": "https://example.invalid"})).status, 403)
         self.assertEqual(requests, [("GET", "/character/idle.png", "127.0.0.1:8767"),
                                     ("POST", "/api/project", "127.0.0.1:8767")])
+
+    async def test_relay_transmits_role_card_as_binary(self):
+        route = "/api/dsh-team/role-card"
+        archive = bytes(range(256)) * 40
+
+        async def role_card(request):
+            self.assertEqual(request.query["action"], "preview" if request.method == "POST" else "download")
+            if request.method == "POST":
+                self.assertEqual(await request.read(), archive)
+                return web.json_response({"name": "角色"})
+            return web.Response(body=archive, content_type="application/zip",
+                                headers={"Content-Disposition": "attachment; filename=role.zip"})
+
+        upstream = web.Application()
+        upstream.router.add_route("*", route, role_card)
+        async with TestServer(upstream) as target, ClientSession() as client:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                relay = thinkbook.create_relay(client, "desktop-browser", "thinkbook-manager")
+                async with TestClient(TestServer(relay)) as browser:
+                    auth = {"Host": "127.0.0.1:16196", "Authorization": "Bearer desktop-browser"}
+                    preview = await browser.post(route + "?action=preview", headers=auth, data=archive)
+                    self.assertEqual(await preview.json(), {"name": "角色"})
+                    response = await browser.get(route + "?action=download", headers=auth)
+                    self.assertEqual(await response.read(), archive)
+
+    async def test_relay_preserves_impression_text(self):
+        route = "/api/dsh-team/library"
+        payload = {"action": "save-fish-impressions", "filename": "他人印象.md",
+                   "text": "## 关于小弟\r\n印象页在 http://127.0.0.1:6185/\r\n"}
+
+        async def library(request):
+            if request.method == "POST":
+                self.assertEqual(await request.json(), payload)
+                return web.json_response({"status": "saved"})
+            self.assertEqual(request.query["document"], "impressions")
+            return web.json_response({"status": "available", "text": payload["text"]})
+
+        upstream = web.Application()
+        upstream.router.add_route("*", route, library)
+        async with TestServer(upstream) as target, ClientSession() as client:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                relay = thinkbook.create_relay(client, "desktop-browser", "thinkbook-manager")
+                async with TestClient(TestServer(relay)) as browser:
+                    auth = {"Host": "127.0.0.1:16196", "Authorization": "Bearer desktop-browser"}
+                    saved = await browser.post(route, headers=auth, json=payload)
+                    self.assertEqual(await saved.json(), {"status": "saved"})
+                    response = await browser.get(route + "?document=impressions", headers=auth)
+                    self.assertEqual(await response.json(), {"status": "available", "text": payload["text"]})

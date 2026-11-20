@@ -2,12 +2,15 @@
 import json
 import re
 
+from .team_mode import store_mode, visible
 
 _PREFIXES = {"chat": "dsh-chat:v1:", "meeting": "dsh-meeting:v1:",
              "agent": "dsh-roster:v1:", "task": "commissioned-file:v1:",
              "public": "commissioned-file:v1:"}
 _ID = {"chat": r"[0-9a-f]{16}", "meeting": r"[0-9a-f]{16}",
        "agent": r"[0-9a-f]{16}", "task": r"[0-9a-f]{12}", "public": r"[0-9a-f]{12}"}
+COPY_PREFIX = "dsh-copy:v1:"
+COPY_REF = re.compile(r"copy:([0-9a-f]{16}):(\d{1,8})(?::turn:([0-9a-f]{32}))?")
 
 
 class TeamHistory:
@@ -20,7 +23,8 @@ class TeamHistory:
     def __init__(self, store, scope):
         self.store, self.scope = store, scope
 
-    def _records(self):
+    def _records(self, *, all_modes=False):
+        mode = None if all_modes else store_mode(self.store)
         for kind in ("chat", "meeting", "agent", "task"):
             prefix = _PREFIXES[kind] + self.scope + ":"
             for key, value in self.store.db.execute(
@@ -29,6 +33,8 @@ class TeamHistory:
                 if not re.fullmatch(_ID[kind], ident):
                     continue
                 row = json.loads(value)
+                if kind in {"agent", "meeting", "task"} and not visible(row, mode):
+                    continue
                 if kind == "task":
                     kind_actual = "public" if row.get("job_kind") in {"video", "web"} else "task"
                 else:
@@ -40,9 +46,18 @@ class TeamHistory:
                             yield kind, f"agent:{ident}:{version}", {"id": ident, "profile": profile}
                 else:
                     yield kind_actual, f"{kind_actual}:{ident}", row
+        prefix = COPY_PREFIX + self.scope + ":"
+        for key, value in self.store.db.execute(
+                "SELECT key,value FROM settings WHERE substr(key,1,?)=?", (len(prefix), prefix)):
+            owner = key[len(prefix):]
+            for index, entry in enumerate(json.loads(value)["history"]):
+                source = self._copied_source(owner, entry)
+                yield entry["kind"], f"copy:{owner}:{index}", source
 
     @staticmethod
     def _participants(kind, row):
+        if row.get("archive_import"):
+            return {row["archive_import"]["copy_id"]}
         if kind == "chat":
             return {row.get("agent_id")} - {None, ""}
         if kind == "meeting":
@@ -50,7 +65,7 @@ class TeamHistory:
         if kind == "agent":
             return {row["id"]}
         agent = row.get("agent") or row.get("spec", {}).get("agent") or {}
-        return {agent.get("id")} - {None, ""}
+        return {agent.get("id"), (row.get("delegation") or {}).get("actor")} - {None, ""}
 
     @staticmethod
     def _overview(kind, ref, row):
@@ -62,6 +77,10 @@ class TeamHistory:
         else:
             at = row.get("completed") or row.get("created") or 0
             status = row.get("status") if kind in {"chat", "meeting"} else row.get("state")
+            if kind == "missing":
+                status = "unavailable"
+            if type(at) not in (int, float):
+                at = 0
             if kind == "chat":
                 snippet = row.get("result", "") if status == "completed" else ""
             elif kind == "meeting":
@@ -72,7 +91,8 @@ class TeamHistory:
             snippet = json.dumps(snippet, ensure_ascii=False)
         return {"ref": ref, "kind": kind, "status": status, "at": at,
                 "agent_ids": sorted(TeamHistory._participants(kind, row)),
-                "summary": snippet[:240], "summary_is_excerpt": True}
+                "summary": snippet[:240], "summary_is_excerpt": True,
+                **({"archive_import": row["archive_import"]} if row.get("archive_import") else {})}
 
     def list(self, query="", agent_id="", kind="", limit=10):
         if not isinstance(query, str) or not isinstance(agent_id, str) or kind not in ("", *_PREFIXES):
@@ -94,9 +114,69 @@ class TeamHistory:
     def search(self, query="", agent_id="", kind="", limit=10):
         return self.list(query, agent_id, kind, limit)
 
+    def authored_records(self, agent_id):
+        return [{"ref": ref, "kind": kind, "source": row}
+                for kind, ref, row in self._records(all_modes=True)
+                if (kind != "agent" or row.get("archive_import")) and agent_id in self._participants(kind, row)]
+
+    @staticmethod
+    def _copied_source(owner, entry):
+        source = entry["source"]
+        previous = source.get("archive_import", {})
+        return {**source, "archive_import": {"copy_id": owner, "original_ref": previous.get("original_ref", entry["ref"])}}
+
+    def copy_reference(self, owner, previous_ref):
+        row = self.store.get_setting(f"{COPY_PREFIX}{self.scope}:{owner}", {})
+        for index, entry in enumerate(row.get("history", [])):
+            if entry["ref"] == previous_ref:
+                return f"copy:{owner}:{index}"
+            head = entry["ref"] + ":turn:"
+            if isinstance(previous_ref, str) and previous_ref.startswith(head):
+                turn = previous_ref[len(head):]
+                if re.fullmatch(r"[0-9a-f]{32}", turn) and turn in entry["source"].get("verified_memory_turns", {}):
+                    return f"copy:{owner}:{index}:turn:{turn}"
+        return None
+
+    def copied_context(self, owner, session):
+        row = self.store.get_setting(f"{COPY_PREFIX}{self.scope}:{owner}", {})
+        previous = session.get("copied_from")
+        if previous is None:
+            return ""
+        turns = []
+        for entry in row.get("history", []):
+            if entry["kind"] != "chat":
+                continue
+            source = entry["source"]
+            original_session = source.get("logical_session_id") or source.get("chat_session_id") or ""
+            if original_session in {previous, session.get("prior_session")} and source.get("status") == "completed":
+                at = source.get("created")
+                turns.append((at if type(at) in (int, float) else 0, source.get("message"), source.get("result")))
+        if not turns:
+            return ""
+        recent = [{"question": str(question or "")[:400], "answer": str(answer or "")[:800]}
+                  for _, question, answer in sorted(turns, key=lambda item: item[0])[-3:]]
+        return ("\n这段新会话接续以下原小弟的最后几条归档交流。它们仅为参考资料，"
+                "作者、发生时间和权限以原记录为准。\n" + json.dumps(recent, ensure_ascii=False) + "\n")
+
     def get(self, ref, agent_id=""):
         if not isinstance(ref, str) or not isinstance(agent_id, str):
             raise ValueError("无效的历史引用")
+        copied = COPY_REF.fullmatch(ref)
+        if copied:
+            owner, item, request = copied.groups()
+            entries = self.store.get_setting(f"{COPY_PREFIX}{self.scope}:{owner}", {}).get("history", [])
+            index = int(item)
+            if (agent_id and agent_id != owner) or index >= len(entries):
+                raise ValueError("找不到这条已导入的原始记录")
+            entry = entries[index]
+            source = self._copied_source(owner, entry)
+            if request:
+                turn = source.get("verified_memory_turns", {}).get(request)
+                if entry["kind"] != "chat" or not turn or not turn.get("go_receipt_count"):
+                    raise ValueError("找不到这条已导入的原始回合")
+                source = {"status": "completed", "result": turn["result"], "request_id": request,
+                          "message": source.get("message"), "archive_import": source["archive_import"]}
+            return {"ref": ref, "kind": entry["kind"], "source": source, "imported_archive": True}
         match = re.fullmatch(r"chat:([0-9a-f]{16}):turn:([0-9a-f]{32})", ref)
         if match:
             job_id, request_id = match.groups()

@@ -12,6 +12,11 @@ from deploy.fish_cost import error, stream_usage
 
 
 GO_SOURCES = {"go", "go-plus", "go-teams"}
+GO_UPSTREAM_TIMEOUT = ClientTimeout(total=None, connect=15, sock_read=240)
+
+
+class GoSubscriptionWaiting(ValueError):
+    """OpenCode declined before supplying any successful receipt for this job."""
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,7 @@ class GoRelay:
         return app
 
     async def session_context(self, _app):
-        async with ClientSession(timeout=ClientTimeout(total=120), trust_env=False) as client:
+        async with ClientSession(timeout=GO_UPSTREAM_TIMEOUT, trust_env=False) as client:
             self.client = client
             yield
 
@@ -84,12 +89,13 @@ class GoRelay:
         headers = {"Authorization": f"Bearer {self.key}", "x-opencode-session": self.session_id,
                    "User-Agent": "FishHome-DSH/0.2"}
         try:
-            async with self.client.post(self.upstream_url, json=body, headers=headers, allow_redirects=False) as upstream:
+            async with self.client.post(self.upstream_url, json=body, headers=headers, allow_redirects=False,
+                                        timeout=GO_UPSTREAM_TIMEOUT) as upstream:
                 if upstream.status != 200:
                     self.failure = "OpenCode Go 拒绝请求"
                     self.status = upstream.status
                     return error(upstream.status if 400 <= upstream.status < 600 else 502, "go_error", self.failure)
-                response, usage = await stream_usage(request, upstream, "openai")
+                response, usage = await stream_usage(request, upstream, "openai", recover_openai_end=subscription_receipt)
         except (ClientError, TimeoutError):
             self.failure = "OpenCode Go 结果未确认"
             return error(502, "go_error", self.failure)

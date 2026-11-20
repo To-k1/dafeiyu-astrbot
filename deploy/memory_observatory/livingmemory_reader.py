@@ -78,6 +78,31 @@ def scope_key(session, persona):
     return "LM / " + digest
 
 
+def scope_label(scope, persona):
+    if isinstance(persona, str) and persona.startswith(("feiyu", "fish-home-")):
+        return ("正式 · " if persona.startswith("feiyu") else "测试 · ") + clean(persona, 80)
+    return "会话 " + scope[-6:] + (" · 未指定人格" if persona is None else " · 独立人格")
+
+
+def prefer_configured_scope(raw, astrbot_root):
+    data = astrbot_root / "data"
+    try:
+        cfg = json.loads((data / "cmd_config.json").read_text(encoding="utf-8-sig"))
+        control = json.loads((data / "plugin_data/astrbot_plugin_bili_activity/control.json").read_text(encoding="utf-8-sig"))
+        runner = cfg.get("agent_runner", {}).get("config", {})
+        persona = runner.get("persona", {}).get("persona_id") or runner.get("persona_id")
+        if not isinstance(persona, str) or not persona.startswith(("feiyu", "fish-home-")):
+            return raw
+        scope = scope_key(control.get("owner_scope"), persona)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return raw
+    if scope:
+        source = raw["source_info"]
+        source["preferred_scope"] = scope
+        source["scopes"].setdefault(scope, {"label": scope_label(scope, persona), "records": 0})
+    return raw
+
+
 def version_from_file(path):
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if line.startswith("version:"):
@@ -155,7 +180,7 @@ def read_snapshot(db_path, version, *, now=None, summaries_only=False, limit=MAX
                               text=summary or "原库有记录，观测端显示类型与来源。",
                               gist=summary or "原库有记录，观测端显示类型与来源。", topics=[])
             records.append(record)
-            scopes[scope] = {"label": "会话 " + scope[-6:] + (" · 未指定人格" if meta["persona_id"] is None else " · 独立人格"),
+            scopes[scope] = {"label": scope_label(scope, meta["persona_id"]),
                              "records": scopes.get(scope, {}).get("records", 0) + 1}
             return record
 

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import os
 import re
 import secrets
@@ -10,7 +11,8 @@ from pathlib import Path
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from .fish_cost_ledger import BUCKETS, CostLimit, Ledger, yuan
+from .fish_cost_ledger import BOUNDED_OPENAI_KIND, BUCKETS, CostLimit, Ledger, yuan
+from .fish_cost_prompt import openai_input_quote
 from plugin.astrbot_plugin_bili_activity.cost_window import peak_end
 
 
@@ -23,6 +25,7 @@ PRICE_FILE = Path(__file__).with_name("fish_cost_prices.json")
 ENDPOINTS = {"openai": "/v1/chat/completions", "anthropic": "/anthropic/v1/messages",
              "search": "/v1/tools/search", "fetch": "/v1/tools/fetch"}
 INLINE_IMAGE = re.compile(r"data:image/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}")
+logger = logging.getLogger(__name__)
 
 
 def load_prices(path):
@@ -89,14 +92,14 @@ def tokens(kind, usage):
     return counts
 
 
-async def stream_usage(request, upstream, kind):
+async def stream_usage(request, upstream, kind, *, recover_openai_end=None):
     response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
     forwarding = True
     try:
         await response.prepare(request)
     except ConnectionError:
         forwarding = False
-    usage, complete = {}, False
+    usage, complete, finished = {}, False, False
     try:
         async for line in upstream.content:
             if line.startswith(b"data:"):
@@ -113,6 +116,9 @@ async def stream_usage(request, upstream, kind):
                             complete = True
                         if event.get("usage"):
                             usage.update(event["usage"])
+                        if recover_openai_end and any(choice.get("finish_reason")
+                                                      for choice in event.get("choices") or []):
+                            finished = True
                     except (ValueError, TypeError, AttributeError):
                         pass
             if forwarding:
@@ -121,6 +127,15 @@ async def stream_usage(request, upstream, kind):
                 except ConnectionError:
                     # The upstream may still finish and report billable usage.
                     forwarding = False
+        if not complete and finished and recover_openai_end:
+            try:
+                recover_openai_end(usage)
+            except ValueError:
+                pass
+            else:
+                complete = True
+                if forwarding:
+                    await response.write(b"\ndata: [DONE]\n\n")
         if forwarding:
             await response.write_eof()
     except (ClientError, ConnectionError, TimeoutError, ValueError):
@@ -134,7 +149,8 @@ def error(status, code, message):
                              status=status)
 
 
-def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False, go_files=None):
+def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False, go_files=None,
+               use_request_bounds=False):
     """Bind credentials to ledgers, and reserve before making an upstream call."""
     if (set(tokens_by_bucket) != set(BUCKETS) or len(set(tokens_by_bucket.values())) != len(BUCKETS)
             or (not api_key and not offline)
@@ -158,10 +174,11 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
     async def balance(request):
         if not authorized(request, "interaction"):
             return error(401, "authentication_error", "无权查询账本")
-        return web.json_response({**ledger.snapshot(), "flash_request_reserve": yuan(reserve_model(OUTPUT_LIMIT))})
+        return web.json_response({**ledger.snapshot(), "flash_request_reserve": yuan(reserve_model(OUTPUT_LIMIT)),
+                                  "request_bounds": use_request_bounds and not ledger.has_request_bound_overrun()})
 
-    def reserve_model(output):
-        return max(r["miss"] * CONTEXT_LIMIT + r["output"] * output
+    def reserve_model(output, input_limit=CONTEXT_LIMIT):
+        return max(r["miss"] * input_limit + r["output"] * output
                    for r in (prices["peak"], prices["off_peak"]))
 
     async def forward(request):
@@ -171,6 +188,7 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
         if offline:
             return error(503, "fish_cost_offline", "计费入口可查询余额，请先在本机配置 DeepSeek API Key。")
         tool = kind in prices["tools"]
+        quote, reservation_kind = None, kind
         try:
             body = await request.json()
             if not isinstance(body, dict):
@@ -179,13 +197,20 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
                 maximum = prices["tools"][kind]
             else:
                 output = normalize_model(body, kind)
-                maximum = reserve_model(output)
+                if kind == "openai":
+                    quote = openai_input_quote(body)
+                if (use_request_bounds and quote is not None and quote < CONTEXT_LIMIT
+                        and not ledger.has_request_bound_overrun()):
+                    reservation_kind = BOUNDED_OPENAI_KIND
+                    maximum = reserve_model(output, quote)
+                else:
+                    maximum = reserve_model(output)
         except (ValueError, KeyError, TypeError, AttributeError):
             return error(400, "invalid_request_error", "仅支持指定的 Flash 文本或独立搜索抓取请求")
 
         now = ledger.clock()
         try:
-            ident = ledger.reserve(bucket, kind, maximum, now)
+            ident = ledger.reserve(bucket, reservation_kind, maximum, now)
         except CostLimit as exc:
             return error(402, "fish_cost_limit", str(exc))
 
@@ -218,7 +243,13 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
                         return response  # Keep the reservation if the provider omitted usage.
                     # A request close to a transition can reach DeepSeek after it.
                     band = "peak" if peak_end(now) or peak_end(now + REQUEST_TIMEOUT) else "off_peak"
-                    ledger.settle(ident, sum(prices[band][key] * value for key, value in counts.items()))
+                    actual = sum(prices[band][key] * value for key, value in counts.items())
+                    bound_exceeded = quote is not None and (counts["miss"] + counts["hit"] > quote
+                                                            or counts["output"] > output or actual > maximum)
+                    ledger.settle(ident, actual, bound_exceeded=bound_exceeded)
+                    if bound_exceeded:
+                        logger.error("Flash usage exceeded request quote (bucket=%s, input=%s/%s, output=%s/%s)",
+                                     bucket, counts["miss"] + counts["hit"], quote, counts["output"], output)
                 return response
         except (ClientError, TimeoutError, ValueError):
             return error(502, "upstream_error", "DeepSeek 结果未确认，已保留预留额")
@@ -242,6 +273,8 @@ def main():
     serve.add_argument("--port", type=int, default=6197)
     serve.add_argument("--prices", type=Path, default=PRICE_FILE)
     serve.add_argument("--offline", action="store_true", help="Serve balances without forwarding paid requests")
+    serve.add_argument("--request-bounds", action="store_true",
+                       help="Use the Flash 1017 request quote after comparing against hosted usage")
     commands.add_parser("balance")
     adjust = commands.add_parser("adjust")
     adjust.add_argument("bucket", choices=BUCKETS)
@@ -255,7 +288,8 @@ def main():
         go_key = os.environ.get("FISH_GO_FILE_KEY")
         go_files = ({"key": go_key, "credentials": {
             bucket: os.environ["FISH_GO_FILE_" + bucket.upper()] for bucket in BUCKETS}} if go_key else None)
-        app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline, go_files=go_files)
+        app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline, go_files=go_files,
+                         use_request_bounds=args.request_bounds)
         web.run_app(app, host="127.0.0.1", port=args.port, access_log=None)
     else:
         if args.command == "adjust":

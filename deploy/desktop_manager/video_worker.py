@@ -1,4 +1,4 @@
-"""Run a single public-video DSH job as the Windows Runner account."""
+"""Run each public-data job in its own DSH workspace under the Windows Runner account."""
 
 import asyncio
 import hmac
@@ -20,14 +20,16 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from deploy.dsh_bridge.go_profile import KEY_ENV, PROVIDER, render_go_patch
 from deploy.dsh_bridge.desktop_tools import desktop_call, desktop_server, render_desktop_preset
-from deploy.dsh_bridge.go_relay import GoRelay
+from deploy.dsh_bridge.go_relay import GoRelay, GoSubscriptionWaiting
 from deploy.dsh_bridge.go_video_task import run_desktop_task, run_search_task, run_video_task
 from deploy.dsh_bridge.public_search import render_search_preset, search_server, validate_task_query
 from deploy.dsh_bridge.public_video import build_server, render_preset, video_reference
+from deploy.bili_activity.resource_capacity import MAX_WAIT_SECONDS, wait_for_memory
 from .windows import impersonate, run_as
 
 
 BACKGROUND_TIMEOUT = 300
+BACKGROUND_STARTUP_TIMEOUT = 90
 
 
 class MediaServer(uvicorn.Server):
@@ -89,8 +91,8 @@ class VideoDshClient:
             return {"events": value["records"]} if method == "session.history" else value
 
 
-async def connect_worker(http, account, password, logfile, pid):
-    deadline = asyncio.get_running_loop().time() + 30
+async def connect_worker(http, account, password, logfile, pid, *, timeout=30):
+    deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         with impersonate(account, password):
             output = logfile.read_text(encoding="utf-8", errors="replace") if logfile.is_file() else ""
@@ -104,9 +106,9 @@ async def connect_worker(http, account, password, logfile, pid):
                 cookie = "; ".join(f"{name}={value.value}" for name, value in response.cookies.items())
                 return VideoDshClient(http, base, cookie)
         if not psutil.pid_exists(pid):
-            break
+            raise RuntimeError("公开视频 DSH 在就绪前退出")
         await asyncio.sleep(.25)
-    raise RuntimeError("公开视频 DSH 未启动")
+    raise TimeoutError("等待公开资料 DSH 工作进程就绪超时")
 
 
 async def stop_worker(account, password, pid):
@@ -118,69 +120,65 @@ async def stop_worker(account, password, pid):
 
 
 class VideoWorker:
-    def __init__(self, dsh, state, account, *, parallel=2):
+    def __init__(self, dsh, state, account):
         self.dsh, self.state, self.account = dsh, state, account
-        self.slots = asyncio.Semaphore(parallel)
         self.desktop_lock = asyncio.Lock()
+        self.cold_starts = asyncio.Semaphore(3)
 
     async def run(self, password, key, reference, question, *, upstream=None, asr_key="", background_started=None,
-                  agent=None):
+                  agent=None, language=""):
         if not isinstance(reference, str) or len(reference) > 500:
             raise ValueError("请提供完整的公开 B 站链接或 BV")
         requested = video_reference(reference, None)
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 1000:
             raise ValueError("请提供不超过 1000 字的代看问题")
-        if background_started is None and self.slots.locked():
-            raise ValueError("DSH 公开任务工作进程均在使用")
-        async with self.slots:
-            timeout = 110
-            if background_started is not None:
-                background_started()
-                timeout = BACKGROUND_TIMEOUT
-            with tempfile.TemporaryDirectory(prefix="video-evidence-", dir=self.state) as evidence_dir:
-                evidence = Path(evidence_dir) / "samples.jsonl"
-                return await self._run(password, key, build_server(requested=requested, evidence_file=evidence, asr_key=asr_key),
-                    lambda url, token: render_preset(http_media=(url, token)),
-                    lambda client, work, relay: run_video_task(
-                        client, work, reference, question, evidence, relay, timeout=timeout, agent=agent),
-                    upstream)
+        timeout = 110
+        if background_started is not None:
+            timeout = BACKGROUND_TIMEOUT
+        with tempfile.TemporaryDirectory(prefix="video-evidence-", dir=self.state) as evidence_dir:
+            evidence = Path(evidence_dir) / "samples.jsonl"
+            return await self._run(password, key, build_server(requested=requested, evidence_file=evidence, asr_key=asr_key),
+                lambda url, token: render_preset(http_media=(url, token)),
+                lambda client, work, relay: run_video_task(
+                    client, work, reference, question, evidence, relay, timeout=timeout, agent=agent, language=language,
+                    progress=background_started),
+                upstream, progress=background_started,
+                startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started is not None else 30)
 
-    async def search(self, password, key, query, *, upstream=None, background_started=None, agent=None):
+    async def search(self, password, key, query, *, upstream=None, background_started=None, agent=None,
+                     archive_page=None, language=""):
         query = validate_task_query(query)
-        if background_started is None and self.slots.locked():
-            raise ValueError("DSH 公开任务工作进程均在使用")
-        async with self.slots:
-            timeout = 72
-            if background_started is not None:
-                background_started()
-                timeout = BACKGROUND_TIMEOUT
-            with tempfile.TemporaryDirectory(prefix="search-evidence-", dir=self.state) as folder:
-                evidence = Path(folder) / "sources.jsonl"
-                return await self._run(password, key, search_server(evidence), render_search_preset,
-                    lambda client, work, relay: run_search_task(
-                        client, work, query, evidence, relay, timeout=timeout, agent=agent,
-                        progress=background_started), upstream, progress=background_started)
+        timeout = 72
+        if background_started is not None:
+            background_started()
+            timeout = BACKGROUND_TIMEOUT
+        with tempfile.TemporaryDirectory(prefix="search-evidence-", dir=self.state) as folder:
+            evidence = Path(folder) / "sources.jsonl"
+            return await self._run(password, key, search_server(evidence, archive_page), render_search_preset,
+                lambda client, work, relay: run_search_task(
+                    client, work, query, evidence, relay, timeout=timeout, agent=agent, language=language,
+                    progress=background_started), upstream, progress=background_started,
+                startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started is not None else 30)
 
-    async def desktop(self, password, key, desktop_token, instruction, *, agent=None):
+    async def desktop(self, password, key, desktop_token, instruction, *, agent=None, language=""):
         if not isinstance(instruction, str) or not 1 <= len(instruction.strip()) <= 1000:
             raise ValueError("请提供不超过 1000 字的桌面任务")
-        if self.slots.locked() or self.desktop_lock.locked():
-            raise ValueError("DSH 桌面或工作进程正在使用")
-        async with self.slots, self.desktop_lock:
+        async with self.desktop_lock:
             await desktop_call(desktop_token, "list")
             with tempfile.TemporaryDirectory(prefix="desktop-evidence-", dir=self.state) as folder:
                 evidence = Path(folder) / "desktop.jsonl"
                 return await self._run(password, key, desktop_server(evidence, desktop_token),
                     render_desktop_preset, lambda client, work, relay:
-                    run_desktop_task(client, work, instruction.strip(), evidence, relay, agent=agent), None)
+                    run_desktop_task(client, work, instruction.strip(), evidence, relay, agent=agent, language=language), None)
 
-    async def _run(self, password, key, server, tool_patch, execute, upstream, *, progress=None):
+    async def _run(self, password, key, server, tool_patch, execute, upstream, *, progress=None, startup_timeout=30):
         account = self.account
         session, model_token, media_token = uuid4().hex, secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         relay = GoRelay(key, model_token, session, **({"upstream": upstream} if upstream else {}))
         relay_runner = web.AppRunner(relay.create_app(), access_log=None)
         await relay_runner.setup()
         job = None
+        pid = None
         try:
             if progress:
                 progress("starting_tools")
@@ -198,16 +196,36 @@ class VideoWorker:
                     job = tempfile.TemporaryDirectory(prefix="video-job-", dir=root)
                     work = Path(job.name)
                     (work / "patch.json").write_text(json.dumps(patch), encoding="utf-8")
-                cmd = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
-                pid = run_as(account, password, [cmd, "/d", "/c", "call", str(launcher)],
-                             env={"FISHHOME_VIDEO_JOB": str(work), "DSH_HOME": str(work / "dsh"),
-                                  KEY_ENV: model_token, "DSH_PERMISSION_MODE": "workspace-write"})
                 try:
-                    if progress:
-                        progress("connecting_worker")
                     async with ClientSession(timeout=ClientTimeout(total=12), trust_env=False) as http:
-                        client = await connect_worker(http, account, password, work / "worker.log", pid)
+                        if progress:
+                            progress("waiting_local_resources")
+                        try:
+                            async with asyncio.timeout(MAX_WAIT_SECONDS):
+                                await self.cold_starts.acquire()
+                                try:
+                                    await wait_for_memory()
+                                except BaseException:
+                                    self.cold_starts.release()
+                                    raise
+                        except TimeoutError:
+                            raise ValueError("本机 DSH 启动仍在排队，或可用内存低于 3 GiB，请稍后再试") from None
+                        try:
+                            cmd = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
+                            pid = run_as(account, password, [cmd, "/d", "/c", "call", str(launcher)],
+                                         env={"FISHHOME_VIDEO_JOB": str(work), "DSH_HOME": str(work / "dsh"),
+                                              KEY_ENV: model_token, "DSH_PERMISSION_MODE": "workspace-write"})
+                            if progress:
+                                progress("connecting_worker")
+                            client = await connect_worker(http, account, password, work / "worker.log", pid,
+                                                          timeout=startup_timeout)
+                        finally:
+                            self.cold_starts.release()
                         return await execute(client, work, relay)
+                except (ValueError, TimeoutError) as exc:
+                    if relay.status in {402, 429} and not relay.receipts:
+                        raise GoSubscriptionWaiting("OpenCode Go 等待订阅额度恢复") from exc
+                    raise
                 finally:
                     await stop_worker(account, password, pid)
         finally:

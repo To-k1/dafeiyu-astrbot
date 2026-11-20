@@ -111,6 +111,20 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertLess(self.view(days=730)["memories"][0]["detail"], .1)
 
 
+class FormalScopeTests(unittest.TestCase):
+    def test_empty_formal_scope_does_not_fall_back_to_testing_history(self):
+        class Source:
+            def load(self):
+                return normalize(fixture()), {"preferred_scope": "formal"}
+
+        with ObservatoryServer(("127.0.0.1", 0), source=Source()) as server:
+            view = server.view()
+            self.assertEqual(view["scope"], "formal")
+            self.assertEqual(view["memories"], [])
+            self.assertIn("private", view["scopes"])
+            self.assertEqual(len(server.view("private")["memories"]), 2)
+
+
 class SnapshotContractTests(unittest.TestCase):
     def test_rejects_cross_scope_explicit_edges(self):
         data = fixture()

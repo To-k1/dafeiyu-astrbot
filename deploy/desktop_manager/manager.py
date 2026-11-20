@@ -23,16 +23,23 @@ import win32profile
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from deploy.bili_activity.ops import DEFAULTS as ACTIVITY_DEFAULTS, NUMERIC_LIMITS, exclusive, ready, save_control, validate_dnd
+from deploy.dsh_bridge.public_page import fetch_public_page, page_slice, save_public_page
 from deploy.dsh_bridge.public_search import search_anysearch, validate_query
 from deploy.dsh_bridge.go_profile import KEY_ENV, render_file_go_patch
 from deploy.dsh_bridge.go_usage import read_go_key_usage, read_go_usage
 from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
+from plugin.astrbot_plugin_bili_activity import dsh_cards
+from plugin.astrbot_plugin_bili_activity.core import Store as ActivityStore
+from plugin.astrbot_plugin_bili_activity import dsh_history_archive
+from plugin.astrbot_plugin_bili_activity.dsh_roster import COPY_MEMORY_PREFIX, DshRoster
+from plugin.astrbot_plugin_bili_activity.team_mode import GROUP_SQL, configured_mode
+from plugin.astrbot_plugin_bili_activity import shared_language
 from scripts.m6_data import export_memory
 from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sync as sync_backups
 
 from .windows import Credentials, impersonate, run_as, write_json
 from . import compute
-from . import desktop_session
+from . import desktop_session, persona_mode, provider_mode
 from .public_jobs import PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable, validate_agent
 from .recovery import capture_and_pull
 from .settings_sync import PEER_PATH, SettingsSync, SharedSettings, ThinkBookPeer
@@ -150,7 +157,10 @@ class Manager:
         self.archive_lock = asyncio.Lock()
         self.emulator_requested = 0.0
         self.video_worker = VideoWorker(self.dev / "dsh-0.2.2-rc.1", state, RUNNER)
-        self.public_jobs = PublicJobs(state / "dsh-public-jobs", self.run_public_job)
+        self._go_usage_lock = asyncio.Lock()
+        self._go_usage_cache = None
+        self.public_jobs = PublicJobs(state / "dsh-public-jobs", self.run_public_job,
+                                      quota_available=self.public_go_available)
 
     def sync_video_worker(self):
         key = self.creds.values.get("opencode_key")
@@ -175,17 +185,42 @@ class Manager:
         switch = {"video": "dsh_video_enabled", "web": "dsh_web_search_enabled"}.get(kind)
         return bool(switch and self.options.get(switch) is True and self.sync_video_worker())
 
+    async def go_subscription_usage(self):
+        async with self._go_usage_lock:
+            key = self.creds.values.get("opencode_key")
+            if not key:
+                self._go_usage_cache = None
+                return await read_go_usage(self.options.get("opencode_server_port", 28894),
+                                           self.creds.values.get("opencode_server_password"))
+            cache = self._go_usage_cache
+            if not cache or cache[0] != key or time.monotonic() >= cache[1]:
+                value = await read_go_key_usage(key)
+                self._go_usage_cache = (key, time.monotonic() + 30, value)
+            return self._go_usage_cache[2]
+
+    async def public_go_available(self):
+        return (await self.go_subscription_usage()).get("status") == "available"
+
+    def archive_web_page(self, page):
+        root = read_settings(self.bridge_settings).get("shared_workspace")
+        if not root:
+            raise ValueError("DSH 共享工作区未配置")
+        with impersonate(RUNNER, self.runner_password()):
+            return save_public_page(Path(root), page)
+
     async def run_public_job(self, body, started):
         kind = body["kind"]
         if not self.public_job_enabled(kind):
             raise PublicJobUnavailable("DSH 公开资料工作进程不可用")
         password, go_key = self.runner_password(), self.creds.values["opencode_key"]
+        language = shared_language.prompt(self.activity) if body.get("agent") else ""
         if kind == "web":
             return await self.video_worker.search(password, go_key, body["query"],
-                                                  background_started=started, agent=body.get("agent"))
+                                                  background_started=started, agent=body.get("agent"),
+                                                  archive_page=self.archive_web_page, language=language)
         return await self.video_worker.run(password, go_key, body["reference"], body["question"],
                                            asr_key=self.dsh_asr_key(), background_started=started,
-                                           agent=body.get("agent"))
+                                           agent=body.get("agent"), language=language)
 
     @property
     def compute_directory(self):
@@ -249,7 +284,7 @@ class Manager:
                 59935, str(dsh / "m5-commission.yml"), env=interaction_env, runner=True)
         return {
             "budget": Service("人民币计费", ROOT, (self.python, "-B", "-m", "deploy.fish_cost", "--db",
-                self.activity / "activity.sqlite3", "serve", *(() if key else ("--offline",))), 6197,
+                self.activity / "activity.sqlite3", "serve", "--request-bounds", *(() if key else ("--offline",))), 6197,
                 "deploy.fish_cost", env=cost_env),
             "ollama": Service("Ollama", ollama, (ollama / "ollama.exe", "serve"), 11434, "ollama.exe",
                 env={"OLLAMA_HOST": "127.0.0.1:11434",
@@ -269,7 +304,9 @@ class Manager:
             "astrbot": Service("AstrBot", self.astro, (self.python, "-B", "-m", "astrbot.cli", "run"), 6185,
                 "astrbot.cli run", "http://127.0.0.1:6185/",
                 env={"FISHHOME_INTERACTION_TOKEN": self.creds.values["interaction"],
-                     "FISHHOME_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}),
+                     "FISHHOME_AUTONOMOUS_TOKEN": self.creds.values["autonomous"],
+                     **({provider_mode.GO_KEY_ENV: self.creds.values["opencode_key"]}
+                        if self.creds.values.get("opencode_key") else {})}),
             "napcat": Service("NapCat", cat, (cat / "node.exe", cat / "index.js", *cat_args), 6099,
                 str(cat / "index.js"), "http://127.0.0.1:6099/webui/"),
             "room": Service("房间与记忆星海", ROOT, (self.python, "-B", "-m", "deploy.memory_observatory.server",
@@ -1118,16 +1155,20 @@ def create_app(manager, token):
 
     async def delegate_search(request):
         body = await request.json()
-        if not isinstance(body, dict) or body.keys() != {"query", "mode"} or body["mode"] not in ("default", "personal"):
+        if not isinstance(body, dict) or body.keys() != {"query", "mode"} or body["mode"] not in ("default", "personal", "page"):
             raise ValueError("只接受公开搜索问题和搜索方式")
-        query = validate_query(body["query"])
         try:
             if body["mode"] == "personal":
-                rows = await search_anysearch(query)
+                rows = await search_anysearch(validate_query(body["query"]))
                 report = {"kind": "personal_web_search", "results": rows}
+            elif body["mode"] == "page":
+                page = await fetch_public_page(body["query"])
+                page["artifact"] = manager.archive_web_page(page)
+                report = page_slice(page, 0)
             else:
                 report = await manager.video_worker.search(manager.runner_password(),
-                    manager.creds.values["opencode_key"], query)
+                    manager.creds.values["opencode_key"], validate_query(body["query"]),
+                    archive_page=manager.archive_web_page)
         except (ClientError, TimeoutError, KeyError, TypeError):
             raise RuntimeError("DSH 未返回可核实的网页资料") from None
         return web.json_response(report, headers={"Cache-Control": "no-store"})
@@ -1140,26 +1181,13 @@ def create_app(manager, token):
         pairing = manager.creds.values.get("desktop_token")
         if not pairing:
             raise ValueError("专用 Windows 桌面尚未配对")
+        language = shared_language.prompt(manager.activity) if agent else ""
         report = await manager.video_worker.desktop(manager.runner_password(), manager.creds.values["opencode_key"],
-                                                     pairing, body["instruction"], agent=agent)
+                                                     pairing, body["instruction"], agent=agent, language=language)
         return web.json_response(report, headers={"Cache-Control": "no-store"})
 
-    go_usage_lock = asyncio.Lock()
-    go_usage_cache = None
-
     async def go_usage(_request):
-        nonlocal go_usage_cache
-        async with go_usage_lock:
-            key = manager.creds.values.get("opencode_key")
-            if key:
-                if not go_usage_cache or go_usage_cache[0] != key or time.monotonic() >= go_usage_cache[1]:
-                    value = await read_go_key_usage(key)
-                    go_usage_cache = (key, time.monotonic() + 30, value)
-                value = go_usage_cache[2]
-            else:
-                go_usage_cache = None
-                value = await read_go_usage(manager.options.get("opencode_server_port", 28894),
-                    manager.creds.values.get("opencode_server_password"))
+        value = await manager.go_subscription_usage()
         return web.json_response(value, headers={"Cache-Control": "no-store"})
 
     async def sync_observatory(_app):
@@ -1227,6 +1255,225 @@ def create_app(manager, token):
         return web.json_response({"services": manager.statuses(), "official_key": bool(manager.creds.values.get("upstream_key")),
                                   "runner_password": bool(manager.runner_password())})
 
+    async def role_card(request):
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        if not scope or not manager.ledger.is_file() or manager.room_snapshot is not None:
+            raise ValueError("请在 ThinkBook 控制台或 ThinkBook 远程控制中管理角色卡")
+        action = request.query.get("action")
+        ident = request.query.get("id", "")
+        def download(body, filename, content_type, charset=None):
+            return web.Response(body=body, content_type=content_type, charset=charset,
+                                headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+        if request.method == "GET" and action not in {"download", "template", "history", "copy-status"}:
+            raise ValueError("请选择角色卡下载")
+        if action == "template":
+            return download("# 角色卡\n\n写下角色是谁、人格、说话方式等。\n".encode("utf-8"),
+                            "fishhome-role-template.md", "text/markdown", "utf-8")
+        if request.method == "POST" and action not in {"preview", "create", "update-background", "preview-copy", "copy"}:
+            raise ValueError("请选择预览、新建或更新背景")
+        archive = None
+        card = None
+        if request.method == "POST":
+            copy_upload = action in {"preview-copy", "copy"}
+            maximum = dsh_history_archive.MAX_ARCHIVE if copy_upload else dsh_cards.MAX_PACKET
+            content = await request.clone(client_max_size=maximum + 1).read()
+            if copy_upload:
+                archive = await asyncio.to_thread(dsh_history_archive.read_archive, content)
+                card, identity, history, memories = archive
+                if action == "preview-copy":
+                    return web.json_response({"name": card["name"], "records": len(history),
+                                              "memories": len(memories), "original_id": identity["id"]})
+            else:
+                card = dsh_cards.read_card_upload(content, request.query.get("filename", ""),
+                                                  request.query.get("name", ""))
+                if action == "preview":
+                    return web.json_response({"name": card["name"], "files": list(card["background"]),
+                                              "plain": bool(card.get("plain"))})
+        store = ActivityStore(manager.activity, existing=True)
+        with closing(store.db):
+            roster = DshRoster(store, scope)
+            if action == "download":
+                profile = roster.get(ident)["profiles"][-1]
+                ext = Path(dsh_cards.load_card(store, ident)["persona_file"]).suffix
+                return download(profile["persona"].encode("utf-8"), f"fishhome-role-{ident}{ext}",
+                                "text/plain" if ext == ".txt" else "text/markdown", "utf-8")
+            if action == "history":
+                body = dsh_history_archive.snapshot(store, scope, ident)
+                return download(body, f"fishhome-history-{ident}.zip", "application/zip")
+            if action == "copy-status":
+                roster.get(ident)
+                return web.json_response(dsh_history_archive.import_status(store, scope, ident))
+            if action == "copy":
+                return web.json_response(dsh_history_archive.copy_from_archive(
+                    store, scope, archive, request.query.get("name", "")))
+            if action == "update-background" and card.get("plain"):
+                row = roster.update(ident, persona=card["persona"])
+                return web.json_response({"name": row["name"], "id": row["id"], "files": []})
+            with store.transaction():
+                if action == "create":
+                    row = roster.create(card["name"], card["persona"])
+                else:
+                    record = roster.get(ident)
+                    row = roster.public(record)
+                    if record["name"] != card["name"] or record["profiles"][-1]["persona"] != card["persona"]:
+                        raise ValueError("角色卡的名字及人格与所选小弟不同")
+                dsh_cards.import_card_files(store, scope, row["id"], card["name"], card)
+        return web.json_response({"name": row["name"], "id": row["id"], "files": list(card["background"])})
+
+    async def team_library(request):
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        if not scope or not manager.ledger.is_file() or manager.room_snapshot is not None:
+            raise ValueError("请从 ThinkBook 控制台管理角色和多人故事")
+        store = ActivityStore(manager.activity, existing=True)
+        with closing(store.db):
+            if request.method == "GET":
+                ident = request.query.get("id")
+                kind = request.query.get("document")
+                if kind == "impressions" and ident in {None, dsh_cards.FISH_PARTICIPANT}:
+                    text = dsh_cards.load_fish_impressions(store)
+                    return web.json_response({"status": "empty"} if text is None else
+                                             {"status": "available", "text": text, "filename": "大肥鱼-他人印象.txt"})
+                if kind in {"story", "impressions"}:
+                    agent = DshRoster(store, scope).get(ident)
+                    filenames = dsh_cards.STORY_FILES if kind == "story" else dsh_cards.IMPRESSION_FILES
+                    for filename, text in dsh_cards.load_card(store, ident)["background"].items():
+                        if filename in filenames:
+                            return web.json_response({"status": "available", "text": text,
+                                                      "filename": agent["name"] + "-" + filename})
+                    return web.json_response({"status": "empty"})
+                return web.json_response(dsh_cards.get_story(store, scope, ident) if ident
+                                         else {"stories": dsh_cards.stories(store, scope)})
+            body = await request.clone(client_max_size=256 * 1024).json()
+            if not isinstance(body, dict):
+                raise ValueError("无效的角色资料请求")
+            action = body.get("action")
+            ident = body.get("id", "")
+            status = body.get("status")
+            if action == "save-fish-impressions" or (action == "save-impressions" and ident == dsh_cards.FISH_PARTICIPANT):
+                filename = body.get("filename")
+                if not isinstance(filename, str) or Path(filename).suffix.lower() not in {".md", ".txt"}:
+                    raise ValueError("请选择 UTF-8 的 .md 或 .txt 文本")
+                dsh_cards.save_fish_impressions(store, body.get("text"))
+                return web.json_response({"status": "saved"})
+            if action in {"save-personal-story", "save-impressions"}:
+                kind = "story" if action == "save-personal-story" else "impressions"
+                with store.transaction():
+                    profile = DshRoster(store, scope).get(ident)["profiles"][-1]
+                    dsh_cards.save_personal_text(store, ident, profile, kind, body.get("filename"), body.get("text"))
+                return web.json_response({"status": "saved"})
+            if action == "role-status" and status in {"active", "archived"}:
+                return web.json_response(DshRoster(store, scope).update(ident, status=status))
+            if action == "story-status" and ident and status in {"active", "archived"}:
+                with store.transaction():
+                    return web.json_response(dsh_cards.set_story(store, scope, ident=ident, status=status))
+            if action == "save-story":
+                with store.transaction():
+                    row = dsh_cards.set_story(store, scope, ident=ident, filename=body.get("filename"),
+                                              text=body.get("text"), participants=body.get("participants"))
+                return web.json_response(row)
+            raise ValueError("请选择保存、归档或恢复")
+
+    async def switch_persona(request):
+        if manager.room_snapshot is not None:
+            return web.json_response({"mode": "remote"})
+        view = persona_mode.status(manager.astro)
+        if request.method == "GET":
+            return web.json_response(view)
+        body = await request.json()
+        if (not isinstance(body, dict) or body.keys() - {"mode", "archive_existing"}
+                or body.get("mode") not in {"formal", "test"}
+                or type(body.get("archive_existing", False)) is not bool):
+            raise ValueError("请选择正式或测试人格")
+        mode = body["mode"]
+        async with manager.lock:
+            view = persona_mode.status(manager.astro)
+            if view["mode"] == "unavailable":
+                raise ValueError("当前人格没有可切换的同版本配对")
+            if view["mode"] == mode:
+                return web.json_response(view)
+            persona_mode.require_idle(manager.astro, manager.state)
+            scope = read_settings(manager.bridge_settings).get("owner_scope")
+            if not scope:
+                raise ValueError("没有配置主人私聊")
+            persona_mode.read_owner_binding(manager.astro, scope)
+            room_running = any(item["id"] == "room" and item["state"] == "running"
+                               for item in manager.statuses())
+            await manager.stop("astrbot")
+            try:
+                command = [str(manager.python), "-X", "utf8", "-B", "-m", "deploy.desktop_manager.persona_mode",
+                           str(manager.astro), str(manager.state), mode, scope]
+                if body.get("archive_existing") and mode == "formal":
+                    command.append("--archive-existing")
+                child = await asyncio.create_subprocess_exec(*command, cwd=ROOT, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+                output, _ = await child.communicate()
+                if child.returncode:
+                    lines = output.decode("utf-8", errors="replace").splitlines()
+                    detail = lines[-1].removeprefix("ValueError: ") if lines and lines[-1].startswith("ValueError: ") else "人格切换失败，请查看控制台日志。"
+                    print("persona switch failed with exit code", child.returncode, flush=True)
+                    raise ValueError(detail)
+            finally:
+                await manager.start("astrbot")
+            if room_running:
+                await manager.stop("room")
+                await manager.start("room")
+        return web.json_response({**persona_mode.status(manager.astro), "message": "已切换人格，正在恢复 QQ 连接。"})
+
+    async def switch_provider(request):
+        if manager.room_snapshot is not None:
+            return web.json_response({"mode": "remote", "routes": []})
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        if request.method == "GET":
+            return web.json_response(provider_mode.status(manager.astro, scope))
+        body = await request.json()
+        if not isinstance(body, dict) or body.keys() != {"mode"} or body["mode"] not in ("go", "deepseek"):
+            raise ValueError("请选择 OpenCode Go 或官方 DeepSeek")
+        mode = body["mode"]
+        async with manager.lock:
+            if mode == "go" and not manager.creds.values.get("opencode_key"):
+                raise ValueError("请先在控制台保存 OpenCode Go Key")
+            if provider_mode.status(manager.astro, scope)["mode"] == mode:
+                return web.json_response(provider_mode.status(manager.astro, scope))
+            provider_mode.resolve(manager.astro, scope, mode)
+            persona_mode.require_idle(manager.astro, manager.state, operation="切换模型")
+            was_running = any(item["id"] == "astrbot" and item["state"] == "running"
+                              for item in manager.statuses())
+            if was_running:
+                await manager.stop("astrbot")
+            try:
+                child = await asyncio.create_subprocess_exec(
+                    str(manager.python), "-X", "utf8", "-B", "-m", "deploy.desktop_manager.provider_mode",
+                    str(manager.astro), scope, mode, cwd=ROOT, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
+                output, _ = await child.communicate()
+                if child.returncode:
+                    print("provider switch failed with exit code", child.returncode, flush=True)
+                    detail = output.decode("utf-8", errors="replace").splitlines()
+                    if detail and detail[-1].startswith("ValueError: "):
+                        raise ValueError(detail[-1].removeprefix("ValueError: "))
+                    raise ValueError("模型切换失败，已恢复原路线。")
+            finally:
+                if was_running:
+                    await manager.start("astrbot")
+        return web.json_response({**provider_mode.status(manager.astro, scope), "message": "模型已切换。"})
+
+    async def language_settings(request):
+        if request.method == "GET":
+            return web.json_response(shared_language.settings(manager.activity))
+        body = await request.clone(client_max_size=320 * 1024).json()
+        if (not isinstance(body, dict) or set(body) not in ({"enabled"}, {"enabled", "filename", "text"})
+                or type(body["enabled"]) is not bool):
+            raise ValueError("请提供共同语言启用状态或新的文本文件")
+        async with manager.lock:
+            config = {**shared_language.settings(manager.activity), **body}
+            if body == {"enabled": False} and not config["filename"]:
+                return web.json_response(config)
+            shared_language.validate(config["filename"], config["text"])
+            manager.activity.mkdir(parents=True, exist_ok=True)
+            write_json(manager.activity / shared_language.FILE, config)
+        return web.json_response(config)
+
     async def ping(_request):
         return web.Response(text="FishHome")
 
@@ -1264,7 +1511,7 @@ def create_app(manager, token):
                 manager.creds.save()
                 if name == "opencode_key":
                     manager.sync_video_worker()
-                    message = "已加密保存 OpenCode Key，当前模型路由未切换。"
+                    message = "已加密保存 OpenCode Key。重启人民币计费和 AstrBot 后使用新 Key，模型选择不变。"
                 else:
                     message = "已加密保存 DeepSeek Key，请重启计费服务以启用。"
             elif name in {"runner_password", "compute_password", "desktop_password"} and isinstance(value, str) and 0 < len(value) <= 256:
@@ -1331,10 +1578,16 @@ def create_app(manager, token):
         return web.json_response(manager.configuration(), headers={"Cache-Control": "no-store"})
 
     async def dsh_team(_request):
+        view = _request.query.get("view", "current")
+        if view not in {"current", "test", "formal"}:
+            raise ValueError("请选择正式或测试记录")
+        current = configured_mode(manager.astrbot_settings)
+        group = current if view == "current" else view
         scope = read_settings(manager.bridge_settings).get("owner_scope")
         if not scope or not manager.ledger.is_file():
-            return web.json_response({"agents": [], "jobs": [], "meetings": []})
+            return web.json_response({"agents": [], "jobs": [], "meetings": [], "group": group, "current": current})
         roster_prefix = f"dsh-roster:v1:{scope}:"
+        import_prefix = f"{COPY_MEMORY_PREFIX}{scope}:"
         job_prefix = f"commissioned-file:v1:{scope}:"
         meeting_prefix = f"dsh-meeting:v1:{scope}:"
 
@@ -1342,7 +1595,7 @@ def create_app(manager, token):
             with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
                 agents = db.execute(
                     "SELECT json_extract(value,'$.id'), json_extract(value,'$.name'), "
-                    "json_extract(value,'$.status'), json_extract(value,'$.version') "
+                    "json_extract(value,'$.status'), json_extract(value,'$.version'), json_extract(value,'$.persona_mode') "
                     "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created')",
                     (len(roster_prefix), roster_prefix),
                 )
@@ -1352,16 +1605,25 @@ def create_app(manager, token):
                     "COALESCE(json_extract(value,'$.job_kind'),'file'), "
                     "COALESCE(json_extract(value,'$.agent.name'),json_extract(value,'$.spec.agent.name')), "
                     "json_extract(value,'$.project') "
-                    "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created') DESC LIMIT 20",
-                    (len(job_prefix), job_prefix),
+                    "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL
+                    + "ORDER BY json_extract(value,'$.created') DESC LIMIT 20",
+                    (len(job_prefix), job_prefix, group, group),
                 )
                 meetings = db.execute(
                     "SELECT json_extract(value,'$.id'), json_extract(value,'$.topic'), "
                     "json_extract(value,'$.status'), json_extract(value,'$.round'), json_extract(value,'$.rounds') "
-                    "FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created') DESC LIMIT 15",
-                    (len(meeting_prefix), meeting_prefix),
+                    "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL
+                    + "ORDER BY json_extract(value,'$.created') DESC LIMIT 15",
+                    (len(meeting_prefix), meeting_prefix, group, group),
                 )
-                return {"agents": [dict(zip(("id", "name", "status", "version"), row)) for row in agents],
+                imports = {row[0][len(import_prefix):]: {"state": row[1], "copied": row[2], "total": row[3], "error": row[4]}
+                           for row in db.execute(
+                               "SELECT key, json_extract(value,'$.state'), json_extract(value,'$.next'), "
+                               "json_extract(value,'$.total'), json_extract(value,'$.error') "
+                               "FROM settings WHERE substr(key,1,?)=?", (len(import_prefix), import_prefix))}
+                return {"group": group, "current": current,
+                        "agents": [{**dict(zip(("id", "name", "status", "version", "persona_mode"), row)),
+                                    **({"copy_import": imports[row[0]]} if row[0] in imports else {})} for row in agents],
                         "jobs": [dict(zip(("id", "source", "state", "delivery", "job_kind", "agent", "project"), row))
                                  for row in jobs],
                         "meetings": [dict(zip(("id", "topic", "status", "round", "rounds"), row)) for row in meetings]}
@@ -1382,12 +1644,14 @@ def create_app(manager, token):
         key = f"commissioned-file:v1:{scope}:{body['id']}"
 
         def lookup():
+            mode = configured_mode(manager.astrbot_settings)
             with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
                 return db.execute(
                     "SELECT json_extract(value,'$.task_id') FROM settings WHERE key=? "
+                    + GROUP_SQL +
                     "AND json_extract(value,'$.job_kind') IN ('video','web') "
                     "AND json_extract(value,'$.state') IN ('prepared','dispatching','queued','running','cancelling')",
-                    (key,),
+                    (key, mode, mode),
                 ).fetchone()
 
         row = await asyncio.to_thread(lookup)
@@ -1482,6 +1746,12 @@ def create_app(manager, token):
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
+    app.router.add_get("/api/persona-mode", switch_persona)
+    app.router.add_post("/api/persona-mode", switch_persona)
+    app.router.add_route("GET", "/api/fish-model-route", switch_provider)
+    app.router.add_route("POST", "/api/fish-model-route", switch_provider)
+    app.router.add_get("/api/shared-language", language_settings)
+    app.router.add_post("/api/shared-language", language_settings)
     app.router.add_post(VIDEO_PATH, delegate_video)
     app.router.add_post(SEARCH_PATH, delegate_search)
     app.router.add_post(DESKTOP_PATH, delegate_desktop)
@@ -1490,6 +1760,10 @@ def create_app(manager, token):
     app.router.add_get(GO_USAGE_PATH, go_usage)
     app.router.add_get("/api/config", configuration)
     app.router.add_get("/api/dsh-team", dsh_team)
+    app.router.add_get("/api/dsh-team/role-card", role_card)
+    app.router.add_post("/api/dsh-team/role-card", role_card)
+    app.router.add_get("/api/dsh-team/library", team_library)
+    app.router.add_post("/api/dsh-team/library", team_library)
     app.router.add_post("/api/dsh-team/cancel", cancel_public_team_job)
     app.router.add_get(PEER_PATH, shared_settings)
     app.router.add_post(PEER_PATH, shared_settings)

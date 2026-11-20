@@ -80,7 +80,6 @@ def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
             raise PermissionError("public writes are disabled")
 
     executor = Executor(api, state / "operations.sqlite3", before_write=require_write)
-    media_lock = asyncio.Lock()
     mcp = FastMCP(
         "dafeiyu-bili-local", host=host, port=port, log_level="WARNING",
         streamable_http_path="/mcp", stateless_http=True, json_response=True,
@@ -174,10 +173,7 @@ def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
         originals and temporary files stay local and are removed after extraction.
         """
         async def prepare():
-            if media_lock.locked():
-                return {"ok": False, "error": "media_busy", "verified": False}
-            async with media_lock:
-                result = await prepare_video(api, bvid, cid, start, end)
+            result = await prepare_video(api, bvid, cid, start, end)
             covered = result.get("covered_range", {})
             result["range"] = [covered.get("start"), covered.get("end")]
             result["audios"] = result.pop("audio", [])

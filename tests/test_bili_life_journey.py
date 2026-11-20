@@ -88,7 +88,8 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
         async def build(**kwargs):
             req = kwargs["req"]
             req.system_prompt = "原有人格与情绪背景"
-            names = main.ACTIVITY_TOOLS | main.LIFE_TOOLS | main.WORKSHOP_TOOLS | {main.PROJECT_TOOL, main.EXPRESSION_TOOL}
+            names = main.ACTIVITY_TOOLS | main.LIFE_TOOLS | main.WORKSHOP_TOOLS | {
+                main.PROJECT_TOOL, main.EXPRESSION_TOOL, main.STORY_TOOL}
             req.func_tool = fixtures.ToolSet([fixtures.FunctionTool(name=name, active=True) for name in sorted(names)])
             runner = Runner(kwargs["event"], req)
             self.requests.append(req)
@@ -135,7 +136,8 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
         project, goal, source, work = self.seed()
 
         async def close(event, req):
-            self.assertEqual(set(req.func_tool.names()), {"df_project", "df_workshop", "df_recall", "df_life_status"})
+            self.assertEqual(set(req.func_tool.names()),
+                             {"df_project", "df_workshop", "df_recall", "df_life_status", main.STORY_TOOL})
             result = json.loads(await self.plugin.project(event, "review", project_id=project["id"],
                 reflection="已整理这阶段的观察", limitations="仍需独立来源", next_question=""))
             self.assertEqual(result["status"], "completed")
@@ -155,6 +157,10 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
 
         get_provider = self.plugin.context.get_provider_by_id
         memory = memory_fixtures.MemoryIntegrationTests.mock_lm(self)
+        manager = self.plugin.context.get_llm_tool_manager()
+        registry = manager.get_full_tool_set()
+        registry.get_tool = lambda name: (fixtures.FunctionTool(name=main.STORY_TOOL, active=True)
+                                          if name == main.STORY_TOOL else memory)
         self.plugin.context.get_config = lambda **kw: {}
         self.plugin.context.get_provider_by_id = get_provider
         self.plugin.flush_memory = types.MethodType(main.BiliActivity.flush_memory, self.plugin)
@@ -210,7 +216,8 @@ class LifeJourneyTests(unittest.IsolatedAsyncioTestCase):
         backend_before = len(self.calls)
 
         async def reflect_and_prepare(event, req):
-            self.assertEqual(set(req.func_tool.names()), {"df_project", "df_workshop", "df_recall", "df_life_status"})
+            self.assertEqual(set(req.func_tool.names()),
+                             {"df_project", "df_workshop", "df_recall", "df_life_status", main.STORY_TOOL})
             await self.plugin.project(event, "review", project_id=journey["project_id"], stage=1,
                 reflection="第一阶段记录了演示", limitations="单一资料不能当结论", next_question="再比较一个案例")
             next_stage = json.loads(await self.plugin.project(event, "advance", project_id=journey["project_id"], stage=1))["stages"][-1]

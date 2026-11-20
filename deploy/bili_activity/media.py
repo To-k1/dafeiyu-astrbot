@@ -18,6 +18,13 @@ from urllib.parse import urlsplit
 
 from PIL import Image
 
+try:
+    from deploy.bili_activity.resource_capacity import media_slot
+except ModuleNotFoundError as exc:
+    if exc.name != "deploy":
+        raise
+    from resource_capacity import media_slot
+
 
 MAX_DOWNLOAD_BYTES = 160 * 1024 * 1024
 MAX_RESPONSE_BYTES = 3 * 1024 * 1024
@@ -158,6 +165,11 @@ def _subtitle_rows(payload, start, end):
 
 
 async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float = 300, *, include_audio=True, force_audio=False):
+    async with media_slot():
+        return await _prepare_video(api, bvid, cid, start, end, include_audio=include_audio, force_audio=force_audio)
+
+
+async def _prepare_video(api, bvid: str, cid: int, start: float, end: float, *, include_audio, force_audio):
     """Return frames, subtitles, or audio with actual times and partial failures.
 
     The caller must run this on the local companion, not on the 2 Mbit/s cloud

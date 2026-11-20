@@ -1,12 +1,48 @@
+import json
 import tempfile
 import unittest
 from contextlib import closing
+from pathlib import Path
 
 from test_bili_activity import core
 from bili_activity_test.team_history import TeamHistory
+from bili_activity_test.commissioned import CommissionedFiles
+from bili_activity_test.dsh_meetings import DshMeetings
+from bili_activity_test.team_mode import latest_team_notice
 
 
 class TeamHistoryTests(unittest.TestCase):
+    def test_live_meeting_and_task_lookups_follow_the_configured_persona(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / "data"
+            with closing(core.Store(data / "plugin_data" / "astrbot_plugin_bili_activity")) as store:
+                def select(persona):
+                    (data / "cmd_config.json").write_text(json.dumps(
+                        {"agent_runner": {"runner_type": "local", "config": {"persona": {"persona_id": persona}}}}))
+                scope, owner = "qq:FriendMessage:123", "123"
+                profiles = [{"id": n * 16, "name": n, "persona": "text", "version": 1} for n in "ab"]
+                plan = {"source": "test.csv", "cwd": r"D:\shared", "instruction": "read"}
+                old_meeting = DshMeetings(store, scope).create("old", profiles, "background", 1, 0, 0, "same")
+                old_task = CommissionedFiles(store).accept(scope, owner, "same", plan)
+                store.setting("dsh-team-latest:" + scope, {"reference": old_meeting["id"], "summary": "old meeting"})
+                select("feiyu-v3.0")
+                history = TeamHistory(store, scope)
+                self.assertEqual(CommissionedFiles(store).list(scope, owner), [])
+                self.assertEqual(DshMeetings(store, scope).list(), [])
+                self.assertEqual(history.list(), [])
+                self.assertIsNone(latest_team_notice(store, scope))
+                self.assertFalse(CommissionedFiles(store).cancel(scope, owner, old_task))
+                with self.assertRaises(ValueError):
+                    DshMeetings(store, scope).get(old_meeting["id"])
+                new_meeting = DshMeetings(store, scope).create("new", profiles, "background", 1, 0, 0, "same")
+                new_task = CommissionedFiles(store).accept(scope, owner, "same", plan)
+                self.assertNotEqual(new_task, old_task)
+                self.assertEqual(history.get("meeting:" + new_meeting["id"])["source"]["persona_mode"], "formal")
+                select("fish-home-v3.0")
+                self.assertEqual([row["id"] for row in CommissionedFiles(store).list(scope, owner)], [old_task])
+                self.assertEqual([row["id"] for row in DshMeetings(store, scope).list()], [old_meeting["id"]])
+                self.assertEqual(latest_team_notice(store, scope)["summary"], "old meeting")
+
     def test_source_facts_filter_scope_and_leave_store_unchanged(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
             scope = 'qq:FriendMessage:123'

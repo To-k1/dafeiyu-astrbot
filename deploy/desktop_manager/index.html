@@ -12,13 +12,14 @@ main{max-width:1080px;margin:auto;padding:38px 24px 56px}h1,h2,p{margin:0}h1{fon
 header,.brand,.actions,.panel-title{display:flex;align-items:center;gap:10px}header,.panel-title{justify-content:space-between;flex-wrap:wrap}.actions{flex-wrap:wrap;gap:6px}
 .brand{gap:13px}.brand img{width:52px;height:52px}.tag{font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.12em}.muted,small{color:var(--muted)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:16px 0;padding:17px 19px}.jump{background:linear-gradient(110deg,var(--wash),var(--panel) 73%)}.jump .actions{margin-top:10px}
+.story-roles{width:100%;border:1px solid var(--line);border-radius:7px}.story-roles label{display:inline-flex;align-items:center;margin:3px 12px 3px 0}.story-roles input[type=checkbox]{width:auto;margin-right:5px}
 .row{display:grid;grid-template-columns:minmax(145px,1fr) minmax(120px,170px) auto;align-items:center;gap:10px;border-top:1px solid var(--line);padding:11px 0}.row .actions{justify-content:flex-end}.row .muted{font-size:12px}
 button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;min-height:34px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--ink);font:inherit;text-decoration:none;cursor:pointer}button:hover,a.button:hover{border-color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .primary{background:var(--accent);color:#071b2b;border-color:var(--accent);font-weight:700}.soft{background:var(--wash)}button:disabled{opacity:.4;cursor:default}.power{width:16px;height:16px}
 .status{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}.status::before{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:currentColor}.status[data-state=running],.pass{color:var(--accent)}.status[data-state=running]::before{box-shadow:0 0 8px var(--accent)}.status[data-state=starting],.status[data-state=unknown],.warn,#message{color:var(--warn)}
 #message{white-space:pre-wrap}#message:not(:empty){margin-top:10px}details summary{cursor:pointer;font-weight:700}form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}input,select{font:inherit;max-width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}input:not([type=number]){width:min(260px,100%)}input[type=number]{width:95px}#keys{overflow-wrap:anywhere}#budgets{white-space:pre-line}.hint{margin:8px 0}.foot{font-size:12px;margin-top:24px}
 .checklist,.locations{list-style:none;margin:10px 0 0;padding:0}.checklist li,.locations li{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--line);padding:8px 0}.locations code{display:block;overflow-wrap:anywhere;color:var(--muted)}.paths{min-width:0;overflow-wrap:anywhere}.locations button{flex:none}
-.activity-group{margin:16px 0 8px}.activity-group h3{font-size:15px;margin:0}.activity-group label{min-width:11em}.command-help{margin:12px 0 0}.command-help dt{font-weight:700;margin:10px 0 2px}.command-help dd{margin:0;color:var(--muted)}.command-help code{color:var(--ink);overflow-wrap:anywhere}
+.activity-group{margin:16px 0 8px}.activity-group h3{font-size:15px;margin:0}.activity-group label{min-width:11em}.setting-route-note{flex-basis:100%}.command-help{margin:12px 0 0}.command-help dt{font-weight:700;margin:10px 0 2px}.command-help dd{margin:0;color:var(--muted)}.command-help code{color:var(--ink);overflow-wrap:anywhere}
 @media(max-width:660px){main{padding:23px 14px 38px}.panel{padding:13px}.row{grid-template-columns:minmax(0,1fr) auto}.row .actions{grid-column:1/-1;justify-content:flex-start}.checklist li{align-items:flex-start}.checklist li span{max-width:58%}}
 </style>
 <main>
@@ -38,6 +39,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
   <section class="panel" aria-labelledby="services-title"><h2 id="services-title">服务管理</h2><div id="services"></div></section>
   <section class="panel" aria-labelledby="archive-title">
     <h2 id="archive-title">备份与记忆</h2>
+    <div class="actions"><span id="persona-mode-status" class="muted" role="status">人格状态待读取</span><button id="persona-mode" disabled>切换人格</button></div>
     <p class="muted hint">保存本机 SQLite 快照，或生成可读的记忆导出。两项默认排除私聊原文、密钥和登录态。</p>
     <div class="actions"><button id="backup">备份现在的鱼</button><button id="export">导出记忆</button><button id="history" aria-expanded="false" aria-controls="archive-history">查看历史备份</button><button id="recovery" hidden>生成 ThinkBook 还原包</button></div>
     <p id="recovery-hint" class="muted hint" hidden>保存 ThinkBook 的完整项目状态到台式机，包含私聊和应用凭据。生成时会短暂停止聊天与文件任务服务。</p>
@@ -63,6 +65,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
   </details>
   <details class="panel"><summary>自主生活与主动联系设置</summary>
     <p id="activity-note" class="muted hint">正在读取当前主机的活动配置…</p>
+    <p class="muted hint">使用 Go 时，活动时长、主动联系和分享次数仍按这里的设置执行。单轮步骤、工具超时与本机资源排队也照常生效。</p>
     <div id="activity-settings"></div>
     <div id="dsh-sources" class="activity-group" hidden><h3>DSH 文件素材</h3>
       <p class="muted hint" id="dsh-shared-workspace" hidden></p>
@@ -78,14 +81,79 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <p class="muted hint" id="sync-settings-status" role="status"></p><div id="sync-settings-differences"></div>
   </details>
   <details id="dsh-team" class="panel"><summary>DSH 小队与任务</summary>
-    <button id="dsh-team-refresh" type="button">刷新</button>
+    <div class="actions"><button id="dsh-team-refresh" type="button">刷新</button>
+      <label for="dsh-team-view">任务和组会</label>
+      <select id="dsh-team-view"><option value="current">跟随当前人格</option><option value="formal">正式</option><option value="test">测试</option></select>
+      <small id="dsh-team-group"></small>
+    </div>
     <div id="dsh-team-agents"></div>
-    <div id="dsh-team-jobs"></div>
-    <div id="dsh-team-meetings"></div>
+    <details class="panel"><summary>测试角色</summary><div id="dsh-team-test-agents"></div></details>
+    <details class="panel"><summary>已归档角色</summary><div id="dsh-team-archived-agents"></div></details>
+    <form id="dsh-role-card">
+      <label for="dsh-card-file">角色卡</label><input id="dsh-card-file" type="file" accept=".md,.txt">
+      <input id="dsh-card-name" aria-label="新角色名称" placeholder="角色名（留空用文件名）" maxlength="60">
+      <select id="dsh-card-agent" aria-label="更新角色卡时选择小弟"><option value="">作为新小弟</option></select>
+      <button id="dsh-card-preview" type="button">预览卡片</button><button id="dsh-card-import" disabled>导入</button>
+      <button id="dsh-card-template" type="button">下载模板</button>
+    </form>
+    <p id="dsh-card-status" class="muted hint" role="status"></p>
+    <details class="panel"><summary>单人故事</summary>
+      <form id="personal-story-form">
+        <label for="personal-story-role">角色</label><select id="personal-story-role" required></select>
+        <label for="personal-story-file">单人故事文件</label><input id="personal-story-file" type="file" accept=".md,.txt" required>
+        <button type="submit">保存文本</button><button id="personal-story-download" type="button">下载现行文本</button>
+      </form>
+      <p id="personal-story-status" class="muted hint" role="status"></p>
+    </details>
+    <details class="panel"><summary>他人印象</summary>
+      <p class="muted hint">先选这份印象属于谁。正文可以自由提及多位角色，上传会替换所选角色的印象文本。</p>
+      <form id="impressions-form">
+        <label for="impressions-role">角色</label><select id="impressions-role" required><option value="fish">大肥鱼</option></select>
+        <label for="impressions-file">他人印象文件</label><input id="impressions-file" type="file" accept=".md,.txt" required>
+        <button type="submit">保存文本</button><button id="impressions-download" type="button">下载现行文本</button>
+      </form>
+      <p id="impressions-status" class="muted hint" role="status"></p>
+    </details>
+    <details class="panel"><summary>历史记录迁移</summary>
+    <p class="muted hint">迁移已有小弟的聊天、任务和长期记忆。</p>
+    <div class="actions"><label for="dsh-history-role">选择导出角色</label><select id="dsh-history-role"></select>
+      <button id="dsh-history-export" type="button">导出历史记录</button></div>
+    <form id="dsh-copy-form">
+      <label for="dsh-copy-file">历史记录包</label><input id="dsh-copy-file" type="file" accept=".zip,application/zip">
+      <input id="dsh-copy-name" aria-label="角色名称" placeholder="角色名称（留空沿用原名）" maxlength="60">
+      <button id="dsh-copy-preview" type="button">预览档案</button><button id="dsh-copy-import" disabled>导入为副本</button>
+    </form>
+    <p id="dsh-copy-status" class="muted hint" role="status"></p>
+    </details>
+    <details id="dsh-stories" class="panel"><summary>多人故事</summary>
+      <form id="dsh-story-form">
+        <p id="dsh-story-edit-label">添加多人故事</p>
+        <label for="dsh-story-file">故事文件</label><input id="dsh-story-file" type="file" accept=".md,.txt,text/plain">
+        <fieldset class="story-roles"><legend>参与角色</legend><div id="dsh-story-participants"></div>
+          <details><summary>已归档的参与角色</summary><div id="dsh-story-archived-participants"></div></details>
+        </fieldset>
+        <button type="submit">保存故事</button><button id="dsh-story-reset" type="button" hidden>取消编辑</button>
+      </form>
+      <p id="dsh-story-status" class="muted hint" role="status"></p><div id="dsh-story-active"></div>
+      <details class="panel"><summary>已归档故事</summary><div id="dsh-story-archived"></div></details>
+    </details>
+    <details class="panel"><summary>近期任务</summary><div id="dsh-team-jobs"></div></details>
+    <details class="panel"><summary>近期组会</summary><div id="dsh-team-meetings"></div></details>
+  </details>
+  <details class="panel"><summary>共同语言提示词</summary>
+    <form id="shared-language-form">
+      <label><input id="shared-language-enabled" type="checkbox" checked> 启用共同语言</label>
+      <label for="shared-language-file">更换文件</label>
+      <input id="shared-language-file" type="file" accept=".txt,.md">
+      <button disabled>保存</button>
+    </form>
+    <p id="shared-language-status" class="muted hint" role="status"></p>
+    <details><summary>查看当前文本</summary><pre id="shared-language-preview"></pre></details>
   </details>
   <details class="panel"><summary>使用帮助 · 主人 QQ 与 DSH</summary>
     <dl class="command-help">
       <dt>预算与连接</dt><dd><code>/额度</code> 查肥鱼亲自执行的人民币账本。<code>/dsh ping</code> 查正式自主和受托 DSH 的连接与模型路线。<code>/go额度</code> 通过控制台已保存的 OpenCode Go Key 查正式任务账户的订阅窗口。</dd>
+      <dt>步骤与等待时间</dt><dd>步骤和超时约束当前的聊天或后台回报。任务已入队时，可以继续查原任务和等结果；工具因超时未返回时，以任务回执为准。Go 订阅额度用 <code>/go额度</code> 查。</dd>
       <dt>肥鱼自行用 DSH</dt><dd>平常聊天直接说你想做什么。肥鱼自行决定亲自处理，或用 <code>df_dsh_submit_file</code> 查看已登记素材、整理资料、写草稿或运行受限 Python。短活结果回到对话，长活可在后台完成后回复，编号供肥鱼查进度。探索和创作轮次可用 <code>df_file_research</code>。素材名单在「自主生活与主动联系设置」。</dd>
       <dt>主人明确委托</dt><dd><code>/委托 sample.csv 请统计 count 列合计</code>、<code>/委托 任务 写一份草稿</code> 或 <code>/委托 代码 用 Python 核验计算</code>。明确委托走正式 Go 后台，并返回可查询和控制的编号。代码入口需启用 Windows Python 执行。</dd>
       <dt>查旧任务</dt><dd>问「用 DSH 任务记录查 BV1g8Wq6DEXj 上次代看的报告，不用重跑」或「查委托 ID，把原报告读给我」。肥鱼用 <code>df_dsh_history</code>，可按 BV、文件名、关键词、任务或经历 ID 查。已完成文件可从原会话读回；公开视频代看保存报告和采样时间，视频本体是临时文件。<code>/委托 列表</code> 可直接看文件任务状态。</dd>
@@ -94,9 +162,13 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <dt>查网页和看视频</dt><dd>直接交代问题或 B 站链接即可，默认走 <code>df_web_search</code>、<code>df_dsh_video</code>。想让肥鱼亲自查或亲自看时直接说明；她也可以自行选择亲自复核。</dd>
       <dt>工作区与代码</dt><dd>AstrBot 的直接文件工具使用自己的工作区。正式 DSH 以 Windows 专用账户访问其已授权的工作目录，可以在 AstrBot 工作区之外读素材、写产物。启用「Windows Python 执行」后可让它在受控 Python 工作区运行代码并交付结果。当前文件预设使用已登记素材；要接入另一目录，需给 DSH 配置该目录和对应 Windows 读写权限。临时在 AstrBot 终端运行的 DSH headless 使用另一份配置。</dd>
       <dt>和小弟聊天</dt><dd>肥鱼可自行用 <code>df_dsh_agents</code> 创建、改名、暂停或归档小弟，用 <code>df_dsh_chat</code> 接续原对话。聊天始终异步，发送立即入队，小弟答完自动交回肥鱼；同一小弟的新消息按顺序处理，无需发短话催取。主人发起的交谈结果走已有 QQ 待发队列，自主交谈先交回肥鱼本人。用 <code>action=get, chat_id=内部ID</code> 可只读查原回复；<code>action=list</code> 查最近状态。查询不会发送新一轮。超时和重启保留原请求，异常会记为待核对，不伪装成成功。</dd>
+      <dt>角色卡与单人故事</dt><dd>直接上传 UTF-8 的 <code>.md</code> 或 <code>.txt</code>。角色卡写人格和说话方式，单人故事在「单人故事」里选小弟上传。已保存的文本可分别下载。聊天、任务和长期记忆可在「历史记录迁移」整体转移。</dd>
+      <dt>按需查看多人故事</dt><dd>上传多人故事时，可勾选「大肥鱼」和其他参与角色。需要查故事时，肥鱼用 <code>df_story(action="list", query="标题关键词")</code> 找当前分组的标题和参与者，再用 <code>df_story(action="read", story_id="故事 ID")</code> 读指定正文；长篇按 <code>next_offset</code> 分页。普通对话和自主活动不预先加载正文。故事是出厂设定，真实相处的记录另从 LivingMemory 查。</dd>
+      <dt>他人印象</dt><dd>在「DSH 小队与任务 → 他人印象」选择大肥鱼或小弟，上传或下载一份 <code>.md</code> 或 <code>.txt</code>。直接在正文里写角色名即可。大肥鱼可按需用 <code>df_story(action="impressions")</code> 读取自己的文件，长篇按 <code>next_offset</code> 分页。</dd>
       <dt>同一个小弟的不同聊天</dt><dd>使用 <code>df_dsh_chat</code> 并指定 <code>agent_id</code>：<code>action=session_new, title=主题</code> 新建并选中；<code>session_list</code> 查看会话及当前选择；<code>session_select, session_id=会话ID</code> 切换或恢复；<code>session_archive, session_id=会话ID</code> 归档。普通发送默认续接入队时选中的聊天，也可明确指定 <code>session_id</code>。归档保留历史和已排队的消息，恢复后可继续。新聊天保留小弟身份与人格；任务、组会仍使用独立会话。保存历史不代表已有跨会话长期记忆。</dd>
       <dt>小队的长期记忆与来源</dt><dd>肥鱼可用 <code>df_dsh_memory</code> 的 <code>sources/source</code> 查原记录，<code>search/get</code> 查长期记忆，<code>save/update/forget</code> 保留、纠正或删除记忆；不确定写入用 <code>reconcile</code> 核对。留空 <code>agent_id</code> 管理肥鱼自己的 LivingMemory，指定小弟则管理其独立记忆。小弟日常聊天、文件任务和组会可检索自己的旧约定，并自行选出值得保留的事实或评价；原文继续留在聊天、任务和会议记录中。小弟的记忆使用独立数据目录，主人私聊记忆不会整库交给小弟。小弟观点、肥鱼评价、系统事件事实分别标明，不能把小弟的偏好记成主人偏好。记忆保存失败不代表聊天未完成，也不应重跑任务。</dd>
       <dt>具名派活与组会</dt><dd>直接告诉肥鱼想请哪位小弟做什么，或请她选几位小弟讨论。她用 <code>df_dsh_guides</code> 管理指南、<code>df_dsh_assign</code> 派活和取回成果、<code>df_dsh_meeting</code> 查看发言、插话、暂停和续会。可以请她按轮数或时间接收组会汇报。</dd>
+      <dt>小弟再派活</dt><dd>具名小弟可把授权的文本资料或隔离 Python 交给无名工具，再用回报续做原任务。无名工具可继续拆分同一支线。请肥鱼按子任务 ID 查询、暂停、恢复或取消，其他支线可以继续。原报告可沿父记录回查。</dd>
       <dt>指南与身份</dt><dd>名字、人格和日常对话属于同一位小弟。工作指南按本次任务选择，可以组合和更新；已派任务保留派出时的版本。组会完整发言可继续查询，可请肥鱼插话、暂停、续开或停止。会议讨论中的引用可另派具名任务取证。</dd>
       <dt>Windows 桌面操作</dt><dd>例如「请用 Windows 桌面工具，让潮汐笔记查询可用内存，并启动再正常关闭已登记的个人程序」。工具 <code>df_windows_task</code> 可选择小弟和本次指南。软件需预先登记，支持便携 ZIP 安装、启动和正常关闭；有未保存提示时保留窗口。</dd>
       <dt>桌面账户与配对</dt><dd>FishHomeDesktop 是专用 Windows 标准账户。它的账户密码用于 Windows 登录，控制台「Windows 专用桌面配对」填写该账户服务生成的 broker-token 文件内容。当前已配对的 ThinkBook 可继续使用。</dd>
@@ -105,6 +177,8 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <dt>完整读取文本</dt><dd>工具结果正文不再因整理聊天历史而被裁剪，DSH 文件读取自动接续到末页。AstrBot 自带文件工具超过单次大小限制时仍会明确提示分段；可让肥鱼继续读取余下部分。已经折叠过的旧聊天历史不会自动复原，需要重新读取原文件。</dd>
       <dt>手动同步代码</dt><dd>台式机在公开 <code>fish-home</code> 分支提交并推送代码；向 ThinkBook 传送 <code>git archive</code> 生成的代码包后，还需在停止相关服务时安装到已启用插件目录，再启动服务。ThinkBook 当前是解压安装，不能只运行 <code>git pull</code> 就宣称插件已更新。完整步骤见项目 <code>docs/CODE_SYNC.md</code>。配置同步、代码更新、状态备份分别操作；正式数据库以 ThinkBook 为准。</dd>
       <dt>QQ 文件</dt><dd>在主人私聊发文件时附上处理要求。肥鱼可将已可获取的附件复制进 <code>shared/qq-inbox</code>，再交给 DSH。若 QQ 仍要求接收，可完成接收后重发文件。</dd>
+      <dt>QQ ZIP 取材</dt><dd>在当前私聊发送 ZIP，并说明要查看哪些内容。肥鱼用 <code>df_dsh_shared</code> 收取后，可用 <code>zip_list</code> 列清单、<code>zip_read</code> 分页读 UTF-8 文本，或用 <code>zip_extract</code> 把选中的条目复制到新的 <code>shared/qq-zip</code> 任务目录，再把返回的路径交给 DSH。原附件保留，新会话需要重新发附件；长期归档或覆盖资料时另行确认。</dd>
+      <dt>共同语言提示词</dt><dd>可以启停或上传 UTF-8 的 TXT、MD。保存后，肥鱼和具名小弟的新请求会读取现行设置。原人格卡继续使用。</dd>
       <dt>安全插件</dt><dd><a href="https://github.com/kenryu42/cc-safety-net" target="_blank" rel="noopener noreferrer">cc-safety-net ↗</a> 可在 DSH 执行前拦截部分危险命令和敏感读取。Windows 账户权限和执行预设决定实际可达范围。正式服务加载该插件的状态待验证。</dd>
       <dt>原版 Bridge 提示</dt><dd>AstrBot 配置页中旧版 <code>dsh_ask</code>、<code>dsh_ping</code>、<code>/dsh scan</code> 的追加文本是原版默认。FishHome 通过上面的正式工具接线，不读取该旧文本。</dd>
       <dt>提醒</dt><dd><code>/提醒 YYYY-MM-DD HH:MM 内容</code>，时间用北京时间。用 <code>/提醒 列表</code> 或 <code>/提醒 取消 ID</code> 管理。</dd>
@@ -117,7 +191,17 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     </dl>
   </details>
   <details class="panel"><summary>人民币预算与凭据</summary>
+    <form id="fish-model-form">
+      <label for="fish-model-mode">大肥鱼本人模型</label>
+      <select id="fish-model-mode">
+        <option value="go">OpenCode Go 订阅</option>
+        <option value="deepseek">官方 DeepSeek · 人民币</option>
+      </select>
+      <button disabled>切换模型</button>
+    </form>
+    <p class="muted hint" id="fish-model-status" role="status">正在读取大肥鱼的模型线路…</p>
     <p class="hint" id="budgets">正在读取账本…</p>
+    <p class="muted hint">保存的人民币额度用于官方 DeepSeek 线路，切回后继续生效。OpenCode Go 用 <code>/go额度</code> 查订阅窗口。</p>
     <form id="adjust"><label for="bucket">账本</label><select id="bucket"><option value="interaction">交互</option><option value="autonomous">自主</option></select>
       <label for="amount">额度 ¥</label><input id="amount" type="number" min="0" max="100000" step="0.01" required>
       <label for="duration">期限</label><select id="duration"><option value="day">本预算日</option><option value="default">默认额度</option></select><button>保存额度</button>
@@ -155,6 +239,9 @@ if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.re
 const token = sessionStorage.getItem('fishhome-session') || '';
 let busy = false;
 let config = {};
+let fishRoute = null;
+let budgetView = null;
+const goProviderId = 'opencode-go/deepseek-v4.1-flash';
 const activityGroups = [
   ['主动联系', [
     ['contact_daily_limit', '每日主动联系上限（次）'], ['contact_unanswered_limit', '未回复时最多联系（次）'],
@@ -177,6 +264,41 @@ const activityGroups = [
 const sharedSettingLabels = Object.fromEntries(activityGroups.flatMap(([, fields]) => fields));
 sharedSettingLabels.default_interaction_budget = '默认交互额度（元）';
 sharedSettingLabels.default_autonomous_budget = '默认自主额度（元）';
+const goLimitFields = ['daily_model_calls', 'max_model_calls_per_run', 'dsh_peak_token_limit', 'autonomous_visual_enabled'];
+function usingGo(kind) {
+  return fishRoute?.mode === 'go' || fishRoute?.[kind] === goProviderId;
+}
+function activityLimitNote(key) {
+  const autonomousGo = usingGo('autonomous');
+  if (key === 'dsh_peak_token_limit') {
+    const dshGo = config.dsh_go_file_routes?.life === true;
+    if (autonomousGo && dshGo) return '当前自主模型和自主文件 DSH 都走 Go，均跳过峰谷等待。';
+    if (autonomousGo) return '本人走 Go，跳过峰谷等待。走人民币的自主文件 DSH 仍用此阈值。';
+    if (dshGo) return 'Go 文件 DSH 跳过峰谷等待。此阈值适用于人民币线路的高峰延期。';
+    return '适用于人民币线路的高峰延期。Go 跳过此阈值。';
+  }
+  if (key === 'autonomous_visual_enabled') {
+    return autonomousGo ? '此开关仍生效。Go 跳过人民币线路的单轮一次视觉调用限制。' : '';
+  }
+  return autonomousGo ? '当前自主模型使用 Go，跳过此调用次数限制。' : '适用于官方 DeepSeek 自主模型。';
+}
+function renderGoLimits() {
+  for (const key of goLimitFields) {
+    const hint = $('go-limit-' + key);
+    if (!hint) continue;
+    hint.textContent = activityLimitNote(key);
+    hint.hidden = !hint.textContent;
+  }
+  if (budgetView) {
+    const {day, ledgers} = budgetView;
+    $('budgets').textContent = `预算日 ${day} · 北京时间 00:00 切换\n` + Object.entries(ledgers).map(([key, item]) => {
+      const label = key === 'interaction' ? '交互' : '自主';
+      const go = usingGo(key === 'interaction' ? 'chat' : 'autonomous');
+      return `${label}剩 ¥${item.remaining} / ¥${item.limit}，预留 ¥${item.reserved}` +
+        (go ? ` · 本人${label}使用 Go，跳过此账本` : '');
+    }).join('\n');
+  }
+}
 let syncView;
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store'});
@@ -184,7 +306,113 @@ async function api(path, method = 'GET', body) {
   if (!response.ok) throw Error(result.error || '本机请求失败');
   return result;
 }
+
+async function loadPersonaMode() {
+  const button = $('persona-mode');
+  button.disabled = true;
+  try {
+    const state = await api('/api/persona-mode');
+    if (state.mode === 'remote') {
+      $('persona-mode-status').textContent = '正式机的人格请在 ThinkBook 远程控制台切换。';
+      return;
+    }
+    if (!['test', 'formal'].includes(state.mode)) {
+      $('persona-mode-status').textContent = '当前人格没有可切换的同版本配对。';
+      return;
+    }
+    $('persona-mode-status').textContent = (state.mode === 'formal' ? '正式' : '测试') + ' · ' + state.current;
+    button.dataset.mode = state.mode === 'formal' ? 'test' : 'formal';
+    button.textContent = state.mode === 'formal' ? '切换到测试人格' : '切换到正式人格';
+    button.disabled = false;
+  } catch (error) {
+    $('persona-mode-status').textContent = error.message;
+  }
+}
+
+$('persona-mode').onclick = async () => {
+  const button = $('persona-mode');
+  if (!confirm('切换将开启一个新的主人私聊上下文，并短暂重启 AstrBot 和正在运行的星海。继续？')) return;
+  button.disabled = true;
+  try {
+    const result = await api('/api/persona-mode', 'POST', {mode: button.dataset.mode});
+    $('archive-message').textContent = result.message || '';
+  } catch (error) {
+    $('archive-message').textContent = error.message;
+  } finally {
+    await loadPersonaMode();
+    await refresh();
+  }
+};
+async function loadFishModel(message) {
+  const form = $('fish-model-form'), select = $('fish-model-mode');
+  form.querySelector('button').disabled = true;
+  try {
+    const state = await api('/api/fish-model-route');
+    fishRoute = state;
+    for (const option of select.options) option.disabled = !state.routes.includes(option.value);
+    const current = state.routes.includes(state.mode);
+    select.value = current ? state.mode : (state.routes[0] || '');
+    const label = state.mode === 'remote' ? '请从 ThinkBook 远程控制台切换正式机。' :
+      state.mode === 'go' ? '私聊和自主活动使用 Go 订阅，均跳过人民币账本。' :
+      state.mode === 'deepseek' ? '私聊和自主活动使用各自的人民币额度。' :
+      state.routes.length ? '私聊和自主模型尚未统一。' : '请先在 AstrBot 配置可用的模型提供商。';
+    $('fish-model-status').textContent = [message, label].filter(Boolean).join(' ');
+    form.querySelector('button').disabled = !state.routes.length;
+  } catch (error) {
+    fishRoute = null;
+    $('fish-model-status').textContent = error.message;
+  }
+  renderGoLimits();
+}
+
+$('fish-model-form').onsubmit = async event => {
+  event.preventDefault();
+  if (!confirm('切换会短暂重启 AstrBot。继续？')) return;
+  event.currentTarget.querySelector('button').disabled = true;
+  try {
+    const result = await api('/api/fish-model-route', 'POST', {mode: $('fish-model-mode').value});
+    await loadFishModel(result.message);
+  } catch (error) {
+    await loadFishModel(error.message);
+  }
+  await refresh();
+};
 function node(tag, text, cls) { const n = document.createElement(tag); n.textContent = text; if (cls) n.className = cls; return n; }
+const languageForm = $('shared-language-form');
+function renderSharedLanguage(result) {
+  $('shared-language-enabled').checked = result.enabled;
+  $('shared-language-preview').textContent = result.text;
+  $('shared-language-status').textContent = result.filename + (result.enabled ? ' · 已启用' : ' · 已关闭');
+  languageForm.querySelector('button').disabled = false;
+}
+async function loadSharedLanguage() {
+  try {
+    renderSharedLanguage(await api('/api/shared-language'));
+  } catch (error) {
+    $('shared-language-status').textContent = error.message;
+  }
+}
+languageForm.onsubmit = async event => {
+  event.preventDefault();
+  const button = languageForm.querySelector('button');
+  button.disabled = true;
+  const upload = $('shared-language-file');
+  try {
+    const body = {enabled: $('shared-language-enabled').checked};
+    if (upload.files.length) {
+      const file = upload.files[0];
+      if (file.size > 48 * 1024) throw Error('提示词文件最多 48 KiB');
+      body.filename = file.name;
+      body.text = new TextDecoder('utf-8', {fatal: true}).decode(await file.arrayBuffer());
+    }
+    renderSharedLanguage(await api('/api/shared-language', 'POST', body));
+    upload.value = '';
+  } catch (error) {
+    $('shared-language-status').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
 function button(text, fn, disabled) { const b = node('button', text); b.disabled = disabled; b.onclick = fn; return b; }
 function setTheme(night) {
   document.documentElement.dataset.theme = night ? 'night' : 'ocean';
@@ -207,24 +435,293 @@ async function openDsh() {
   }
 }
 $('dsh-ui').onclick = openDsh;
+let previewedCard = null;
+let previewedArchive = null;
+let storyAgents = [];
+let storyEdit = null;
+const storyFish = {id:'fish', name:'大肥鱼'};
+const roleGroup = mode => mode === 'test' ? '测试' : mode === 'formal' ? '正式' : '';
+function storyRoleLabel(agent) {
+  const same = storyAgents.some(other => other.id !== agent.id && other.name === agent.name);
+  return [agent.name, roleGroup(agent.persona_mode), same ? agent.id : ''].filter(Boolean).join(' · ');
+}
+function showStoryParticipants(selected = null) {
+  const root = $('dsh-story-form');
+  selected ??= new Set(Array.from(root.querySelectorAll('input[type=checkbox]:checked'), input => input.value));
+  const display = (target, agents) => {
+    $(target).replaceChildren(...agents.map(agent => {
+      const label = node('label', '');
+      const check = document.createElement('input');
+      check.type = 'checkbox'; check.value = agent.id; check.checked = selected.has(agent.id);
+      label.append(check, document.createTextNode(storyRoleLabel(agent)));
+      return label;
+    }));
+  };
+  display('dsh-story-participants', [storyFish, ...storyAgents.filter(agent => agent.status !== 'archived')]);
+  display('dsh-story-archived-participants', storyAgents.filter(agent => agent.status === 'archived'));
+}
+function resetStory() {
+  storyEdit = null;
+  $('dsh-story-file').value = '';
+  $('dsh-story-edit-label').textContent = '添加多人故事';
+  $('dsh-story-reset').hidden = true;
+  showStoryParticipants(new Set());
+}
+async function libraryChange(action, id, status) {
+  await api('/api/dsh-team/library','POST',{action,id,status});
+}
+async function loadStories() {
+  try {
+    const {stories} = await api('/api/dsh-team/library');
+    const render = (target, entries) => {
+      $(target).replaceChildren(...(entries.length ? entries.map(story => {
+        const row = node('div','', 'row');
+        const title = story.path.split('/').at(-1);
+        const names = story.participants.map(id => id === storyFish.id ? storyFish.name
+          : storyAgents.find(agent => agent.id === id)?.name || id);
+        row.append(node('span', [title, roleGroup(story.persona_mode), ...names].filter(Boolean).join(' · ')),
+          button('编辑参与者或替换文件', () => {
+            storyEdit = story;
+            $('dsh-story-file').value = '';
+            $('dsh-story-edit-label').textContent = '编辑 · ' + title;
+            $('dsh-story-reset').hidden = false;
+            showStoryParticipants(new Set(story.participants));
+          }, false),
+          button('下载正文', async () => {
+            try {
+              const {text} = await api('/api/dsh-team/library?' + new URLSearchParams({id:story.id}));
+              downloadFile(new Blob([text], {type:'text/plain;charset=utf-8'}), title);
+            } catch (error) { $('dsh-story-status').textContent = error.message; }
+          }, false),
+          button(story.status === 'archived' ? '恢复故事' : '归档故事', async () => {
+            try {
+              await libraryChange('story-status', story.id, story.status === 'archived' ? 'active' : 'archived');
+              if (storyEdit?.id === story.id) resetStory();
+              await loadStories();
+            } catch(error) { $('dsh-story-status').textContent = error.message; }
+          }, false));
+        return row;
+      }) : [node('p','暂无故事','muted')]));
+    };
+    render('dsh-story-active', stories.filter(story => story.status !== 'archived'));
+    render('dsh-story-archived', stories.filter(story => story.status === 'archived'));
+  } catch(error) { $('dsh-story-status').textContent = error.message; }
+}
+$('dsh-stories').addEventListener('toggle', () => { if ($('dsh-stories').open) loadStories(); });
+$('dsh-story-reset').onclick = resetStory;
+$('dsh-story-form').onsubmit = async event => {
+  event.preventDefault();
+  const file = $('dsh-story-file').files[0];
+  const participants = Array.from(event.currentTarget.querySelectorAll('input[type=checkbox]:checked'), input => input.value);
+  if (!participants.length || (!storyEdit && !file)) {
+    $('dsh-story-status').textContent = '请选择故事文件和参与角色。';
+    return;
+  }
+  try {
+    const payload = {action:'save-story', id:storyEdit?.id || '', participants};
+    if (file) {
+      payload.filename = file.name;
+      payload.text = new TextDecoder('utf-8', {fatal:true}).decode(await file.arrayBuffer());
+    }
+    await api('/api/dsh-team/library','POST',payload);
+    $('dsh-story-status').textContent = '多人故事已保存';
+    resetStory();
+    await loadStories();
+  } catch (error) { $('dsh-story-status').textContent = error.message; }
+};
+async function cardRequest(query, file) {
+  const params = new URLSearchParams(query);
+  if (file) params.set('filename', file.name);
+  const response = await fetch('/api/dsh-team/role-card?' + params, {
+    method: file ? 'POST' : 'GET',
+    headers: {Authorization: 'Bearer ' + token},
+    body: file
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw Error(data.error || '角色卡操作失败');
+  }
+  return response;
+}
+function downloadFile(data, filename) {
+  const href = URL.createObjectURL(data);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+async function downloadCard(query, filename, status = 'dsh-card-status') {
+  try {
+    const response = await cardRequest(query);
+    const extension = response.headers.get('Content-Disposition')?.match(/\.(md|txt|zip)"$/)?.[1];
+    downloadFile(await response.blob(), extension ? filename + '.' + extension : filename);
+  } catch (error) { $(status).textContent = error.message; }
+}
+function bindRoleText(form, kind) {
+  const role = $(form + '-role'), input = $(form + '-file'), status = $(form + '-status');
+  const route = '/api/dsh-team/library';
+  $(form + '-form').onsubmit = async event => {
+    event.preventDefault();
+    const id = role.value, file = input.files[0];
+    if (!id || !file) return;
+    const save = event.submitter;
+    save.disabled = true;
+    try {
+      const text = new TextDecoder('utf-8', {fatal:true}).decode(await file.arrayBuffer());
+      await api(route, 'POST', {action:'save-' + form,id,filename:file.name,text});
+      if (input.files[0] === file) input.value = '';
+      status.textContent = '已保存文本。';
+    } catch (error) { status.textContent = error.message; }
+    finally { save.disabled = false; }
+  };
+  $(form + '-download').onclick = async () => {
+    if (!role.value) { status.textContent = '请先选择角色。'; return; }
+    try {
+      const query = new URLSearchParams({document:kind,id:role.value});
+      const result = await api(route + '?' + query);
+      if (result.status === 'available') {
+        downloadFile(new Blob([result.text], {type:'text/plain;charset=utf-8'}), result.filename);
+        status.textContent = '';
+      } else {
+        status.textContent = '所选角色还没有上传这份文本。';
+      }
+    } catch (error) { status.textContent = error.message; }
+  };
+}
+bindRoleText('personal-story', 'story');
+bindRoleText('impressions', 'impressions');
+$('dsh-card-template').onclick = () => downloadCard({action:'template'}, '角色卡模板');
+const resetCardPreview = () => { previewedCard = null; $('dsh-card-import').disabled = true; };
+$('dsh-card-file').onchange = resetCardPreview;
+$('dsh-card-name').oninput = resetCardPreview;
+$('dsh-card-agent').onchange = resetCardPreview;
+$('dsh-card-preview').onclick = async () => {
+  const file = $('dsh-card-file').files[0];
+  if (!file) return;
+  const id = $('dsh-card-agent').value, requested = $('dsh-card-name').value;
+  const agent = storyAgents.find(agent => agent.id === id);
+  try {
+    const {name, files, plain} = await (await cardRequest({action:'preview', name:agent?.name || requested}, file)).json();
+    if ($('dsh-card-file').files[0] !== file || $('dsh-card-agent').value !== id || $('dsh-card-name').value !== requested) return;
+    previewedCard = file;
+    $('dsh-card-status').textContent = [agent && plain ? '更新角色卡 · ' + agent.name : name, ...files].join(' · ');
+    $('dsh-card-import').disabled = false;
+  } catch (error) { $('dsh-card-status').textContent = error.message; }
+};
+$('dsh-role-card').onsubmit = async event => {
+  event.preventDefault();
+  if (!previewedCard) return;
+  const file = previewedCard;
+  const id = $('dsh-card-agent').value;
+  $('dsh-card-import').disabled = true;
+  try {
+    const agent = storyAgents.find(agent => agent.id === id);
+    const result = await (await cardRequest({action:id ? 'update-background' : 'create', id,
+      name:agent?.name || $('dsh-card-name').value}, file)).json();
+    $('dsh-card-status').textContent = '已保存 · ' + result.name;
+    previewedCard = null;
+    $('dsh-card-file').value = '';
+    await refreshDshTeam();
+  } catch (error) {
+    $('dsh-card-status').textContent = error.message;
+    $('dsh-card-import').disabled = false;
+  }
+};
+$('dsh-copy-file').onchange = () => { previewedArchive = null; $('dsh-copy-import').disabled = true; };
+$('dsh-copy-preview').onclick = async () => {
+  const file = $('dsh-copy-file').files[0];
+  if (!file) return;
+  try {
+    const details = await (await cardRequest({action:'preview-copy'}, file)).json();
+    if ($('dsh-copy-file').files[0] !== file) return;
+    previewedArchive = file;
+    $('dsh-copy-status').textContent = `${details.name} · ${details.records} 条经历 · ${details.memories} 条长期记忆`;
+    $('dsh-copy-import').disabled = false;
+  } catch (error) { $('dsh-copy-status').textContent = error.message; }
+};
+async function showCopyProgress(agent) {
+  if ($('dsh-copy-status').dataset.agent !== agent.id) return;
+  try {
+    const state = await (await cardRequest({action:'copy-status', id:agent.id})).json();
+    if ($('dsh-copy-status').dataset.agent !== agent.id) return;
+    const detail = state.state === 'ready' ? '已就绪' : state.error || `正在导入记忆 ${state.copied}/${state.total}`;
+    $('dsh-copy-status').textContent = agent.name + ' · ' + detail;
+    if (state.state === 'pending') setTimeout(() => showCopyProgress(agent), 3000);
+    else await refreshDshTeam();
+  } catch (error) { $('dsh-copy-status').textContent = error.message; }
+}
+$('dsh-copy-form').onsubmit = async event => {
+  event.preventDefault();
+  if (!previewedArchive) return;
+  $('dsh-copy-import').disabled = true;
+  try {
+    const copy = await (await cardRequest({action:'copy', name:$('dsh-copy-name').value}, previewedArchive)).json();
+    previewedArchive = null;
+    $('dsh-copy-file').value = '';
+    $('dsh-copy-name').value = '';
+    $('dsh-copy-status').dataset.agent = copy.id;
+    await refreshDshTeam();
+    await showCopyProgress(copy);
+  } catch (error) {
+    $('dsh-copy-status').textContent = error.message;
+    $('dsh-copy-import').disabled = false;
+  }
+};
+$('dsh-history-export').onclick = () => {
+  const id = $('dsh-history-role').value;
+  if (id) return downloadCard({action:'history', id}, 'fishhome-history-' + id, 'dsh-copy-status');
+  $('dsh-copy-status').textContent = '请先选择要导出历史记录的小弟。';
+};
 async function refreshDshTeam() {
   try {
-    const {agents, jobs, meetings = []} = await api('/api/dsh-team');
+    const view = $('dsh-team-view').value;
+    const {agents, jobs, meetings = [], group, current} = await api('/api/dsh-team?view=' + view);
+    if ($('dsh-team-view').value !== view) return;
+    $('dsh-team-group').textContent = group === 'formal' ? '正式记录' : group === 'test' ? '测试记录' : '当前记录';
     const names = {active:'可用', paused:'暂停', archived:'已归档'};
-    $('dsh-team-agents').replaceChildren(node('h3', '小弟'),
-      ...(agents.length ? agents.map(agent => node('p', `${agent.name} · ${names[agent.status] || agent.status} · 人格 v${agent.version}`))
-        : [node('p', '肥鱼还没有在此主机创建小弟。', 'muted')]));
+    storyAgents = agents;
+    showStoryParticipants();
+    if ($('dsh-stories').open) loadStories();
+    for (const [key, label, initial] of [['dsh-card-agent','作为新小弟',''],
+        ['personal-story-role','选择小弟',''], ['impressions-role','大肥鱼','fish'], ['dsh-history-role','选择小弟','']]) {
+      const selector = $(key), previous = selector.value;
+      selector.replaceChildren(new Option(label, initial),
+        ...agents.map(agent => new Option(storyRoleLabel(agent), agent.id)));
+      if (agents.some(agent => agent.id === previous)) selector.value = previous;
+      else if (key === 'dsh-card-agent' && previous) resetCardPreview();
+    }
+    const displayAgents = (target, members) => $(target).replaceChildren(
+      ...(members.length ? members.map(agent => {
+        const row = node('div', '', 'row');
+        const copy = agent.copy_import;
+        const progress = copy?.state === 'pending' ? ` · 记忆导入 ${copy.copied}/${copy.total}`
+          : copy?.state === 'needs_review' ? ' · 记忆导入待核对' : '';
+        row.append(node('span', `${storyRoleLabel(agent)} · ${names[agent.status] || agent.status} · 人格 v${agent.version}${progress}`),
+          button('导出角色卡', () => downloadCard({action:'download', id:agent.id}, agent.name), false),
+          button(agent.status === 'archived' ? '恢复角色' : '归档角色', async () => {
+            try {
+              await libraryChange('role-status', agent.id, agent.status === 'archived' ? 'active' : 'archived');
+              await refreshDshTeam();
+            } catch(error) { $('dsh-card-status').textContent = error.message; }
+          }, false));
+        return row;
+      })
+        : [node('p', '暂无角色', 'muted')]));
+    displayAgents('dsh-team-agents', agents.filter(agent => agent.status !== 'archived' && agent.persona_mode === 'formal'));
+    displayAgents('dsh-team-test-agents', agents.filter(agent => agent.status !== 'archived' && agent.persona_mode !== 'formal'));
+    displayAgents('dsh-team-archived-agents', agents.filter(agent => agent.status === 'archived'));
     const states = {prepared:'排队', dispatching:'派发中', queued:'排队', running:'执行中',
       submitting:'提交中', submitted:'执行中', continuing:'待续做', go_wait:'等待 Go 额度',
       completed:'完成', paused:'暂停', cancelling:'取消中', cancelled:'已取消', failed:'失败', needs_review:'待核对',
       stopping:'停止中', stopped:'已停止'};
     const kinds = {file:'文件', video:'视频', web:'网页'};
-    $('dsh-team-jobs').replaceChildren(node('h3', '近期任务'),
+    $('dsh-team-jobs').replaceChildren(
       ...(jobs.length ? jobs.map(job => {
         const row = node('div', '', 'row');
         row.append(node('span', [job.id, kinds[job.job_kind] || '文件', states[job.state] || job.state,
           job.agent, job.project, job.source].filter(Boolean).join(' · ')));
-        if (['video', 'web'].includes(job.job_kind) && ['prepared', 'dispatching', 'queued', 'running'].includes(job.state)) {
+        if (group === current && ['video', 'web'].includes(job.job_kind) && ['prepared', 'dispatching', 'queued', 'running'].includes(job.state)) {
           row.append(button('取消', async () => {
             try {
               const result = await api('/api/dsh-team/cancel', 'POST', {id: job.id});
@@ -236,8 +733,8 @@ async function refreshDshTeam() {
         return row;
       })
         : [node('p', '还没有 DSH 任务。', 'muted')]));
-    $('dsh-team-meetings').replaceChildren(node('h3', '近期组会'),
-      ...(meetings.length ? meetings.map(meeting => node('p', `${meeting.topic.slice(0, 100)} · ${states[meeting.status] || meeting.status} · ${meeting.round}/${meeting.rounds} 轮`))
+    $('dsh-team-meetings').replaceChildren(
+      ...(meetings.length ? meetings.map(meeting => node('p', `${meeting.topic.slice(0, 100)} · ${states[meeting.status] || meeting.status} · ${meeting.rounds ? meeting.round + '/' + meeting.rounds + ' 轮' : '已聊 ' + meeting.round + ' 轮'}`))
         : [node('p', '还没有组会。', 'muted')]));
   } catch (error) {
     $('dsh-team-agents').textContent = error.message;
@@ -245,6 +742,7 @@ async function refreshDshTeam() {
 }
 $('dsh-team').addEventListener('toggle', () => { if ($('dsh-team').open) refreshDshTeam(); });
 $('dsh-team-refresh').onclick = refreshDshTeam;
+$('dsh-team-view').onchange = refreshDshTeam;
 async function refresh() {
   try {
     const {services, official_key, runner_password} = await api('/api/status');
@@ -310,6 +808,12 @@ function activityField(key, title, values, bounds) {
   }
   const save = node('button', '保存');
   form.append(label, input, save);
+  if (goLimitFields.includes(key)) {
+    const hint = node('small', '', 'setting-route-note');
+    hint.id = 'go-limit-' + key;
+    input.setAttribute('aria-describedby', hint.id);
+    form.append(hint);
+  }
   form.onsubmit = async event => {
     event.preventDefault();
     save.disabled = true;
@@ -350,6 +854,7 @@ function renderActivitySettings() {
     group.append(node('h3', name), ...fields.map(([key,title]) => activityField(key, title, values, config.activity_limits[key])));
     root.append(group);
   }
+  renderGoLimits();
 }
 function formatSyncValue(value) {
   if (value === null) return '未配置';
@@ -405,7 +910,7 @@ async function loadConfig() {
     $('opencode').querySelector('button').disabled = !opencodeAvailable;
     const opencodeStatus = config.opencode_key_saved ? '已加密保存。' : '尚未保存。';
     $('opencode-status').textContent = opencodeAvailable
-      ? `OpenCode Key ${opencodeStatus} 预定模型 deepseek-v4.1-flash，保存后可另行接入。`
+      ? `OpenCode Key ${opencodeStatus} DSH 和大肥鱼的 Go 线路共用这里保存的 Key。`
       : '请先更新当前主机的控制台后端。';
     $('dsh-video-toggle').hidden = !config.dsh_video_supported;
     $('dsh-video-toggle').disabled = !config.opencode_key_saved;
@@ -427,7 +932,7 @@ async function loadConfig() {
     renderActivitySettings();
     for (const id of ['napcat_qq','owner_qq','emulator_dir','ollama_models']) $(id).value = config[id];
     let fileBilling = '文件 DSH 尚未接入计费。';
-    if (config.dsh_go_files_enabled) fileBilling = '两路文件 DSH 配置为使用 OpenCode Go 订阅。';
+    if (config.dsh_go_files_enabled) fileBilling = '两路文件 DSH 配置为使用 OpenCode Go 订阅。已接入的 Go 任务跳过人民币账本和峰谷等待。';
     else if (config.metered_dsh) fileBilling = '两路文件 DSH 配置为使用各自的人民币账本。';
     $('metered-label').textContent = fileBilling;
     $('metered').hidden = config.dsh_go_files_enabled || config.metered_dsh;
@@ -488,10 +993,12 @@ $('backup-folder').onclick = () => openLocation('FishHome · 历史备份', 'arc
 $('export-folder').onclick = () => openLocation('FishHome · 记忆导出', 'archive-message');
 async function loadBudgets() {
   try {
-    const {day, ledgers} = await api('/api/budgets');
-    $('budgets').textContent = `预算日 ${day} · 北京时间 00:00 切换\n` + Object.entries(ledgers).map(([key, item]) =>
-      `${key === 'interaction' ? '交互' : '自主'}剩 ¥${item.remaining} / ¥${item.limit}，预留 ¥${item.reserved}`).join('\n');
-  } catch (error) { $('budgets').textContent = error.message; }
+    budgetView = await api('/api/budgets');
+    renderGoLimits();
+  } catch (error) {
+    budgetView = null;
+    $('budgets').textContent = error.message;
+  }
 }
 async function runChecks() {
   if ($('check').disabled) return;
@@ -552,6 +1059,6 @@ $('showkeys').onclick = async () => {
   catch (error) { $('message').textContent = error.message; }
 };
 $('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop');
-$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadConfig(), loadBudgets(), runChecks()]);
-refresh(); loadConfig(); loadBudgets(); runChecks(); setInterval(() => { if (!busy) refresh(); }, 2500);
+$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadConfig(), loadBudgets(), runChecks(), loadPersonaMode(), loadFishModel(), loadSharedLanguage()]);
+refresh(); loadConfig(); loadBudgets(); runChecks(); loadPersonaMode(); loadFishModel(); loadSharedLanguage(); setInterval(() => { if (!busy) refresh(); }, 2500);
 </script>

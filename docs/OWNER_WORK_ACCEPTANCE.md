@@ -23,3 +23,5 @@
 停 AstrBot 并退出托盘后，使用 `powershell -File deploy/desktop_manager/install.ps1 -InstallOwnerWork` 安装。重开控制台后可以单独启动「DeepSeek Harness（受托文件）」。启动会准备工作区，文件白名单由台式机管理员设置。AstrBot 的百炼 Key 和音色继续通过本机面板配置。
 
 台式机安装前的活动源码、DSH Bridge 源码与 AstrBot 语音适配器在本机控制台状态目录下的两份 `owner-work-before-*` 中。回滚时停止 AstrBot 和受托 DSH，用本轮首次备份还原源码，移除本轮新增的运行端插件文件和受托 DSH 启动器，启动原服务。保留业务数据库和产物。ThinkBook 安装与验收另行记录。
+
+2026-11-14，Windows 创作工坊可把通过来源校验的作品导出为 Markdown。隔离测试从实际插件入口核对产物、出处和重复分享拦截，确认导出不通过目录联接写到其他位置。真实 QQ 的创作工坊分享仍待现场验收。

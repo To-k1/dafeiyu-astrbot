@@ -83,12 +83,17 @@ def decision(text):
 
 
 class Store:
-    def __init__(self, folder):
+    def __init__(self, folder, *, existing=False):
         self.folder = Path(folder)
+        self._lock = threading.RLock()
+        if existing:
+            path = (self.folder / "activity.sqlite3").resolve(strict=True)
+            self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=5)
+            self.db.row_factory = sqlite3.Row
+            return
         self.folder.mkdir(parents=True, exist_ok=True)
         path = self.folder / "activity.sqlite3"
         existed = path.exists()
-        self._lock = threading.RLock()
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         try:

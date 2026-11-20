@@ -7,6 +7,7 @@ PROVIDER = "opencode-go"
 MODEL = "deepseek-v4.1-flash"
 BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 KEY_ENV = "FISHHOME_OPENCODE_KEY"
+DEFAULT_REASONING = "max"
 
 
 def render_go_patch(session_id):
@@ -17,7 +18,11 @@ def render_go_patch(session_id):
         "apiKeyEnv": KEY_ENV,
         "baseURL": BASE_URL,
         "headers": {"User-Agent": "FishHome-DSH/0.2", "x-opencode-session": session_id},
-        "models": [{"id": MODEL, "input": ["text", "image"]}],
+        "reasoning": DEFAULT_REASONING,
+        "compat": {"thinkingFormat": "deepseek", "supportsReasoningEffort": True,
+                   "requiresReasoningContentOnAssistantMessages": True},
+        "models": [{"id": MODEL, "input": ["text", "image"],
+                    "reasoningEfforts": {"high": "high", "max": "max"}}],
         "retryPolicy": {"mode": "normal", "maxRetries": 0},
     }}}}, {"id": "session-title-llm", "disabled": True}]
 

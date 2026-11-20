@@ -210,10 +210,13 @@ def cue_score(query, memory):
     return sum(t in text for t in tokens) / max(1, len(tokens))
 
 
-def project(snapshot, *, scope, days=0, query="", rehearsed=(), pinned=()):
+def project(snapshot, *, scope, days=0, query="", rehearsed=(), pinned=(), preferred_scope=None):
     days = number(days, "模拟天数", 0, 730)
     query = string(query, "线索", 200, empty=True)
-    scopes = sorted({m["scope"] for m in snapshot["memories"]})
+    known_scopes = {m["scope"] for m in snapshot["memories"]}
+    if preferred_scope:
+        known_scopes.add(preferred_scope)
+    scopes = sorted(known_scopes)
     if scope not in scopes and not (not scopes and scope is None):
         raise InvalidSnapshot("请选择有效作用域")
     # Filter before lexical retrieval AND graph spreading.

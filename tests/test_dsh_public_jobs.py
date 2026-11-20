@@ -7,9 +7,10 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
+from deploy.dsh_bridge.go_relay import GoSubscriptionWaiting
 
 if os.name == "nt":
     from deploy.desktop_manager.manager import create_app
@@ -43,6 +44,58 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
+
+    async def test_unstarted_job_reopens_only_after_subscription_available(self):
+        calls = []
+        directory = self.root / "jobs"
+
+        async def execute(body, started):
+            started()
+            calls.append(body)
+            if len(calls) == 1:
+                raise GoSubscriptionWaiting("Go rejected before first receipt")
+            return result(body)
+
+        job = PublicJobs(directory, execute)
+        job.submit(SEARCH_ID, SEARCH)
+        job.start()
+        await eventually(lambda: job.get(SEARCH_ID)["state"] == "go_wait")
+        await job.close()
+        self.assertEqual(calls, [SEARCH])
+
+        reopened = PublicJobs(directory, execute, quota_available=AsyncMock(return_value=True))
+        release = asyncio.Event()
+        with patch.object(reopened, "_await_quota", new=release.wait):
+            reopened.start()
+            await asyncio.sleep(0)
+            self.assertEqual(reopened.get(SEARCH_ID)["state"], "go_wait")
+            self.assertEqual(calls, [SEARCH])
+            release.set()
+            await eventually(lambda: reopened.get(SEARCH_ID)["state"] == "completed")
+        await reopened.close()
+        self.assertEqual(calls, [SEARCH, SEARCH])
+
+    async def test_personal_page_uses_same_archive_without_go_worker(self):
+        page = {"kind": "page_text", "title": "Technical docs", "url": "https://example.org/docs",
+                "requested_url": "https://example.org/docs", "fetched_at": "2026-11-18T00:00:00Z",
+                "text": "正文" * 5000}
+        search = AsyncMock()
+        jobs = PublicJobs(self.root / "jobs", AsyncMock())
+        manager = SimpleNamespace(options={"dsh_web_search_enabled": True},
+            creds=SimpleNamespace(values={"video_worker_token": "worker-token"}),
+            sync_video_worker=lambda: "worker-token", public_jobs=jobs, room_snapshot=None,
+            astro=self.root / "missing", settings_sync=None, video_worker=SimpleNamespace(search=search),
+            archive_web_page=lambda _: "shared/web-sources/example.md")
+        with patch("deploy.desktop_manager.manager.fetch_public_page", AsyncMock(return_value=page)) as read:
+            async with TestClient(TestServer(create_app(manager, "console-token"))) as client:
+                response = await client.post("/api/worker/public-search", headers=WORKER_AUTH,
+                                             json={"mode": "page", "query": page["url"]})
+                self.assertEqual(response.status, 200)
+                item = await response.json()
+        read.assert_awaited_once_with(page["url"])
+        search.assert_not_awaited()
+        self.assertEqual(item["artifact"], "shared/web-sources/example.md")
+        self.assertEqual((item["next_offset"], item["total_chars"]), (6000, 10000))
 
     async def test_worker_api_accepts_parallel_jobs_and_reads_cached_results(self):
         release = asyncio.Event()
@@ -168,14 +221,14 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
             started()
             await asyncio.Event().wait()
 
-        jobs = PublicJobs(self.root / "jobs", execute, parallel=1)
+        jobs = PublicJobs(self.root / "jobs", execute)
         jobs.start()
         jobs.submit(VIDEO_ID, VIDEO)
         jobs.submit(SEARCH_ID, SEARCH)
-        await eventually(lambda: jobs.get(VIDEO_ID)["state"] == "running")
+        await eventually(lambda: all(jobs.get(ident)["state"] == "running" for ident in (VIDEO_ID, SEARCH_ID)))
         await jobs.close()
         self.assertEqual(jobs.get(VIDEO_ID)["state"], "needs_review")
-        self.assertEqual(jobs.get(SEARCH_ID)["state"], "queued")
+        self.assertEqual(jobs.get(SEARCH_ID)["state"], "needs_review")
 
     async def test_console_cancel_only_selects_the_owner_public_job(self):
         scope = "qq:FriendMessage:123"
@@ -200,7 +253,7 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
             creds=SimpleNamespace(values={"video_worker_token": "worker-token"}),
             public_job_enabled=lambda _: True, sync_video_worker=lambda: "worker-token",
             public_jobs=jobs, room_snapshot=None, astro=self.root / "missing", settings_sync=None,
-            bridge_settings=bridge, ledger=ledger,
+            bridge_settings=bridge, ledger=ledger, astrbot_settings=self.root / "cmd_config.json",
         )
         headers = {"Host": "127.0.0.1:6196", "Authorization": "Bearer console-token"}
         async with TestClient(TestServer(create_app(manager, "console-token"))) as client:
@@ -215,17 +268,26 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs.get(EXTRA_ID)["state"], "not_found")
         jobs.execute.assert_not_awaited()
 
-    async def test_background_launch_waits_for_shared_slot(self):
-        worker = VideoWorker(self.root, self.root, "runner", parallel=1)
-        worker._run = AsyncMock(return_value=result(SEARCH))
-        started = asyncio.Event()
-        async with worker.slots:
-            task = asyncio.create_task(worker.search("unused", "unused", SEARCH["query"],
-                                                     background_started=started.set))
-            await asyncio.sleep(0)
-            self.assertFalse(started.is_set())
-            with self.assertRaisesRegex(ValueError, "均在使用"):
-                await worker.search("unused", "unused", SEARCH["query"])
-        self.assertEqual(await task, result(SEARCH))
-        self.assertTrue(started.is_set())
-        worker._run.assert_awaited_once()
+    async def test_more_than_two_web_tasks_launch_even_while_the_desktop_is_busy(self):
+        worker = VideoWorker(self.root, self.root, "runner")
+        release = asyncio.Event()
+        launched = set()
+
+        async def run(_password, _key, _server, _patch, _execute, _upstream, *, progress, startup_timeout):
+            self.assertEqual(startup_timeout, 90)
+            launched.add(asyncio.current_task())
+            await release.wait()
+            return result(SEARCH)
+
+        worker._run = run
+        jobs = PublicJobs(self.root / "jobs", lambda body, started:
+            worker.search("unused", "unused", body["query"], background_started=started))
+        jobs.start()
+        self.addAsyncCleanup(jobs.close)
+        async with worker.desktop_lock:
+            for ident in (VIDEO_ID, SEARCH_ID, EXTRA_ID):
+                jobs.submit(ident, SEARCH)
+            await eventually(lambda: len(launched) == 3)
+            release.set()
+        await eventually(lambda: all(jobs.get(ident)["state"] == "completed"
+                                     for ident in (VIDEO_ID, SEARCH_ID, EXTRA_ID)))

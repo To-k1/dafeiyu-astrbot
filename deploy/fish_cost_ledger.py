@@ -12,6 +12,8 @@ from plugin.astrbot_plugin_bili_activity.cost_window import budget_day
 BUCKETS = ("interaction", "autonomous")
 YUAN = 1_000_000_000
 DEFAULT_LIMIT = 5 * YUAN
+BOUNDED_OPENAI_KIND = "openai:v41-bounded"
+BOUND_OVERRUN_KIND = "openai:v41-overrun"
 
 
 class CostLimit(Exception):
@@ -78,17 +80,29 @@ class Ledger:
         day, ident = budget_day(now), uuid4().hex
         with self.transaction() as db:
             cap, settled, reserved = self.totals(db, bucket, day)
+            if kind == BOUNDED_OPENAI_KIND and self._bound_overrun(db):
+                raise CostLimit("请求用量超出已核对的范围，已恢复整窗预留，请重试。")
             if settled + reserved + maximum > cap:
                 raise CostLimit("剩余额度不足以预留本次请求。预算日于北京时间 00:00 切换。")
             db.execute("INSERT INTO fish_cost_calls VALUES (?, ?, ?, ?, ?, NULL)",
                        (ident, bucket, day, kind, maximum))
         return ident
 
-    def settle(self, ident, actual):
+    def settle(self, ident, actual, *, bound_exceeded=False):
         if type(actual) is not int or actual < 0:
             raise ValueError("invalid settled usage")
         with self.transaction() as db:
-            db.execute("UPDATE fish_cost_calls SET actual=? WHERE id=? AND actual IS NULL", (actual, ident))
+            db.execute("UPDATE fish_cost_calls SET actual=?, kind=CASE WHEN ? THEN ? ELSE kind END "
+                       "WHERE id=? AND actual IS NULL", (actual, bound_exceeded, BOUND_OVERRUN_KIND, ident))
+
+    def has_request_bound_overrun(self):
+        with closing(sqlite3.connect(self.path, timeout=5)) as db:
+            return self._bound_overrun(db)
+
+    @staticmethod
+    def _bound_overrun(db):
+        return db.execute("SELECT 1 FROM fish_cost_calls WHERE kind=? LIMIT 1",
+                          (BOUND_OVERRUN_KIND,)).fetchone() is not None
 
     def snapshot(self):
         day = budget_day(self.clock())

@@ -72,6 +72,7 @@ if ($InstallBudgetBridge) {
     }
     Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\m3_qq.py') -Destination (Join-Path $plugin 'main.py') -Force
     Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\dsh_remote.py') -Destination $plugin -Force
+    Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\qq_zip.py') -Destination $plugin -Force
 }
 if ($InstallActivity) {
     if (Get-NetTCPConnection -State Listen -LocalPort 6185,6199 -ErrorAction SilentlyContinue) {

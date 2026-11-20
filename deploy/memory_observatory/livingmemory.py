@@ -10,12 +10,13 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .livingmemory_reader import SourceError, read_snapshot, version_from_file
+from .livingmemory_reader import SourceError, prefer_configured_scope, read_snapshot, version_from_file
 from .model import normalize
 
 
 class LocalMemorySource:
     def __init__(self, astrbot_root: Path):
+        self.root = astrbot_root
         data = astrbot_root / "data"
         plugin = "astrbot_plugin_livingmemory"
         self.db = data / "plugin_data" / plugin / "livingmemory.db"
@@ -23,7 +24,7 @@ class LocalMemorySource:
 
     def load(self):
         try:
-            raw = read_snapshot(self.db, version_from_file(self.metadata))
+            raw = prefer_configured_scope(read_snapshot(self.db, version_from_file(self.metadata)), self.root)
             snapshot = normalize(raw, allow_empty=True)
             info = {**raw["source_info"], "enabled": True, "state": "ready"}
             return snapshot, info

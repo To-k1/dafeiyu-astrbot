@@ -1,10 +1,13 @@
 import os
+import json
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing, nullcontext
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from zipfile import ZipFile
 
 import psutil
 from aiohttp.test_utils import TestClient, TestServer
@@ -14,6 +17,11 @@ if os.name == "nt":
     from deploy.desktop_manager.windows import Credentials, write_json
     from deploy.fish_cost_ledger import Ledger
     from scripts.native_archive import LM, verify
+    from plugin.astrbot_plugin_bili_activity import dsh_cards
+    from plugin.astrbot_plugin_bili_activity.core import Store as ActivityStore
+    from plugin.astrbot_plugin_bili_activity.dsh_roster import DshRoster
+    from plugin.astrbot_plugin_bili_activity.dsh_task import assignment_prompt
+    from plugin.astrbot_plugin_bili_activity.team_memory_backend import TeamMemoryBackend
 
 
 @unittest.skipUnless(os.name == "nt", "Windows desktop manager")
@@ -52,6 +60,235 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.get("/api/config", headers=self.auth) as result:
             self.assertEqual(result.status, 200)
             self.assertNotIn("private-cookie", await result.text())
+
+    async def test_shared_language_uses_owner_file_and_can_be_disabled(self):
+        from plugin.astrbot_plugin_bili_activity import shared_language
+        route = "/api/shared-language"
+        with patch.object(shared_language, "DEFAULT", "not-bundled-test-file.txt"):
+            before = await (await self.client.get(route, headers=self.auth)).json()
+            self.assertEqual(before, {"enabled": False, "filename": "", "text": ""})
+            posted = await self.client.post(route, headers=self.auth, json={"enabled": False})
+            self.assertEqual(await posted.json(), before)
+        content = "第一行\r\n另一行\n"
+        posted = await self.client.post(route, headers=self.auth, json={
+            "enabled": True, "filename": "新语言.txt", "text": content})
+        self.assertEqual(posted.status, 200)
+        self.assertIn(content, shared_language.prompt(self.manager.activity))
+        posted = await self.client.post(route, headers=self.auth, json={"enabled": False})
+        self.assertEqual((await posted.json())["text"], content)
+        self.assertEqual(shared_language.prompt(self.manager.activity), "")
+        invalid = await self.client.post(route, headers=self.auth, json={
+            "enabled": True, "filename": "../elsewhere.md", "text": "试写"})
+        self.assertEqual(invalid.status, 409)
+        self.assertIn("TXT 或 Markdown", (await invalid.json())["error"])
+
+    async def test_role_card_roundtrip_and_background_only_update(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        store = ActivityStore(self.manager.activity)
+        with closing(store.db):
+            route = "/api/dsh-team/role-card"
+            card = dsh_cards.pack("阿墨", "原人格", {"story.md": "起点", "shared/灯塔.md": "共见过灯塔"})
+            self.assertEqual((await self.client.get(route + "?action=template",
+                                                    headers={"Host": self.auth["Host"]})).status, 401)
+            preview = await self.client.post(route + "?action=preview", headers=self.auth, data=card)
+            self.assertEqual((await preview.json())["files"], ["story.md", "shared/灯塔.md"])
+            self.assertEqual(DshRoster(store, self.scope).list(), [])
+            created = await self.client.post(route + "?action=create", headers=self.auth, data=card)
+            self.assertEqual(created.status, 200)
+            agent_id = (await created.json())["id"]
+            duplicate = await self.client.post(route + "?action=create", headers=self.auth, data=card)
+            self.assertEqual(duplicate.status, 200)
+            self.assertNotEqual((await duplicate.json())["id"], agent_id)
+            previous_stories = dsh_cards.stories(store, self.scope)
+            impressions = "## 关于一位还没加入名册的角色\n我对他的第一印象"
+            update = dsh_cards.pack("阿墨", "原人格",
+                                    {"story.txt": "另一个起点", "impressions.md": impressions},
+                                    persona_file="persona.txt")
+            response = await self.client.post(route + "?action=update-background&id=" + agent_id,
+                                              headers=self.auth, data=update)
+            self.assertEqual(response.status, 200)
+            downloaded = await self.client.get(route + "?action=download&id=" + agent_id, headers=self.auth)
+            self.assertEqual(await downloaded.text(), "原人格")
+            self.assertIn(".txt", downloaded.headers["Content-Disposition"])
+            downloaded_card = dsh_cards.unpack(dsh_cards.export_card(store, agent_id, "阿墨", "原人格"))
+            self.assertEqual(downloaded_card["persona_file"], "persona.txt")
+            self.assertEqual(downloaded_card["background"], {"story.txt": "另一个起点",
+                "impressions.md": impressions, "stories/灯塔.md": "共见过灯塔"})
+            self.assertEqual(dsh_cards.stories(store, self.scope), previous_stories)
+            row = DshRoster(store, self.scope).get(agent_id)
+            self.assertEqual(row["version"], 1)
+            self.assertEqual(row["profiles"][0]["persona"], "原人格")
+            self.assertFalse((self.manager.activity / "dsh_team_memory").exists())
+            prompt = assignment_prompt(DshRoster(store, self.scope).snapshot(agent_id))
+            self.assertIn("[story.txt]\n另一个起点", prompt)
+            self.assertIn("[impressions.md]\n" + impressions, prompt)
+
+    async def test_fish_impressions_are_one_plain_document(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        store = ActivityStore(self.manager.activity)
+        route = "/api/dsh-team/library"
+        document = route + "?document=impressions"
+        with closing(store.db):
+            response = await self.client.get(document, headers=self.auth)
+            self.assertEqual(await response.json(), {"status": "empty"})
+            for filename, text in (("他人印象.md", "# 关于小弟甲\r\n旧印象"),
+                                   ("他人印象.txt", "关于小弟甲：新印象\r\n关于小弟乙：初见\r\n")):
+                saved = await self.client.post(route, headers=self.auth, json={
+                    "action": "save-impressions", "id": "fish", "filename": filename, "text": text})
+                self.assertEqual(await saved.json(), {"status": "saved"})
+                response = await self.client.get(document, headers=self.auth)
+                self.assertEqual(await response.json(), {"status": "available", "text": text,
+                                                         "filename": "大肥鱼-他人印象.txt"})
+            response = await self.client.get(route, headers=self.auth)
+            self.assertEqual(await response.json(), {"stories": []})
+            self.assertEqual(list(self.manager.activity.glob("fish_impressions.*")),
+                             [dsh_cards.fish_impressions_path(store)])
+
+    async def test_role_texts_roundtrip_independently(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        store = ActivityStore(self.manager.activity)
+        route = "/api/dsh-team/role-card"
+        library = "/api/dsh-team/library"
+        with closing(store.db):
+            persona = "# 任何标题\r\n\r\n这是原文，不含角色清单。\r\n"
+            create = await self.client.post(route + "?action=create&filename=am.txt&name=阿墨",
+                                            headers=self.auth, data=persona.encode())
+            role = (await create.json())["id"]
+            for action, kind, filename, text in (
+                    ("save-personal-story", "story", "my-story.md", "# 自选标题\r\n故事正文\r\n"),
+                    ("save-impressions", "impressions", "impressions.txt", "关于没入册的角色\r\n")):
+                saved = await self.client.post(library, headers=self.auth,
+                    json={"action": action, "id": role, "filename": filename, "text": text})
+                self.assertEqual(await saved.json(), {"status": "saved"})
+                document = await self.client.get(library + f"?document={kind}&id={role}", headers=self.auth)
+                self.assertEqual((await document.json())["text"], text)
+            revised = persona + "新版本"
+            response = await self.client.post(route + f"?action=update-background&filename=am.txt&id={role}",
+                                              headers=self.auth, data=revised.encode())
+            self.assertEqual((await response.json())["id"], role)
+            downloaded = await self.client.get(route + f"?action=download&id={role}", headers=self.auth)
+            self.assertEqual(await downloaded.text(), revised)
+            roster = DshRoster(store, self.scope)
+            self.assertEqual(roster.get(role)["name"], "阿墨")
+            self.assertEqual([p["persona"] for p in roster.get(role)["profiles"]], [persona, revised])
+            self.assertEqual(set(roster.snapshot(role)["background"]), {"story.md", "impressions.txt"})
+            self.assertIsNone(dsh_cards.load_fish_impressions(store))
+
+    async def test_agent_history_archive_carries_selected_history_and_memories_only(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        store = ActivityStore(self.manager.activity)
+        with closing(store.db):
+            roster = DshRoster(store, self.scope)
+            selected = roster.create("阿墨", "原人格")["id"]
+            other = roster.create("海玻璃", "另一个人格")["id"]
+            dsh_cards.save_background(store, selected, "阿墨", "原人格", {"impressions.txt": "关于海玻璃"})
+            long_stories = {f"stories/{name}.md": name * 10_000 for name in ("海上旧站台", "远处的海图")}
+            for path, text in long_stories.items():
+                dsh_cards.set_story(store, self.scope, filename=path.split("/")[-1], text=text, participants=[selected])
+            for agent, ident, note in ((selected, "a" * 16, "自己的对话"), (other, "b" * 16, "无关的对话")):
+                store.setting(f"dsh-chat:v1:{self.scope}:{ident}", {"id": ident, "agent_id": agent, "result": note})
+            path = self.manager.activity / "dsh_team_memory"
+            path.mkdir()
+            with closing(sqlite3.connect(path / "livingmemory.db")) as db, db:
+                db.execute("CREATE TABLE documents(id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)")
+                for agent in (selected, other):
+                    session, persona = TeamMemoryBackend.agent_scope(agent)
+                    db.execute("INSERT INTO documents(text,metadata) VALUES (?,?)", ("真实经历", json.dumps({
+                        "fishhome_owner": agent, "session_id": session, "persona_id": persona,
+                        "adapter_id": "fishhome-dsh:" + agent, "fishhome_source_ref": {"ref": "chat:" + "a" * 16}})))
+            reply = await self.client.get("/api/dsh-team/role-card?action=history&id=" + selected, headers=self.auth)
+            self.assertEqual(reply.status, 200)
+            body = await reply.read()
+            with ZipFile(BytesIO(body)) as archive:
+                self.assertEqual(json.loads(archive.read("identity.json"))["id"], selected)
+                self.assertEqual([row["source"]["result"] for row in json.loads(archive.read("history.json"))], ["自己的对话"])
+                memory = json.loads(archive.read("memories.json"))
+                self.assertEqual([row["metadata"]["fishhome_owner"] for row in memory], [selected])
+            preview = await self.client.post("/api/dsh-team/role-card?action=preview-copy", headers=self.auth, data=body)
+            self.assertEqual((await preview.json())["original_id"], selected)
+            self.assertEqual(len(roster.list()), 2)
+            imported = await self.client.post("/api/dsh-team/role-card?action=copy", headers=self.auth, data=body)
+            self.assertEqual(imported.status, 200)
+            value = await imported.json()
+            self.assertNotEqual(value["id"], selected)
+            self.assertEqual(value["name"], "阿墨")
+            self.assertEqual(roster.get(value["id"])["status"], "paused")
+            self.assertEqual(dsh_cards.load_background(store, value["id"]),
+                             {"impressions.txt": "关于海玻璃", **long_stories})
+            progress = await self.client.get("/api/dsh-team/role-card?action=copy-status&id=" + value["id"],
+                                             headers=self.auth)
+            self.assertEqual(await progress.json(), {"state": "pending", "copied": 0, "total": 1})
+            self.assertEqual(roster.get(selected)["name"], "阿墨")
+
+    async def test_shared_story_is_one_file_and_archive_preserves_mode(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        write_json(self.manager.astrbot_settings, {"agent_runner": {"runner_type": "local",
+            "config": {"persona": {"persona_id": "fish-home-v3.0"}}}})
+        store = ActivityStore(self.manager.activity)
+        with closing(store.db):
+            roster = DshRoster(store, self.scope)
+            ids = [roster.create("同名角色", "设定")["id"] for _ in range(2)]
+            route = "/api/dsh-team/library"
+            response = await self.client.post(route, headers=self.auth, json={"action": "save-story",
+                "filename": "旧站台.txt", "text": "共同出厂故事", "participants": [*ids, dsh_cards.FISH_PARTICIPANT]})
+            self.assertEqual(response.status, 200)
+            story_id = (await response.json())["id"]
+            source = "共同出厂故事\r\n\r\n" + "长篇正文" * 4000 + "\r\n尾声\r\n"
+            changed = await self.client.post(route, headers=self.auth, json={"action": "save-story",
+                "id": story_id, "filename": "旧站台.txt", "text": source, "participants": [*ids, dsh_cards.FISH_PARTICIPANT]})
+            self.assertEqual(changed.status, 200)
+            downloaded = await self.client.get(route + "?id=" + story_id, headers=self.auth)
+            self.assertEqual((await downloaded.json())["text"], source)
+            pages = []
+            offset = 0
+            while offset is not None:
+                page = dsh_cards.read_story(store, self.scope, story_id, offset)
+                pages.append(page["text"])
+                offset = page["next_offset"]
+            self.assertEqual("".join(pages), source)
+            self.assertEqual(len(list((self.manager.activity / "role_stories").glob("*.txt"))), 1)
+            exported = [dsh_cards.unpack(dsh_cards.export_card(store, agent, "同名角色", "设定")) for agent in ids]
+            self.assertEqual([card["stories"] for card in exported], [{"stories/旧站台.txt": story_id}] * 2)
+            self.assertEqual([card["fish_stories"] for card in exported], [["stories/旧站台.txt"]] * 2)
+            for action, ident in (("story-status", story_id), ("role-status", ids[0])):
+                done = await self.client.post(route, headers=self.auth, json={"action": action, "id": ident, "status": "archived"})
+                item = await done.json()
+                self.assertEqual((item["status"], item["persona_mode"]), ("archived", "test"))
+            self.assertFalse(dsh_cards.load_background(store, ids[1]))
+            restored = await self.client.post(route, headers=self.auth,
+                json={"action": "story-status", "id": story_id, "status": "active"})
+            self.assertEqual(restored.status, 200)
+            self.assertEqual(dsh_cards.load_background(store, ids[1]), {"stories/旧站台.txt": source})
+            self.assertEqual(roster.get(ids[0])["status"], "archived")
+            with tempfile.TemporaryDirectory() as target:
+                target_store = ActivityStore(Path(target))
+                with closing(target_store.db):
+                    elsewhere = DshRoster(target_store, self.scope)
+                    for card in exported:
+                        copied = elsewhere.create(card["name"], card["persona"])["id"]
+                        dsh_cards.import_card_files(target_store, self.scope, copied, card["name"], card)
+                    library = dsh_cards.stories(target_store, self.scope)
+                    self.assertEqual(len(library), 1)
+                    self.assertEqual(len(library[0]["participants"]), 3)
+                    self.assertIn(dsh_cards.FISH_PARTICIPANT, library[0]["participants"])
+            self.assertFalse((self.manager.activity / "dsh_team_memory").exists())
+
+    async def test_task_and_meeting_console_groups_keep_role_library_shared(self):
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        write_json(self.manager.astrbot_settings, {"agent_runner": {"runner_type": "local",
+            "config": {"persona": {"persona_id": "feiyu-v3.0"}}}})
+        store = ActivityStore(self.manager.activity)
+        with closing(store.db):
+            for kind, title in (("commissioned-file", "source"), ("dsh-meeting", "topic")):
+                for mode in ("test", "formal"):
+                    store.setting(f"{kind}:v1:{self.scope}:{mode}", {"id": mode, title: mode, "created": 1,
+                        **({"persona_mode": "formal"} if mode == "formal" else {})})
+            for view, expected in (("current", "formal"), ("test", "test")):
+                reply = await self.client.get("/api/dsh-team?view=" + view, headers=self.auth)
+                data = await reply.json()
+                self.assertEqual(data["group"], expected)
+                self.assertEqual([row["id"] for row in data["jobs"]], [expected])
+                self.assertEqual([row["id"] for row in data["meetings"]], [expected])
 
     def test_extra_admin_cannot_bypass_private_whitelist(self):
         self.assertEqual(qq_owner(self.config, "12345"), self.scope)

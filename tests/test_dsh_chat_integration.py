@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 from test_bili_activity import main, core, FakeEvent, SCOPE
 from bili_activity_test.dsh_chats import DshChats
+from bili_activity_test.dsh_meetings import DshMeetings
 from bili_activity_test.dsh_roster import DshRoster
 
 
@@ -69,6 +70,67 @@ class ChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original['profiles'][-1]['persona'], 'Original persona.')
         self.assertEqual(len(self.jobs.list()), 1)
         self.plugin.start_dsh_chat_worker.assert_called_once()
+
+    async def test_meeting_side_chat_is_internal_but_explicit_owner_reply_still_delivers(self):
+        roster = DshRoster(self.plugin.store, SCOPE)
+        agents = [roster.create(name, "Persona") for name in ("甲", "乙")]
+        DshMeetings(self.plugin.store, SCOPE).create(
+            "闲聊", [roster.snapshot(agent["id"]) for agent in agents], "background", 1, 0, 0, "test", style="casual")
+        event = FakeEvent()
+        internal = json.loads(await self.plugin.dsh_chat(event, "会议旁路发言", agents[0]["id"]))
+        direct = json.loads(await self.plugin.dsh_chat(event, "主人明确等答复", agents[1]["id"], report_to_owner=True))
+        followup = FakeEvent()
+        followup._extra["df_dsh_chat_completion"] = direct["id"]
+        cascade = json.loads(await self.plugin.dsh_chat(followup, "后台再问一句", agents[1]["id"], report_to_owner=True))
+        self.assertEqual([r["report_to_owner"] for r in (internal, direct, cascade)], [False, True, False])
+        for receipt in (internal, direct, cascade):
+            row = self.jobs.get(receipt["id"])
+            self.jobs._save({**row, "status": "completed", "result": "reply"})
+        self.plugin.wake_dsh_chat = AsyncMock(return_value="summary")
+        sender = types.SimpleNamespace(enqueue_text=AsyncMock(return_value={"fishhome_queue_id": "one"}))
+        self.plugin.sender = lambda: sender
+        self.plugin.qq_outbox = lambda *_: object()
+        await self.plugin.dispatch_dsh_chats(SCOPE, "12345")
+        sender.enqueue_text.assert_awaited_once()
+        self.assertIn(direct["id"], sender.enqueue_text.await_args.args[2])
+
+    async def test_explicit_meeting_close_queues_exactly_one_owner_message(self):
+        self.plugin.team_notice = AsyncMock(return_value="散场报告")
+        source = types.SimpleNamespace(enqueue_text=AsyncMock(return_value={"fishhome_queue_id": "one"}))
+        self.plugin.sender = lambda: source
+        self.plugin.qq_outbox = lambda *_: object()
+        row = {"autonomous": False, "report_on_close": True, "transcript": [
+            {"kind": "member", "agent_id": "one", "name": "甲", "round": 1, "text": "引用原文"}]}
+        for kind in ("progress", "completed"):
+            self.assertTrue(await self.plugin.deliver_meeting_notice(
+                SCOPE, row, {"kind": kind, "notice_id": f"meeting:1:{kind}"}, lambda _: True))
+        await self.plugin.deliver_meeting_notice(
+            SCOPE, {**row, "report_on_close": False}, {"kind": "completed", "notice_id": "other"}, lambda _: True)
+        source.enqueue_text.assert_awaited_once_with(SCOPE, "散场报告", "dsh-meeting:meeting:1:completed")
+        self.assertEqual(self.plugin.team_notice.await_args_list[1].args[2]["opening_responses"][0]["text"], "引用原文")
+
+    async def test_test_roster_mirrors_profiles_under_separate_persistent_ids(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder)
+            (data / "cmd_config.json").write_text(json.dumps({"agent_runner": {"config": {"persona_id": "feiyu-v3.0"}}}))
+            store = core.Store(data / "plugin_data" / "activity")
+            try:
+                roster = DshRoster(store, SCOPE)
+                official = roster.create("乌檐", "正式设定版本一")
+                [fixture] = roster.refresh_test_profiles()
+                self.assertNotEqual(fixture, official["id"])
+                self.assertEqual(DshRoster(store, SCOPE, current_mode=True).resolve("乌檐"), official["id"])
+                (data / "cmd_config.json").write_text(json.dumps({"agent_runner": {"config": {"persona_id": "fish-home-v3.0"}}}))
+                scoped = DshRoster(store, SCOPE, current_mode=True)
+                self.assertEqual(scoped.resolve("乌檐"), fixture)
+                with self.assertRaises(ValueError):
+                    scoped.snapshot(official["id"])
+                roster.update(official["id"], persona="正式设定版本二")
+                self.assertEqual(roster.refresh_test_profiles(), [fixture])
+                self.assertEqual(scoped.snapshot(fixture)["persona"], "正式设定版本二")
+                self.assertEqual(scoped.snapshot(fixture)["version"], 2)
+            finally:
+                store.db.close()
 
     async def test_reply_is_kept_when_qq_offline_and_model_not_called_twice(self):
         row = self.jobs.enqueue('Question', '', 'source')

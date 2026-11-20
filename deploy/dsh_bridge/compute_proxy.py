@@ -22,12 +22,26 @@ def forward(port, token, payload):
         connection.close()
 
 
-def main(port, token_file):
+def dispatch(port, token, payload, request, *, disposable=False):
+    if disposable and request["method"] == "tools/call" and (request.get("params") or {}).get("name") != "run_python":
+        return json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {
+            "code": -32602, "message": "This session supports disposable Python only",
+        }}).encode("utf-8")
+    result = forward(port, token, payload)
+    if disposable and request["method"] == "tools/list" and result is not None:
+        response = json.loads(result)
+        if "result" in response:
+            response["result"]["tools"] = [tool for tool in response["result"]["tools"] if tool["name"] == "run_python"]
+            result = json.dumps(response).encode("utf-8")
+    return result
+
+
+def main(port, token_file, *, disposable=False):
     token = token_file.read_text(encoding="ascii").strip()
     for payload in sys.stdin.buffer:
         request = json.loads(payload)
         try:
-            result = forward(port, token, payload)
+            result = dispatch(port, token, payload, request, disposable=disposable)
         except (OSError, http.client.HTTPException):
             if "id" not in request:
                 continue
@@ -40,4 +54,4 @@ def main(port, token_file):
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]), Path(sys.argv[2]))
+    main(int(sys.argv[1]), Path(sys.argv[2]), disposable=sys.argv[3:] == ["disposable"])

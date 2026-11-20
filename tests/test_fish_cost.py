@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,9 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from deploy.fish_cost import OUTPUT_LIMIT, PRICE_FILE, create_app, load_prices, normalize_model, stream_usage
+from deploy.fish_cost_prompt import IMAGE_TOKEN_LIMIT, openai_input_quote
+from plugin.astrbot_plugin_bili_activity.commissioned import CommissionedFiles
+from plugin.astrbot_plugin_bili_activity.core import Store
 
 
 def _vision_request(role, url):
@@ -22,6 +26,18 @@ def _vision_request(role, url):
 
 
 class VisionGatewayTests(unittest.TestCase):
+    def test_quote_counts_text_tools_and_picture_allowance_without_base64(self):
+        text = {"model": "deepseek-flash", "messages": [{"role": "user", "content": "鲸鱼🐋"}]}
+        tool = {"type": "function", "function": {"name": "lookup", "description": "x" * 5000,
+                                                    "parameters": {"type": "object"}}}
+        self.assertGreater(openai_input_quote({**text, "tools": [tool]}), openai_input_quote(text) + 5000)
+        short_image = _vision_request("user", "data:image/jpeg;base64,YWJj")
+        long_image = _vision_request("user", "data:image/jpeg;base64," + "YWJj" * 100_000)
+        self.assertEqual(openai_input_quote(short_image), openai_input_quote(long_image))
+        self.assertGreaterEqual(openai_input_quote(short_image) - openai_input_quote({**text, "messages": [
+            {"role": "user", "content": ""}]}), IMAGE_TOKEN_LIMIT)
+        self.assertIsNone(openai_input_quote({**text, "user_context": "unmodeled metadata"}))
+
     def test_only_inline_user_images_are_accepted_on_openai_route(self):
         inline = "data:image/jpeg;base64,YWJj"
         self.assertEqual(normalize_model(_vision_request("user", inline), "openai"), OUTPUT_LIMIT)
@@ -107,8 +123,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await fake.start_server()
         self.addAsyncCleanup(fake.close)
         self.keys = {"interaction": "interactive-test-credential-1234", "autonomous": "autonomous-test-credential-1234"}
+        self.upstream_base = str(fake.make_url("/")).rstrip("/")
         app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, "fake-upstream-only",
-                         upstream_base=str(fake.make_url("/")).rstrip("/"))
+                         upstream_base=self.upstream_base)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
@@ -133,6 +150,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             await self.release.wait()
         if body["messages"][0]["content"] == "unknown":
             return web.json_response({"choices": []})
+        if body["messages"][0]["content"] == "unexpected-count":
+            return web.json_response({"usage": {"prompt_tokens": 10_000, "prompt_cache_hit_tokens": 9999,
+                                                 "completion_tokens": 2}})
         if body.get("stream"):
             return web.Response(text='data: {"usage":{"prompt_tokens":14,"prompt_cache_hit_tokens":10,"completion_tokens":2}}\n\ndata: [DONE]\n\n',
                                 content_type="text/event-stream")
@@ -183,6 +203,79 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(path, model | {"model": "deepseek-v4-pro"})).status, 400)
         self.assertEqual((await self.post(path, model | {"tools": [{"type": "web_search"}]})).status, 400)
         self.assertEqual(len(self.calls), 2)
+
+    async def test_request_quote_uses_small_balance_atomically_and_holds_missing_usage(self):
+        app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, "fake-upstream-only",
+                         upstream_base=self.upstream_base, use_request_bounds=True)
+        path = "/openai/interaction/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {self.keys['interaction']}"}
+        model = {"model": "deepseek-flash", "max_tokens": 40, "messages": [{"role": "user", "content": "wait"}]}
+        cap = openai_input_quote(model) * 2000 + model["max_tokens"] * 8000
+        self.ledger.adjust("interaction", str(cap / 1_000_000_000), temporary=True)
+        async with TestClient(TestServer(app)) as client:
+            first = asyncio.create_task(client.post(path, json=model, headers=headers))
+            try:
+                await asyncio.wait_for(self.entered.wait(), 5)
+                rejected = await client.post(path, json=model, headers=headers)
+                self.assertEqual(rejected.status, 402)
+            finally:
+                self.release.set()
+                self.assertEqual((await first).status, 200)
+            self.ledger.adjust("interaction", "0.02", temporary=True)
+            unknown = model | {"messages": [{"role": "user", "content": "unknown"}]}
+            accepted = await client.post(path, json=unknown, headers=headers)
+            self.assertEqual(accepted.status, 200)
+            held = self.ledger.snapshot()["ledgers"]["interaction"]["reserved"]
+            self.assertEqual(amount(held), openai_input_quote(unknown) * 2000 + 40 * 8000)
+            opaque = model | {"user_context": "hidden"}
+            self.assertEqual((await client.post(path, json=opaque, headers=headers)).status, 402)
+            self.assertEqual(len(self.calls), 2)
+
+    async def test_count_overrun_disables_request_quote_even_with_cache_discount(self):
+        app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, "fake-upstream-only",
+                         upstream_base=self.upstream_base, use_request_bounds=True)
+        self.ledger.adjust("interaction", "0.2", temporary=True)
+        path = "/openai/interaction/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {self.keys['interaction']}"}
+        model = {"model": "deepseek-flash", "max_tokens": 40,
+                 "messages": [{"role": "user", "content": "unexpected-count"}]}
+        async with TestClient(TestServer(app)) as client:
+            self.assertEqual((await client.post(path, json=model, headers=headers)).status, 200)
+            self.assertTrue(self.ledger.has_request_bound_overrun())
+            self.assertFalse((await (await client.get("/balance", headers=headers)).json())["request_bounds"])
+            self.assertEqual((await client.post(path, json=model, headers=headers)).status, 402)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_zero_rmb_gateway_can_still_deliver_a_verified_go_commission(self):
+        self.ledger.adjust("interaction", "0", temporary=True)
+        with tempfile.TemporaryDirectory() as folder, closing(Store(folder)) as store:
+            owner, scope = "12345", "qq:FriendMessage:12345"
+            jobs = CommissionedFiles(store)
+            ident = jobs.accept(scope, owner, "original-request", {
+                "cwd": r"D:\FishHome\commission-files", "source": "sample.csv", "instruction": "Count rows"},
+                require_go=True, wake_agent=True)
+            key = jobs._key(scope, ident)
+            original = "sample.csv has two rows.\nFILE-EOF"
+            task = store.get_setting(key)
+            store.setting(key, {**task, "state": "completed", "result": original,
+                                "usage": {"billing_source": "go", "go_receipts": [{"source": "go"}]}})
+
+            statuses = []
+            async def blocked_reply(_task):
+                response = await self.post("/openai/interaction/v1/chat/completions", {
+                    "model": "deepseek-flash", "messages": [{"role": "user", "content": "Report the result"}]})
+                statuses.append(response.status)
+                raise RuntimeError((await response.json())["error"]["code"])
+
+            enqueue = AsyncMock(return_value={"fishhome_queue_id": "queued-once"})
+            await jobs.dispatch_next(scope, owner, None, None, lambda _task: True,
+                                     ready=lambda: False, wake=blocked_reply, enqueue=enqueue)
+            self.assertEqual(statuses, [402])
+            enqueue.assert_awaited_once()
+            self.assertTrue(enqueue.call_args.args[1].endswith(original))
+            self.assertEqual(store.get_setting(key)["delivery"], "queued")
+        self.assertFalse(self.calls)
+        self.assertEqual(self.ledger.snapshot()["ledgers"]["interaction"]["remaining"], "0")
 
     async def test_offline_setup_serves_balance_without_forwarding_or_reserving(self):
         app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, None, offline=True)

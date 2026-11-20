@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from contextlib import closing
@@ -17,6 +18,7 @@ if "bili_activity_test" not in sys.modules:
 from bili_activity_test import core
 from bili_activity_test.dsh_chats import DshChats
 from bili_activity_test.dsh_roster import DshRoster
+from bili_activity_test.dsh_history_archive import copy_from_archive, read_archive, snapshot
 
 SCOPE = "qq:FriendMessage:12345"
 
@@ -54,6 +56,138 @@ class Runner:
 
 
 class ChatsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_named_chat_returns_anonymous_evidence_to_the_same_native_session(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            (Path(folder) / "shared-language.json").write_text(json.dumps({
+                "enabled": True, "filename": "language.txt", "text": "测试角色的共同语言"
+            }), encoding="utf-8")
+            agent = DshRoster(store, SCOPE).create("潮汐笔记", "私有角色文本")['id']
+            chats = DshChats(store, SCOPE)
+            job = chats.enqueue("去查两个出处，回来表达你的判断", agent, "source-1")
+            runner, lock = Runner(), asyncio.Lock()
+            calls = []
+            queued = set()
+
+            async def worker(method, ident, body=None):
+                calls.append((method, ident, body))
+                if method == "PUT":
+                    queued.add(ident)
+                    return {"id": ident, "state": "queued"}
+                if ident not in queued:
+                    return {"id": ident, "state": "not_found"}
+                return {"id": ident, "state": "completed", "report": {
+                    "kind": "dsh_web_search", "summary": "evidence only", "billing": [{"source": "go"}],
+                    "evidence": [{"url": "https://docs.python.org/3/", "title": "Python"}]}}
+
+            runner.delegate_public = worker
+            runner.delegate_kinds = ("web",)
+            args = (lambda row: runner, lambda row: "workspace", lambda row: True, None,
+                    lambda scope, ident: lock)
+            async def wait_for_turn(client, turn):
+                runner.done.add(turn["request_id"])
+                if len(runner.prompts) == 1:
+                    return ('<fishhome_delegate>[{"kind":"web","query":"first evidence"},'
+                            '{"kind":"web","query":"second evidence"}]</fishhome_delegate>')
+                return "我的判断有可靠来源。"
+
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=wait_for_turn):
+                await chats.dispatch_next(*args)
+                self.assertEqual(chats.get(job["id"])["status"], "running")
+                self.assertEqual(len(runner.prompts), 1)
+                # Simulate a fresh scheduler resuming the saved parent and child IDs.
+                chats = DshChats(store, SCOPE)
+                await chats.dispatch_next(*args)
+                await chats.dispatch_next(*args)
+            completed = chats.get(job["id"])
+            self.assertEqual((completed["status"], completed["result"], completed["go_receipt_count"]),
+                             ("completed", "我的判断有可靠来源。", 2))
+            self.assertEqual(len(runner.prompts), 2)
+            sent = runner.prompts[0]["content"][0]["text"]
+            self.assertIn("私有角色文本", sent)
+            self.assertIn("测试角色的共同语言", sent)
+            self.assertEqual(runner.prompts[0]["sessionId"], runner.prompts[1]["sessionId"])
+            self.assertIn("https://docs.python.org/3/", runner.prompts[1]["content"][0]["text"])
+            self.assertEqual([body for method, _, body in calls if method == "PUT"], [
+                {"kind": "web", "query": "first evidence"}, {"kind": "web", "query": "second evidence"}])
+            self.assertEqual(completed["tool_delegations"][0]["actor"], agent)
+
+    async def test_legacy_chat_uses_exact_request_on_original_route_and_releases_the_next(self):
+        for exact in (True, False):
+            with self.subTest(exact=exact), tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+                class CommissionRunner(Runner):
+                    async def call(self, method, args):
+                        if method == "session.state":
+                            return {"running": False}
+                        result = await super().call(method, args)
+                        if method == "session.prompt":
+                            self.done.add(args["requestId"])
+                        return result
+
+                class MissingRunner(Runner):
+                    async def call(self, method, args):
+                        raise ValueError("DSH 拒绝 session.state（session/not-found）")
+
+                roster = DshRoster(store, SCOPE)
+                agent = roster.create("A", "persona")["id"]
+                logical = roster.new_session(agent, "旧话题")["id"]
+                roster.set_native_session(agent, logical, "legacy-native")
+                chats = DshChats(store, SCOPE)
+                old = chats.enqueue("原文", agent, "previous", autonomous=True, session_id=logical)
+                old.update(status="running", turn={"session_id": "legacy-native", "request_id": "original",
+                    "model_route": "go", "receipt_count": 0, "version": 1})
+                chats._save(old)
+                next_chat = chats.enqueue("后续问句", agent, "new", autonomous=True, session_id=logical)
+                runner = CommissionRunner()
+                if exact:
+                    runner.prompts.append({"sessionId": "legacy-native", "requestId": "original",
+                                           "content": [{"type": "text", "text": "旧的已提交正文"}]})
+                    runner.done.add("original")
+                lane = {"commission": runner, "life": MissingRunner()}
+                lock = asyncio.Lock()
+                settings = (lambda row: lane[row["execution_route"]], lambda row: "workspace",
+                            lambda row: True, None, lambda scope, ident: lock)
+                await chats.dispatch_next(*settings, resolve_routes=True)
+                await chats.dispatch_next(*settings, resolve_routes=True)
+                old = chats.get(old["id"])
+                self.assertEqual(old["status"], "completed" if exact else "needs_review")
+                if exact:
+                    self.assertEqual(old["request_id"], "original")
+                else:
+                    self.assertEqual(old["failure"]["code"], "native_route_unconfirmed")
+                    self.assertEqual(old["delivery"], "uncertain")
+                self.assertTrue(old["autonomous"])
+                self.assertEqual(roster._session(roster.get(agent), logical)["native_route"], "commission")
+                self.assertEqual(chats.get(next_chat["id"])["turn"]["execution_route"], "commission")
+                self.assertEqual(chats.get(next_chat["id"])["status"], "completed")
+                self.assertEqual(len(runner.prompts), 2 if exact else 1)
+
+    async def test_copied_session_continues_in_new_native_session_without_replaying_jobs(self):
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            roster = DshRoster(store, SCOPE)
+            original = roster.create("原角色", "人格")["id"]
+            session = roster.new_session(original, "潮汐")
+            roster.set_native_session(original, session["id"], "old-dsh-session")
+            chats = DshChats(store, SCOPE)
+            first = chats.enqueue("能说明当时的约定吗？", original, "old-request")
+            first.update(status="completed", result="只看原始日期", delivery="notified")
+            chats._save(first)
+            copied = copy_from_archive(store, SCOPE, read_archive(snapshot(store, SCOPE, original)))
+            copy_id = copied["id"]
+            self.assertEqual(len(chats.list()), 1)
+            logical = roster.list_sessions(copy_id)[0]
+            self.assertNotEqual(logical["id"], session["id"])
+            self.assertIsNone(logical["native_session"])
+            copy_turn = chats.enqueue("继续聊", copy_id, "new-request")
+            runner, lock = Runner(), asyncio.Lock()
+            with patch("bili_activity_test.dsh_chats._wait_for_turn", new=AsyncMock(side_effect=TimeoutError)):
+                await chats.dispatch_next(lambda _: runner, lambda _: "workspace", lambda _: True, None,
+                                          lambda scope, agent: lock)
+            self.assertEqual(len(runner.prompts), 1)
+            self.assertNotEqual(runner.prompts[0]["sessionId"], "old-dsh-session")
+            self.assertIn("只看原始日期", runner.prompts[0]["content"][0]["text"])
+            self.assertEqual(chats.get(copy_turn["id"])["agent_id"], copy_id)
+            self.assertEqual(roster.list_sessions(original)[0]["native_session"], "old-dsh-session")
+
     async def test_historical_review_recovers_original_without_paid_continuation(self):
         with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
             roster = DshRoster(store, SCOPE)

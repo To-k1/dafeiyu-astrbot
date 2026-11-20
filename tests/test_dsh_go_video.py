@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from deploy.dsh_bridge.go_profile import MODEL, PROVIDER
+from deploy.dsh_bridge.go_profile import MODEL, PROVIDER, render_file_go_patch, render_go_patch
 from deploy.fish_cost import create_app
 from deploy.fish_cost_ledger import Ledger
 from deploy.dsh_bridge.go_relay import GoRelay, GoReceipt, subscription_receipt
@@ -26,6 +26,14 @@ BVID = "BV1g8Wq6DEXj"
 
 
 class GoVideoTests(unittest.IsolatedAsyncioTestCase):
+    def test_persistent_and_disposable_go_workers_use_the_native_deepseek_effort(self):
+        for patch in (render_go_patch("session-test"), render_file_go_patch("interaction", Path("header.mjs"))):
+            provider = patch[0]["config"]["providers"][PROVIDER]
+            self.assertEqual(provider["reasoning"], "max")
+            self.assertEqual(provider["models"][0]["reasoningEfforts"]["max"], "max")
+            self.assertEqual(provider["compat"]["thinkingFormat"], "deepseek")
+            self.assertTrue(provider["compat"]["requiresReasoningContentOnAssistantMessages"])
+
     def test_task_description_and_search_query_have_separate_limits(self):
         long_query = "资料" * 300
         self.assertEqual(validate_task_query(long_query), long_query)
@@ -164,6 +172,29 @@ class GoVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], ("Bearer provider-only-secret", "job-1", request | {"stream_options": {"include_usage": True}}))
         self.assertEqual(relay.receipts, [GoReceipt("go", Decimal("0.00031"), 10, 3)])
+
+    async def test_missing_done_requires_finish_and_a_valid_subscription_receipt(self):
+        async def provider(request):
+            body = await request.json()
+            events = [{"choices": [{"finish_reason": "stop"}]}] if body["messages"] else []
+            events.append({"usage": USAGE})
+            return web.Response(text="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+                                content_type="text/event-stream")
+
+        app = web.Application()
+        app.router.add_post("/chat/completions", provider)
+        async with TestServer(app) as upstream:
+            for finished in (True, False):
+                relay = GoRelay("provider-secret", "isolated-token-not-provider-key", "job",
+                                upstream=str(upstream.make_url("")).rstrip("/"))
+                async with TestClient(TestServer(relay.create_app())) as client:
+                    response = await client.post("/v1/chat/completions", headers={
+                        "Authorization": "Bearer isolated-token-not-provider-key", "x-opencode-session": "job"},
+                        json={"model": MODEL, "stream": True,
+                              "messages": [{"role": "user", "content": "test"}] if finished else []})
+                    self.assertEqual("[DONE]" in await response.text(), finished)
+                    self.assertEqual(bool(relay.receipts), finished)
+                    self.assertEqual(bool(relay.failure), not finished)
 
     async def test_task_input_is_link_only_and_reply_is_distinct_from_personal_viewing(self):
         class Client:

@@ -242,7 +242,8 @@ class MethodIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         async def agent(event, prompt, tools, max_steps):
             nonlocal attempt_id
-            self.assertEqual(tools, main.LIFE_TOOLS | main.WORKSHOP_TOOLS | main.METHOD_TOOLS | {"df_share_thought"})
+            self.assertEqual(tools, main.LIFE_TOOLS | main.WORKSHOP_TOOLS | main.METHOD_TOOLS
+                             | {"df_share_thought", main.STORY_TOOL})
             self.assertIn(method["title"], prompt)
             seen.append(event.get_extra("df_run_id"))
             if len(seen) == 1:

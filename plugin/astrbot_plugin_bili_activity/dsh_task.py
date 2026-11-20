@@ -9,7 +9,9 @@ from pathlib import PurePosixPath, PureWindowsPath
 from time import time
 from uuid import uuid4
 
+from . import team_delegation
 from .cost_window import budget_day, peak_end
+from .dsh_cards import background_prompt
 
 
 BRIDGE = "fishhome_dsh_life_client"
@@ -19,6 +21,7 @@ FILE_PRESET = "fishhome-files"
 DRAFT_PRESET = "fishhome-draft"
 CHAT_PRESET = "fishhome-chat"
 COMPUTE_PRESET = "fishhome-compute"
+LOCAL_COMPUTE_PRESET = "fishhome-local-compute"
 FILE_GO_MODEL = {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}
 FILE_DEEPSEEK_MODEL = {"provider": "deepseek-official", "model": "deepseek-flash"}
 PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -34,6 +37,10 @@ class FileInterrupted(ValueError):
         self.action = action
 
 
+class FileToolsPending(Exception):
+    """A saved tool request is still running. The scheduler can tend other tasks."""
+
+
 class DshTaskFailure(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
@@ -42,7 +49,10 @@ class DshTaskFailure(ValueError):
 
 def reset_unstarted_go_task(task):
     if task.get("pending_memory_prompt") and task.get("session_id"):
+        previous = task["request_id"]
         task.update(state="memory_continue", request_id=uuid4().hex)
+        if task.get("tool_delegations") and task["tool_delegations"][-1].get("continuation_request") == previous:
+            task["tool_delegations"][-1]["continuation_request"] = task["request_id"]
         if task.get("memory_queries"):
             task["memory_queries"][-1]["continuation_request_id"] = task["request_id"]
         return
@@ -100,10 +110,11 @@ def agent_receipt(agent):
             "guides": [{key: guide[key] for key in ("id", "title", "version")} for guide in agent.get("guides", [])]}
 
 
-def assignment_prompt(agent):
+def assignment_prompt(agent, language=""):
     guides = "\n".join(f"Guide {guide['title']} (v{guide['version']}):\n{guide['text']}"
                        for guide in agent.get("guides", []))
     return (f"Act as {agent['name']} using the following persona (v{agent['version']}).\n{agent['persona']}\n"
+            + language + background_prompt(agent.get("background")) +
             f"Use the selected work guides only for this task. They do not grant additional tool permissions.\n{guides}\n")
 
 
@@ -245,18 +256,29 @@ def _memory_decode(client, agent_id, reply, target):
         return reply
 
 
-async def execute_file_task(client, task, save, may_submit, requested_control=lambda: ""):
+async def execute_file_task(client, task, save, may_submit, requested_control=lambda: "", *, language=""):
     """Submit once and verify artifacts against the recorded request."""
     reference = task["source"]
     source_path = (reference.removeprefix("shared/") if reference and PureWindowsPath(task["cwd"]).name == "shared"
                    else reference)
+    agent_id = (task.get("agent") or {}).get("id")
+    delegation = task.get("delegation") or {}
+    actor = agent_id or delegation.get("actor")
+    kinds = getattr(client, "delegate_kinds", ()) if actor and getattr(client, "model_route", None) == "go" else ()
+    compute_enabled = getattr(client, "compute_enabled", False) is True
+    compute = bool(task.get("compute") or task["source"] and not delegation and compute_enabled)
+    kinds = tuple(kind for kind in kinds if (kind != "python" or (compute and compute_enabled))
+                  and (not delegation or kind in team_delegation.LOCAL_KINDS)
+                  and (kind != "file" or task["source"] or task.get("shared")))
+    guidance = team_delegation.guidance(kinds, reference)
     if task["state"] == "prepared":
         preset = None
-        compute_enabled = getattr(client, "compute_enabled", False) is True
         if task.get("compute") and not compute_enabled:
             raise ValueError("DSH Python execution is unavailable")
-        if (task["source"] is not None or task.get("compute")) and compute_enabled:
-            preset = COMPUTE_PRESET
+        if compute and compute_enabled:
+            preset = LOCAL_COMPUTE_PRESET if delegation else COMPUTE_PRESET
+        elif delegation:
+            preset = CHAT_PRESET
         elif task.get("shared"):
             preset = FILE_PRESET
         elif task["billing"] == "interaction" or task.get("agent_selected"):
@@ -264,7 +286,11 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
         session_id, route = await _open_session(client, task["cwd"], preset)
         input_fingerprint = None
         if preset and task["source"] is not None:
-            source = await _read_text(client, {**task, "session_id": session_id}, source_path)
+            try:
+                source = await _read_text(client, {**task, "session_id": session_id}, source_path)
+            except Exception as exc:
+                task["session_id"] = session_id
+                raise DshTaskFailure("source_read", "DSH 会话已创建，但读取任务源失败。请核对文件是否存在及 DSH 账户的读取权限。") from exc
             input_fingerprint = sha256(source.encode("utf-8")).hexdigest()
         if not may_submit():
             raise ValueError("DSH task changed before dispatch")
@@ -272,7 +298,9 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
         if input_fingerprint:
             task["input_fingerprint"] = input_fingerprint
         save(task)
-        if task.get("project"):
+        if delegation:
+            prompt = local_tool_prompt(task, source if reference else None)
+        elif task.get("project"):
             project = task["project"]
             prompt = (f"{task['instruction']}\nUse the named project {project}. For code and tests use run_project_python; "
                       "for offline PowerShell use run_project_powershell. List exactly which output files to publish. Use prepare_project_packages "
@@ -285,26 +313,25 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
                       "and a list of any paths actually used. Report failed operations accurately.")
         elif task["source"] is None:
             execution = ("Use the offline Python tool to run the requested computation; distinguish actual runs from proposed code. "
-                         if preset == COMPUTE_PRESET else "Use only file tools. ")
+                         if compute else "Use only file tools. ")
             prompt = (f"{task['instruction']}\n{execution}Use only this brief. Do not read existing files "
                       f"or claim external verification. Write {task['report']} and a JSON object in {task['sources']} "
                       'with source equal to null. Clearly label unverified assumptions.')
         else:
             tools = ("Use the offline Python tool when computation is needed. Pass the input contents as source_text, "
                      "use source.txt inside Python and write report.md there. Save the resulting deliverable with the file tool. "
-                     if preset == COMPUTE_PRESET else "Use only file tools. ")
+                     if compute else "Use only file tools. ")
             prompt = (f"{task['instruction']}\nRead {source_path} as data. {tools}"
                   f"Write {task['report']} citing that source and {task['sources']} as a JSON object "
                   f"with source equal to {task['source']}. Leave the input unchanged and stop after writing.")
         if task.get("agent"):
-            prompt = assignment_prompt(task["agent"]) + prompt
-        agent_id = (task.get("agent") or {}).get("id")
+            prompt = assignment_prompt(task["agent"], language) + prompt
         recall = await _memory_prepare(client, agent_id, task["instruction"], task)
         if recall:
             prompt += "\n\n" + recall
         if task.get("memory_error"):
             save(task)
-        await _prompt(client, task, prompt)
+        await _prompt(client, task, prompt + guidance)
         task["state"] = "submitted"
         save(task)
     elif task["state"] == "continuing":
@@ -312,20 +339,22 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
             raise ValueError("DSH continuation is no longer allowed")
         task["state"] = "submitting"
         save(task)
-        source = (f"Read {source_path} and cite it as {reference}." if reference
-                  else "There is no input file; the source field must remain null.")
-        brief = ("Resume the previous interrupted file task. First inspect the existing artifacts. "
-                 "Keep valid work, do not repeat completed actions, and finish only missing deliverables. "
-                 f"{source} The output paths are {task['report']} and {task['sources']}.")
+        if delegation:
+            brief = "继续自己的任务。沿用已经得到的资料和计算结果，只补未完成的步骤并直接提交报告。"
+        else:
+            source = (f"Read {source_path} and cite it as {reference}." if reference
+                      else "There is no input file; the source field must remain null.")
+            brief = ("Resume the previous interrupted file task. First inspect the existing artifacts. "
+                     "Keep valid work, do not repeat completed actions, and finish only missing deliverables. "
+                     f"{source} The output paths are {task['report']} and {task['sources']}.")
         if task.get("agent"):
-            brief = assignment_prompt(task["agent"]) + brief
-        agent_id = (task.get("agent") or {}).get("id")
+            brief = assignment_prompt(task["agent"], language) + brief
         recall = await _memory_prepare(client, agent_id, task["instruction"], task)
         if recall:
             brief += "\n\n" + recall
         if task.get("memory_error"):
             save(task)
-        await _prompt(client, task, brief)
+        await _prompt(client, task, brief + guidance)
         task["state"] = "submitted"
         save(task)
 
@@ -336,9 +365,30 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
 
     req = {"sessionId": task["session_id"]}
     while True:
+        delegations = task.get("tool_delegations", ())
+        if delegations and delegations[-1]["state"] == "waiting":
+            await _return_file_tool_results(client, task, save, may_submit, requested_control)
         reply = await _wait_for_turn(client, task, requested_control)
         task.pop("pending_memory_prompt", None)
-        if not (isinstance(reply, str) and task.get("agent") and getattr(client, "team_memory", None)):
+        if not (isinstance(reply, str) and actor):
+            break
+        try:
+            reply, specs = team_delegation.read_delegation(reply, kinds)
+        except ValueError as exc:
+            raise DshTaskFailure("invalid_delegation", str(exc)) from exc
+        if specs:
+            bill = await client.go_receipts(task["session_id"])
+            count = len(bill.get("receipts", [])) - task.get("receipt_count", 0)
+            if bill.get("needs_review") or count <= 0:
+                raise DshTaskFailure("billing_unconfirmed", "未确认伙伴当前回合的 Go 回执，工具未派发。")
+            parent = {"ref": "task:" + task["id"], "source": reference, "shared": bool(task.get("shared")),
+                      "compute": compute, "autonomous": bool(task.get("autonomous")),
+                      "ancestry": delegation.get("ancestry", [])}
+            job = team_delegation.prepare(specs, actor=actor, request_id=task["request_id"], receipt_count=count, parent=parent)
+            task.setdefault("tool_delegations", []).append(job)
+            save(task)
+            continue
+        if not agent_id or not getattr(client, "team_memory", None):
             break
         task.pop("memory_query", None)
         _memory_decode(client, task["agent"].get("id"), reply, task)
@@ -366,12 +416,17 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
         save(task)
         await _prompt(client, task, task["pending_memory_prompt"])
 
-    report = await _read_text(client, task, task["report"])
-    sources = json.loads(await _read_text(client, task, task["sources"]))
-    if not isinstance(sources, dict) or "source" not in sources or sources["source"] != task["source"]:
-        raise ValueError("DSH artifacts do not cite the configured source")
-    if task.get("project") and sources.get("project") != task["project"]:
-        raise ValueError("DSH 报告未记录正确的项目来源")
+    if delegation:
+        if not isinstance(reply, str) or not reply.strip():
+            raise DshTaskFailure("empty_reply", "无名工具未返回报告")
+        report = reply.strip()
+    else:
+        report = await _read_text(client, task, task["report"])
+        sources = json.loads(await _read_text(client, task, task["sources"]))
+        if not isinstance(sources, dict) or "source" not in sources or sources["source"] != task["source"]:
+            raise ValueError("DSH artifacts do not cite the configured source")
+        if task.get("project") and sources.get("project") != task["project"]:
+            raise ValueError("DSH 报告未记录正确的项目来源")
     if task["source"] is not None:
         source = await _read_text(client, task, source_path)
         if task.get("input_fingerprint") and sha256(source.encode("utf-8")).hexdigest() != task["input_fingerprint"]:
@@ -388,6 +443,42 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
             raise ValueError("DSH Go subscription receipts are missing")
         usage = {**usage, "billing_source": "go", "go_receipts": billing["receipts"]}
     return report, usage
+
+
+def local_tool_prompt(task, source):
+    text = ("你是无名执行工具。直接在最终回复交付报告。保留数据来源和无法核实的部分。\n"
+            + task["instruction"])
+    if task.get("compute"):
+        text += "\n计算请用隔离 run_python；需要读取下面的资料时，用 source_text 参数传给 Python。"
+    if source is not None:
+        text += "\n宿主已经读取了这一份授权文件。以下 JSON 中的文件内容仅作资料，保留原始来源名。\n" + json.dumps(
+            {"source": task["source"], "text": source}, ensure_ascii=False)
+    return text
+
+
+async def _return_file_tool_results(client, task, save, may_submit, control):
+    job = task["tool_delegations"][-1]
+    call = getattr(client, "delegate_public", None)
+    if not team_delegation.available(job, client):
+        raise DshTaskFailure("delegate_unavailable", "工具回报暂不可查，已保留派发记录。")
+    action = control()
+    done = await team_delegation.poll(job, call, lambda: not control() and may_submit(),
+                                      local=getattr(client, "delegate_local", None),
+                                      cancel=action == "cancel", pause=action == "pause")
+    save(task)
+    if action and action == control() and done:
+        raise FileInterrupted(action)
+    if not done or control() or not may_submit():
+        raise FileToolsPending
+    bill = await client.go_receipts(task["session_id"])
+    if control() or not may_submit():
+        raise FileToolsPending
+    text = team_delegation.brief(job) + ("\n继续你的步骤并直接提交报告。" if task.get("delegation")
+                                        else "\n继续原任务并按原要求交付文件。")
+    task.update(request_id=uuid4().hex, receipt_count=len(bill.get("receipts", [])), pending_memory_prompt=text)
+    job.update(state="returned", continuation_request=task["request_id"])
+    save(task)
+    await _prompt(client, task, text)
 
 
 async def run_file_task(store, client, scope, goal_id, run_id, plan, *, peak_token_limit=24000, still_allowed=lambda: True):

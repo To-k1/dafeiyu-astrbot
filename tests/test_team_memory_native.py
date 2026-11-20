@@ -96,7 +96,7 @@ class NativeMemoryTest(unittest.IsolatedAsyncioTestCase):
                 from team_native_test_package.dsh_roster import DshRoster
                 from team_native_test_package.dsh_chats import DshChats
                 from team_native_test_package.team_memory import TeamMemory
-                activity_store = Store(path / 'source-activity')
+                activity_store = Store(path / 'activity')
                 try:
                     scope = 'qq:FriendMessage:owner'
                     agent = DshRoster(activity_store, scope).create('native-member', 'persona')['id']
@@ -128,6 +128,25 @@ class NativeMemoryTest(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(ValueError):
                         await service.operate(types.SimpleNamespace(unified_msg_origin=scope),
                             action='rebind_source', agent_id=agent, source_ref='chat:' + '0' * 16, memory_id=saved[0])
+                    from team_native_test_package.dsh_history_archive import (
+                        copy_from_archive, import_status, read_archive, restore_memories, snapshot,
+                    )
+                    from team_native_test_package.team_history import TeamHistory
+                    copied = copy_from_archive(activity_store, scope, read_archive(snapshot(activity_store, scope, agent)))
+                    copy_id = copied["id"]
+                    await restore_memories(activity_store, scope, copy_id, bro)
+                    self.assertEqual(import_status(activity_store, scope, copy_id),
+                                     {"state": "ready", "copied": 1, "total": 1})
+                    matches = await bro.search(owner=copy_id, query="verify original date", k=10)
+                    restored = await bro.get(owner=copy_id, memory_id=matches[0].doc_id)
+                    self.assertEqual(restored["text"], corrected["text"])
+                    self.assertEqual(restored["metadata"]["fishhome_import"]["memory_id"], saved[0])
+                    old_ref = restored["metadata"]["fishhome_import"]["source_ref"]["ref"]
+                    new_ref = restored["metadata"]["fishhome_source_ref"]["ref"]
+                    archive_source = TeamHistory(activity_store, scope).get(new_ref, copy_id)
+                    self.assertEqual(archive_source["source"]["archive_import"]["original_ref"], old_ref)
+                    self.assertEqual(archive_source["source"]["result"], "We agree to verify the original date.")
+                    self.assertIsNotNone(await bro.get(owner=agent, memory_id=saved[0]))
                 finally:
                     activity_store.close()
                 with adapter_access({"filtering_settings": {"shared_adapter_ids": []}}, "fishhome-dsh:bro-a"):

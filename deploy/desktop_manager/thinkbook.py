@@ -38,6 +38,11 @@ ROUTES = {
     "/api/budgets": {"GET", "POST"}, "/api/provider-keys": {"GET"},
     "/api/dsh-team": {"GET"},
     "/api/dsh-team/cancel": {"POST"},
+    "/api/dsh-team/role-card": {"GET", "POST"},
+    "/api/dsh-team/library": {"GET", "POST"},
+    "/api/persona-mode": {"GET", "POST"},
+    "/api/fish-model-route": {"GET", "POST"},
+    "/api/shared-language": {"GET", "POST"},
 }
 SERVICE_ACTION = re.compile(r"/api/services/(budget|ollama|emulator|phone|bili|compute|desktop|dsh|dsh_commission|astrbot|napcat|room|all)/(start|stop|restart)")
 
@@ -132,16 +137,33 @@ def create_relay(client, browser_token, manager_token):
             if not await asyncio.to_thread(qq_control_ready):
                 return web.json_response({"error": "请确认 ThinkBook 是正式 QQ 主机，且台式机的 NapCat 已停止。"}, status=409)
         headers = {"Host": f"127.0.0.1:{THINKBOOK_PORT}", "Authorization": f"Bearer {manager_token}"}
+        role_card = request.path == "/api/dsh-team/role-card"
         if request.can_read_body:
             headers["Content-Type"] = request.content_type
+        team_library = request.path == "/api/dsh-team/library"
+        if request.path == "/api/shared-language":
+            incoming = request.clone(client_max_size=320 * 1024 + 1)
+        elif role_card or team_library:
+            activity_copy = request.query.get("action") in {"preview-copy", "copy"}
+            limit = (32 * 1024 if role_card and activity_copy else 256) * 1024
+            incoming = request.clone(client_max_size=limit + 1)
+        else:
+            incoming = request
         try:
             async with client.request(request.method, f"http://127.0.0.1:{MANAGER_FORWARD}{request.path}",
-                                      headers=headers, data=await request.read() if request.can_read_body else None,
+                                      params=request.query if role_card or team_library or request.path == "/api/dsh-team" else None,
+                                      headers=headers, data=await incoming.read() if request.can_read_body else None,
                                       allow_redirects=False) as response:
+                if role_card and response.status == 200 and "Content-Disposition" in response.headers:
+                    return web.Response(body=await response.read(), content_type=response.content_type,
+                                        charset=response.charset,
+                                        headers={"Cache-Control": "no-store",
+                                                 "Content-Disposition": response.headers["Content-Disposition"]})
                 body = await response.text()
                 if response.status == 401:
                     return web.json_response({"error": "ThinkBook 控制台已重启，请重新打开远程入口。"}, status=502)
-                return web.Response(text=module_url(body), status=response.status, content_type=response.content_type,
+                return web.Response(text=body if team_library else module_url(body),
+                                    status=response.status, content_type=response.content_type,
                                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         except (ClientError, OSError, asyncio.TimeoutError):
             return web.json_response({"error": "ThinkBook 控制台暂时不可达。"}, status=502)

@@ -4,34 +4,44 @@ import re
 from time import time
 from uuid import uuid4
 
+from .dsh_cards import background_prompt, load_background
 from .dsh_task import CHAT_PRESET, DshTaskFailure, GoQuotaWaiting, _open_session, _prompt, _wait_for_turn
+from .team_mode import GROUP_SQL, store_mode, visible
 
 
 PREFIX = "dsh-roster:v1:"
 AGENT_ID = re.compile(r"[0-9a-f]{16}")
+COPY_MEMORY_PREFIX = "dsh-copy-memory:v1:"
+
+
+def copy_memory_key(scope, agent_id):
+    return f"{COPY_MEMORY_PREFIX}{scope}:{agent_id}"
 
 
 class DshRoster:
-    def __init__(self, store, scope):
+    def __init__(self, store, scope, *, current_mode=False):
         self.store = store
+        self.scope = scope
         self.prefix = f"{PREFIX}{scope}:"
+        self.mode = store_mode(store) if current_mode else None
 
     def get(self, ident):
         if not isinstance(ident, str) or not AGENT_ID.fullmatch(ident):
             raise ValueError("请使用名册中的小弟 ID")
         row = self.store.get_setting(self.prefix + ident)
-        if not row:
-            raise ValueError("找不到这位小弟")
+        if not visible(row, self.mode):
+            raise ValueError("当前正式或测试分组找不到这位小弟")
         return row
 
     def list(self):
         return [self.public(json.loads(row[0])) for row in self.store.db.execute(
-            "SELECT value FROM settings WHERE substr(key,1,?)=? ORDER BY json_extract(value,'$.created')",
-            (len(self.prefix), self.prefix))]
+            "SELECT value FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL + "ORDER BY json_extract(value,'$.created')",
+            (len(self.prefix), self.prefix, self.mode, self.mode))]
 
     @staticmethod
     def public(row):
-        return {key: row.get(key) for key in ("id", "name", "status", "version", "chat_session", "created", "updated")}
+        return {**{key: row.get(key) for key in ("id", "name", "status", "version", "chat_session", "created", "updated")},
+                **({"persona_mode": row["persona_mode"]} if row.get("persona_mode") else {})}
 
     @staticmethod
     def validate_profile(name, persona):
@@ -40,20 +50,49 @@ class DshRoster:
         if not isinstance(persona, str) or not persona.strip() or len(persona) > 16000:
             raise ValueError("请提供你为这位小弟写的非空人格正文（限 16000 字）")
 
-    def create(self, name, persona):
+    def create(self, name, persona, *, test_template=None):
         self.validate_profile(name, persona)
         ident = uuid4().hex[:16]
         now = time()
         row = {"id": ident, "name": name.strip(), "version": 1, "status": "active", "created": now,
                "updated": now, "profiles": [{"version": 1, "name": name.strip(), "persona": persona, "at": now}]}
+        if test_template:
+            row.update(persona_mode="test", test_template=test_template)
+        elif mode := store_mode(self.store):
+            row["persona_mode"] = mode
         self.save(row)
         return self.public(row)
+
+    def refresh_test_profiles(self):
+        agents = self.list()
+        tests = {}
+        for agent in agents:
+            row = self.get(agent["id"])
+            if row.get("persona_mode") == "test" and row.get("test_template"):
+                tests[row["test_template"]] = row["id"]
+        refreshed = []
+        for entry in agents:
+            if entry.get("persona_mode") != "formal" or entry["status"] != "active":
+                continue
+            profile = self.get(entry["id"])["profiles"][-1]
+            if ident := tests.get(entry["id"]):
+                test = self.get(ident)["profiles"][-1]
+                if (test["name"], test["persona"]) != (profile["name"], profile["persona"]):
+                    self.update(ident, name=profile["name"], persona=profile["persona"])
+            else:
+                ident = self.create(profile["name"], profile["persona"], test_template=entry["id"])["id"]
+            refreshed.append(ident)
+        return refreshed
 
     def update(self, ident, *, name="", persona="", status=""):
         with self.store.transaction():
             row = self.get(ident)
             if status and status not in {"active", "paused", "archived"}:
                 raise ValueError("状态支持 active、paused 和 archived")
+            if status == "active":
+                copy = self.store.get_setting(copy_memory_key(self.scope, ident))
+                if copy and copy["state"] != "ready":
+                    raise ValueError("请等副本的长期记忆完成导入")
             current = row["profiles"][-1]
             changed_name, changed_persona = name or row["name"], persona or current["persona"]
             self.validate_profile(changed_name, changed_persona)
@@ -77,6 +116,8 @@ class DshRoster:
             if len(matches) != 1:
                 raise ValueError("名字未找到或重名，请使用名册中的小弟 ID")
             ident = matches[0]
+        if self.mode:
+            self.get(ident)
         return ident
 
     def snapshot(self, ident, guides=()):
@@ -85,8 +126,10 @@ class DshRoster:
         if row["status"] != "active":
             raise ValueError("这位小弟目前暂停或归档")
         profile = row["profiles"][-1]
+        background = load_background(self.store, ident) if hasattr(self.store, "folder") else {}
         return {"id": ident, "name": profile["name"], "version": profile["version"],
-                "persona": profile["persona"], "guides": list(guides)}
+                "persona": profile["persona"], "guides": list(guides),
+                **({"background": background} if background else {})}
 
     def _sessions(self, row):
         # Migrate only on first use, preserving the native history of old rows.
@@ -170,12 +213,14 @@ class DshRoster:
             raise ValueError("该会话已归档，请先选择并恢复")
         return session["id"]
 
-    def set_native_session(self, ident, session_id, native):
+    def set_native_session(self, ident, session_id, native, *, route=""):
         with self.store.transaction():
             row = self.get(ident)
             session = self._session(row, session_id)
             if not session.get("native_session"):
                 session["native_session"] = native
+            if session["native_session"] == native and route:
+                session.setdefault("native_route", route)
             if row.get("current_chat_session") == session_id:
                 self._select_pointer(row, session)
             self.save(row)
@@ -202,6 +247,7 @@ class DshRoster:
             profile = row["profiles"][-1]
             prompt = (f"这是与你持续交谈的大肥鱼。使用她为你写的当前人格（版本 {row['version']}），"
                       f"名字是 {row['name']}。\n<persona>\n{profile['persona']}\n</persona>\n"
+                      + background_prompt(load_background(self.store, ident)) +
                       f"她这轮对你说：\n{message}")
             await _prompt(client, request, prompt)
 

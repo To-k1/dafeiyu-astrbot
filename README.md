@@ -1,5 +1,7 @@
 # 🐋 大肥鱼 · AstrBot QQ 机器人全家桶
 
+FishHome Windows 双机部署、运行入口、数据归属、验收状态和维护规则见 [FishHome 项目维护手册](docs/FISHHOME_HANDBOOK.md)。
+
 > 一只住在 QQ 里的蓝色鲸鱼娘：会看、会听、会说话、有记忆、会主动找你，
 > 还能进群和你的朋友打成一片，也会嘴硬地催你吃饭。基于 **AstrBot + NapCat + DeepSeek + 阿里云百炼** 搭建。
 

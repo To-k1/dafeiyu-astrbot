@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from .life import observed_read_evidence, parse_work_sections
 from .dsh_task import task_key as dsh_task_key
+from .model_route import GO_PROVIDER
 from .rhythm import DEFAULTS as RHYTHM_DEFAULTS, snapshot as rhythm_snapshot, validate_config as validate_rhythm
 from .projects import Projects, enabled as projects_enabled
 
@@ -415,7 +416,8 @@ class LifePlanner:
             go_file = action in go_goals.get(gid, ())
             if cfg.get("dsh_only") and not go_file:
                 continue
-            cost_wait = {} if go_file else goal.get("checkpoint", {}).get("personal_cost_wait", {})
+            cost_wait = ({} if go_file or cfg.get("autonomous_provider_id") == GO_PROVIDER
+                         else goal.get("checkpoint", {}).get("personal_cost_wait", {}))
             if (type(cost_wait.get("resume_after")) in (int, float) and cost_wait["resume_after"] > now):
                 excluded.append({"key": "goal:" + gid, "reason": "personal_step_waiting_low_cost"})
                 continue

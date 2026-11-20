@@ -83,8 +83,24 @@ class TeamMemoryBackend:
         return (meta.get("fishhome_owner") == owner and meta.get("session_id") == session_id
                 and meta.get("persona_id") == persona_id and meta.get("adapter_id") == adapter_id)
 
+    def _source_matches_role(self, memory, owner):
+        ref = self._metadata(memory).get("fishhome_source_ref")
+        if owner == "fish" or not isinstance(ref, dict) or not isinstance(ref.get("scope"), str):
+            return True
+        kind, _, ident = str(ref.get("ref", "")).partition(":")
+        if kind not in {"meeting", "task", "public"}:
+            return True
+        scope = ref["scope"]
+        agent = self.store.get_setting(f"dsh-roster:v1:{scope}:{owner}")
+        if not agent:
+            return True
+        prefix = "dsh-meeting" if kind == "meeting" else "commissioned-file"
+        source = self.store.get_setting(f"{prefix}:v1:{scope}:{ident}")
+        return source is None or (source.get("persona_mode") or "test") == (agent.get("persona_mode") or "test")
+
     async def save(self, *, owner, source_ref, content, actors, speakers, evaluation_author=None,
-                   session_id=None, persona_id=None, importance=0.5, adapter_id=None, summary_author=None):
+                   session_id=None, persona_id=None, importance=0.5, adapter_id=None, summary_author=None,
+                   import_origin=None):
         if not source_ref or not content or not content.strip():
             raise ValueError("source_ref and content are required")
         if not isinstance(actors, list) or not isinstance(speakers, list):
@@ -111,6 +127,8 @@ class TeamMemoryBackend:
                         "fishhome_speakers": speakers, "fishhome_evaluation_author": evaluation_author,
                         "fishhome_summary_author": summary_author,
                         "fishhome_source_ref": source_ref, "adapter_id": adapter_id}
+            if import_origin is not None:
+                metadata["fishhome_import"] = import_origin
             with self._boundary(adapter_id):
                 memory_id = await self.engine.add_memory(content=content, session_id=session_id,
                     persona_id=persona_id, importance=importance, metadata=metadata)
@@ -125,14 +143,16 @@ class TeamMemoryBackend:
         adapter_id = self._adapter(owner, adapter_id)
         with self._boundary(adapter_id):
             memory = await self.engine.get_memory(memory_id)
-        return memory if memory and self._owned(memory, owner, session_id, persona_id, adapter_id) else None
+        return memory if (memory and self._owned(memory, owner, session_id, persona_id, adapter_id)
+                          and self._source_matches_role(memory, owner)) else None
 
     async def search(self, *, owner, query, k=5, session_id=None, persona_id=None, adapter_id=None):
         session_id, persona_id = self._scope(owner, session_id, persona_id)
         adapter_id = self._adapter(owner, adapter_id)
         with self._boundary(adapter_id):
             results = await self.engine.search_memories(query, k=k, session_id=session_id, persona_id=persona_id)
-        return [item for item in results if self._owned(item, owner, session_id, persona_id, adapter_id)]
+        return [item for item in results if self._owned(item, owner, session_id, persona_id, adapter_id)
+                and self._source_matches_role(item, owner)]
 
     async def update(self, *, owner, source_ref, content, session_id=None, persona_id=None, importance=None, adapter_id=None):
         if not content or not content.strip():

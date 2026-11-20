@@ -326,7 +326,7 @@ class ProjectIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         async def agent(event, prompt, tools, max_steps):
             self.assertIsNone(self.plugin.active_goal(event))
-            self.assertEqual(tools, {projects.TOOL, "df_workshop", "df_recall", "df_life_status"})
+            self.assertEqual(tools, {projects.TOOL, "df_workshop", "df_recall", "df_life_status", main.STORY_TOOL})
             self.assertIn("这一轮只回看", prompt)
             await self.plugin.project(event, "review", project_id=project["id"], stage=1,
                                       reflection="记下观察", limitations="需要继续核实", next_question="换一个来源比较")

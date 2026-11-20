@@ -74,7 +74,7 @@ class WorkshopIntegrationTests(unittest.IsolatedAsyncioTestCase):
         async def agent(event, prompt, tools, max_steps):
             seen.append(event.get_extra("df_run_id"))
             self.assertEqual(self.plugin.active_goal(event)["id"], goal["id"])
-            self.assertEqual(tools, main.LIFE_TOOLS | main.WORKSHOP_TOOLS | {"df_share_thought"})
+            self.assertEqual(tools, main.LIFE_TOOLS | main.WORKSHOP_TOOLS | {"df_share_thought", main.STORY_TOOL})
             current = json.loads(await self.plugin.workshop(event, "read", work_id=work["id"]))
             self.assertEqual(current["revision"], len(seen))
             await self.write(current, source, event, f"第{len(seen)}次整理，区分演示和推测")
