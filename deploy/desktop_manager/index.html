@@ -20,6 +20,8 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
 #message{white-space:pre-wrap}#message:not(:empty){margin-top:10px}details summary{cursor:pointer;font-weight:700}form{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}input,select{font:inherit;max-width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}input:not([type=number]){width:min(260px,100%)}input[type=number]{width:95px}#keys{overflow-wrap:anywhere}#budgets{white-space:pre-line}.hint{margin:8px 0}.foot{font-size:12px;margin-top:24px}
 .checklist,.locations{list-style:none;margin:10px 0 0;padding:0}.checklist li,.locations li{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--line);padding:8px 0}.locations code{display:block;overflow-wrap:anywhere;color:var(--muted)}.paths{min-width:0;overflow-wrap:anywhere}.locations button{flex:none}
 .activity-group{margin:16px 0 8px}.activity-group h3{font-size:15px;margin:0}.activity-group label{min-width:11em}.setting-route-note{flex-basis:100%}.command-help{margin:12px 0 0}.command-help dt{font-weight:700;margin:10px 0 2px}.command-help dd{margin:0;color:var(--muted)}.command-help code{color:var(--ink);overflow-wrap:anywhere}
+.meeting-row{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}.meeting-row button{flex:none}
+.meeting-shortcuts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}.meeting-shortcuts:empty{display:none}.meeting-shortcuts .button{max-width:100%;overflow-wrap:anywhere}
 @media(max-width:660px){main{padding:23px 14px 38px}.panel{padding:13px}.row{grid-template-columns:minmax(0,1fr) auto}.row .actions{grid-column:1/-1;justify-content:flex-start}.checklist li{align-items:flex-start}.checklist li span{max-width:58%}}
 </style>
 <main>
@@ -34,7 +36,10 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <a class="button" href="http://127.0.0.1:6185/" target="_blank" rel="noreferrer">AstrBot ↗</a>
       <a class="button" href="http://127.0.0.1:6099/webui/" target="_blank" rel="noreferrer">NapCat ↗</a>
       <button id="dsh-ui" disabled>DeepSeek Harness ↗</button>
+      <a class="button" href="/meetings" target="_blank" rel="noopener">组会会场 ↗</a>
+      <button id="dsh-meeting-ui" disabled>DSH 会场 ↗</button>
     </div>
+    <div id="active-meeting-shortcuts" class="meeting-shortcuts"></div>
   </nav>
   <section class="panel" aria-labelledby="services-title"><h2 id="services-title">服务管理</h2><div id="services"></div></section>
   <section class="panel" aria-labelledby="archive-title">
@@ -62,6 +67,12 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <p class="muted hint">Windows Python 执行适用于受托和自主文件任务。保存开关后重启两路 DSH。</p><button id="compute-toggle" disabled>启用 Windows Python 执行</button>
     <p class="muted hint" id="write-label">公共写入状态待读取。</p><button id="public" disabled>更改公共写入</button>
     <p class="muted hint">控制台启动的 B 站伴侣使用只读模式。试跑无需导入 B 站 Cookie。</p>
+    <div class="activity-group">
+      <h3>梗百科词库</h3>
+      <p class="muted hint">更新到 DSH 梗百科最新发布的词库。安装后，大肥鱼和伙伴可以按需查本地词库或 CNMemeWiki。</p>
+      <button id="meme-dictionary-update">更新词库</button>
+      <p class="muted hint" id="meme-dictionary-status" role="status"></p>
+    </div>
   </details>
   <details class="panel"><summary>自主生活与主动联系设置</summary>
     <p id="activity-note" class="muted hint">正在读取当前主机的活动配置…</p>
@@ -176,6 +187,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <dt>旧版桌面启动与切换</dt><dd>旧方式仍可手动登录 FishHomeDesktop 并运行 <code>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\FishHomeDesktop\Start-DesktopBroker.ps1" -Python "$env:ProgramData\FishHomeDesktop\python\python.exe"</code>。两种方式共用端口，先关闭已打开的个人程序并停止旧服务，再切换。若端口上的服务属于另一登录会话，不应把它当作 Ops 自动桌面。首次升级受保护组件时运行项目的 <code>deploy\dsh_bridge\Update-DesktopBroker.ps1 -InstallRoot 安装根目录</code>，Windows 会要求管理员权限。</dd>
       <dt>完整读取文本</dt><dd>工具结果正文不再因整理聊天历史而被裁剪，DSH 文件读取自动接续到末页。AstrBot 自带文件工具超过单次大小限制时仍会明确提示分段；可让肥鱼继续读取余下部分。已经折叠过的旧聊天历史不会自动复原，需要重新读取原文件。</dd>
       <dt>手动同步代码</dt><dd>台式机在公开 <code>fish-home</code> 分支提交并推送代码；向 ThinkBook 传送 <code>git archive</code> 生成的代码包后，还需在停止相关服务时安装到已启用插件目录，再启动服务。ThinkBook 当前是解压安装，不能只运行 <code>git pull</code> 就宣称插件已更新。完整步骤见项目 <code>docs/CODE_SYNC.md</code>。配置同步、代码更新、状态备份分别操作；正式数据库以 ThinkBook 为准。</dd>
+      <dt>实时看组会</dt><dd>首页会自动显示进行中的会议。「组会会场」可在独立标签页打开，DSH 侧栏也能进入同一会场。点击发送会把你的原话署名为「主人」，接到下一条尚未开始的发言。茶会和闲聊指同一种会议。</dd>
       <dt>QQ 文件</dt><dd>在主人私聊发文件时附上处理要求。肥鱼可将已可获取的附件复制进 <code>shared/qq-inbox</code>，再交给 DSH。若 QQ 仍要求接收，可完成接收后重发文件。</dd>
       <dt>QQ ZIP 取材</dt><dd>在当前私聊发送 ZIP，并说明要查看哪些内容。肥鱼用 <code>df_dsh_shared</code> 收取后，可用 <code>zip_list</code> 列清单、<code>zip_read</code> 分页读 UTF-8 文本，或用 <code>zip_extract</code> 把选中的条目复制到新的 <code>shared/qq-zip</code> 任务目录，再把返回的路径交给 DSH。原附件保留，新会话需要重新发附件；长期归档或覆盖资料时另行确认。</dd>
       <dt>共同语言提示词</dt><dd>可以启停或上传 UTF-8 的 TXT、MD。保存后，肥鱼和具名小弟的新请求会读取现行设置。原人格卡继续使用。</dd>
@@ -378,6 +390,23 @@ $('fish-model-form').onsubmit = async event => {
   await refresh();
 };
 function node(tag, text, cls) { const n = document.createElement(tag); n.textContent = text; if (cls) n.className = cls; return n; }
+async function loadMemeDictionary(update = false) {
+  const button = $('meme-dictionary-update');
+  const label = $('meme-dictionary-status');
+  if (update) {
+    button.disabled = true;
+    label.textContent = '正在下载并校验词库…';
+  }
+  try {
+    const result = await api('/api/meme-dictionary', update ? 'POST' : 'GET');
+    label.textContent = result.available
+      ? `${update ? '更新完成，' : ''}${result.entries} 条${result.built_at ? ` · 词库构建 ${result.built_at}` : ''}`
+      : (result.reason === 'dictionary_unreadable' ? '现有词库无法读取，可重新更新。' : '尚未安装词库。');
+  } catch (error) { label.textContent = error.message; }
+  finally { if (update) button.disabled = false; }
+}
+$('meme-dictionary-update').onclick = () => loadMemeDictionary(true);
+
 const languageForm = $('shared-language-form');
 function renderSharedLanguage(result) {
   $('shared-language-enabled').checked = result.enabled;
@@ -422,19 +451,21 @@ function setTheme(night) {
 }
 setTheme(localStorage.getItem('fishhome-theme') === 'night');
 $('theme').onclick = () => setTheme(document.documentElement.dataset.theme !== 'night');
-async function openDsh() {
+async function openDsh(meetings = false) {
   const tab = window.open('about:blank', '_blank');
   if (tab) tab.opener = null;
   try {
     const {url} = await api('/api/ui/dsh', 'POST');
-    if (tab) tab.location.replace(url);
-    else location.assign(url);
+    const destination = meetings ? url + "#fishhome-meetings" : url;
+    if (tab) tab.location.replace(destination);
+    else location.assign(destination);
   } catch (error) {
     if (tab) tab.close();
     $('message').textContent = error.message;
   }
 }
-$('dsh-ui').onclick = openDsh;
+$('dsh-ui').onclick = () => openDsh();
+$('dsh-meeting-ui').onclick = () => openDsh(true);
 let previewedCard = null;
 let previewedArchive = null;
 let storyAgents = [];
@@ -676,7 +707,7 @@ $('dsh-history-export').onclick = () => {
 async function refreshDshTeam() {
   try {
     const view = $('dsh-team-view').value;
-    const {agents, jobs, meetings = [], group, current} = await api('/api/dsh-team?view=' + view);
+    const {agents, jobs, group, current} = await api('/api/dsh-team?view=' + view);
     if ($('dsh-team-view').value !== view) return;
     $('dsh-team-group').textContent = group === 'formal' ? '正式记录' : group === 'test' ? '测试记录' : '当前记录';
     const names = {active:'可用', paused:'暂停', archived:'已归档'};
@@ -733,23 +764,77 @@ async function refreshDshTeam() {
         return row;
       })
         : [node('p', '还没有 DSH 任务。', 'muted')]));
-    $('dsh-team-meetings').replaceChildren(
-      ...(meetings.length ? meetings.map(meeting => node('p', `${meeting.topic.slice(0, 100)} · ${states[meeting.status] || meeting.status} · ${meeting.rounds ? meeting.round + '/' + meeting.rounds + ' 轮' : '已聊 ' + meeting.round + ' 轮'}`))
-        : [node('p', '还没有组会。', 'muted')]));
   } catch (error) {
     $('dsh-team-agents').textContent = error.message;
   }
 }
-$('dsh-team').addEventListener('toggle', () => { if ($('dsh-team').open) refreshDshTeam(); });
-$('dsh-team-refresh').onclick = refreshDshTeam;
-$('dsh-team-view').onchange = refreshDshTeam;
+const meetingActive = new Set(['queued','running','paused','go_wait','stopping']);
+const meetingStates = {queued:'等待开始', running:'进行中', paused:'已暂停', go_wait:'等待 Go 额度',
+  stopping:'正在结束', completed:'已结束', stopped:'已停止', needs_review:'待核实'};
+let meetingDashboardTimer, meetingDashboardRead, shortcutSignature, historySignature;
+function meetingLink(meeting, group, label) {
+  const link = node('a', label, 'button');
+  link.href = '/meetings?' + new URLSearchParams({id:meeting.id, view:group || 'current'});
+  link.target = '_blank';
+  link.rel = 'noopener';
+  return link;
+}
+async function refreshMeetingDashboard() {
+  clearTimeout(meetingDashboardTimer);
+  const read = meetingDashboardRead = {};
+  const view = $('dsh-team-view').value;
+  try {
+    const current = await api('/api/dsh-team/meeting?view=current');
+    if (meetingDashboardRead !== read) return;
+    const running = current.meetings.filter(m => meetingActive.has(m.status));
+    const shortcuts = running.length ? running : current.meetings.slice(0,1);
+    const liveKey = JSON.stringify([current.group,shortcuts]);
+    if (liveKey !== shortcutSignature) {
+      shortcutSignature = liveKey;
+      $('active-meeting-shortcuts').replaceChildren(...shortcuts.map(m =>
+        meetingLink(m,current.group, (meetingStates[m.status] || m.status) + ' · ' + m.topic.slice(0,70))));
+    }
+    if ($('dsh-team').open && $('dsh-team-view').value === view) {
+      const result = view === 'current' ? current : await api('/api/dsh-team/meeting?view=' + view);
+      if (meetingDashboardRead === read && $('dsh-team-view').value === view) {
+        const key = JSON.stringify(result);
+        if (historySignature !== key) {
+          historySignature = key;
+          const rows = result.meetings.map(meeting => {
+            const row = node('div', '', 'meeting-row');
+            row.append(node('p', meeting.topic + ' · ' + (meetingStates[meeting.status] || meeting.status)),
+              meetingLink(meeting,result.group || view,'进入组会'));
+            return row;
+          });
+          $('dsh-team-meetings').replaceChildren(...(rows.length ? rows : [node('p','还没有组会。','muted')]));
+        }
+      }
+    }
+  } catch (error) {
+    if (meetingDashboardRead !== read) return;
+    shortcutSignature = historySignature = null;
+    $('active-meeting-shortcuts').textContent = '';
+    $('dsh-team-meetings').textContent = error.message;
+  } finally {
+    if (meetingDashboardRead === read) {
+      meetingDashboardTimer = setTimeout(refreshMeetingDashboard,document.hidden ? 6000 : 1500);
+    }
+  }
+}
+$('dsh-team').addEventListener('toggle', () => { if ($('dsh-team').open) {
+  refreshDshTeam();
+  refreshMeetingDashboard();
+} });
+$('dsh-team-refresh').onclick = () => { refreshDshTeam(); refreshMeetingDashboard(); };
+$('dsh-team-view').onchange = () => { refreshDshTeam(); refreshMeetingDashboard(); };
+refreshMeetingDashboard();
 async function refresh() {
   try {
     const {services, official_key, runner_password} = await api('/api/status');
     $('overview').textContent = `${services.filter(s => s.state === 'running' && s.recognized).length} / ${services.length} 个组件已运行`;
     const ready = id => services.some(s => s.id === id && s.state === 'running' && s.recognized);
     $('room-state').textContent = ready('room') ? '房间与星海在线' : '房间服务待启动';
-    $('dsh-ui').disabled = !ready('dsh');
+    $('dsh-ui').disabled = $('dsh-meeting-ui').disabled = !ready('dsh');
     $('setup').textContent = `DeepSeek Key ${official_key ? '已加密保存' : '待填写，计费服务当前仅供查询'}。DSH 账户密码${runner_password ? '已保存' : '待填写'}。`;
     const rows = services.map(s => {
       const row = node('div', '', 'row'), info = node('div', '', ''), actions = node('div', '', 'actions');
@@ -1059,6 +1144,6 @@ $('showkeys').onclick = async () => {
   catch (error) { $('message').textContent = error.message; }
 };
 $('start').onclick = () => act('all','start'); $('stop').onclick = () => act('all','stop');
-$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadConfig(), loadBudgets(), runChecks(), loadPersonaMode(), loadFishModel(), loadSharedLanguage()]);
-refresh(); loadConfig(); loadBudgets(); runChecks(); loadPersonaMode(); loadFishModel(); loadSharedLanguage(); setInterval(() => { if (!busy) refresh(); }, 2500);
+$('check').onclick = runChecks; $('refresh').onclick = () => Promise.all([refresh(), loadConfig(), loadBudgets(), runChecks(), loadPersonaMode(), loadFishModel(), loadSharedLanguage(), loadMemeDictionary()]);
+refresh(); loadConfig(); loadBudgets(); runChecks(); loadPersonaMode(); loadFishModel(); loadSharedLanguage(); loadMemeDictionary(); setInterval(() => { if (!busy) refresh(); }, 2500);
 </script>

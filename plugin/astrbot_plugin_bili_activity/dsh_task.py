@@ -264,10 +264,11 @@ async def execute_file_task(client, task, save, may_submit, requested_control=la
     agent_id = (task.get("agent") or {}).get("id")
     delegation = task.get("delegation") or {}
     actor = agent_id or delegation.get("actor")
-    kinds = getattr(client, "delegate_kinds", ()) if actor and getattr(client, "model_route", None) == "go" else ()
+    kinds = getattr(client, "delegate_kinds", ()) if actor else ()
     compute_enabled = getattr(client, "compute_enabled", False) is True
     compute = bool(task.get("compute") or task["source"] and not delegation and compute_enabled)
-    kinds = tuple(kind for kind in kinds if (kind != "python" or (compute and compute_enabled))
+    kinds = tuple(kind for kind in kinds if (kind == "meme" or getattr(client, "model_route", None) == "go")
+                  and (kind != "python" or (compute and compute_enabled))
                   and (not delegation or kind in team_delegation.LOCAL_KINDS)
                   and (kind != "file" or task["source"] or task.get("shared")))
     guidance = team_delegation.guidance(kinds, reference)
@@ -464,6 +465,7 @@ async def _return_file_tool_results(client, task, save, may_submit, control):
     action = control()
     done = await team_delegation.poll(job, call, lambda: not control() and may_submit(),
                                       local=getattr(client, "delegate_local", None),
+                                      lookup=getattr(client, "lookup_meme", None),
                                       cancel=action == "cancel", pause=action == "pause")
     save(task)
     if action and action == control() and done:

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>组会会场 · FishHome</title>
+<style>
+:root{color-scheme:dark;--bg:#08111d;--panel:#101e2e;--line:#294158;--ink:#edf5ff;--muted:#a8bed4;--accent:#8ed8ff;--warn:#f2c67b;--selected:#15334d}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI","Microsoft YaHei",sans-serif}
+main{width:min(1320px,100%);margin:auto;padding:clamp(12px,2vw,28px);display:grid;grid-template-columns:minmax(190px,280px) minmax(0,1fr);gap:15px;min-height:100dvh}
+h1,h2,h3,p{margin:0}h1{font-size:23px}h2{font-size:clamp(19px,2.3vw,27px);overflow-wrap:anywhere}h3{font-size:13px;color:var(--muted)}
+aside,section{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}aside{align-self:start}
+button,select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:6px 9px}button{cursor:pointer}button:disabled,textarea:disabled{opacity:.65}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+select{width:100%;margin:9px 0 14px}a{color:var(--accent)}.muted,small{color:var(--muted)}.hint{font-size:13px;margin-top:7px}.live{color:var(--accent)}.warn{color:var(--warn)}
+.meeting{display:block;width:100%;text-align:left;margin:5px 0 8px;overflow-wrap:anywhere}.meeting[aria-current=true]{background:var(--selected);border-color:var(--accent)}.meeting small{display:block}
+#members{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.member{border:1px solid var(--line);border-radius:14px;padding:2px 9px;font-size:13px}#stream{max-height:58dvh;min-height:12dvh;overflow:auto}
+article{border-bottom:1px solid var(--line);padding:10px 3px}article strong{color:var(--accent)}article small{padding-left:8px}article p{white-space:pre-wrap;overflow-wrap:anywhere}article.owner{border-left:2px solid var(--warn);padding-left:10px}
+form{display:grid;gap:6px;margin-top:12px}textarea{width:100%;min-height:58px;resize:vertical}form button{justify-self:end;background:var(--accent);color:#081827;font-weight:650}
+@media(max-width:640px){main{grid-template-columns:1fr;min-height:auto}aside{max-height:38dvh;overflow:auto}#stream{max-height:52dvh}}
+</style>
+<main>
+  <aside aria-label="会议列表">
+    <h1>组会会场</h1>
+    <label for="group" class="muted">会议分组</label>
+    <select id="group"><option value="current">当前人格</option><option value="formal">正式</option><option value="test">测试</option></select>
+    <div id="meetings"></div>
+    <p id="list-status" class="hint warn" role="status"></p>
+  </aside>
+  <section aria-labelledby="topic">
+    <h2 id="topic">选择一场组会</h2>
+    <p id="state" class="muted"></p>
+    <div id="members"></div>
+    <div id="stream" role="log" aria-label="组会发言" tabindex="0"></div>
+    <form id="post" hidden>
+      <label for="comment">以主人身份插话</label>
+      <textarea id="comment" maxlength="8000" required></textarea>
+      <button type="submit">发送</button>
+    </form>
+    <p id="feed-status" class="hint warn" role="status"></p>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const path = '/api/dsh-team/meeting';
+const states = {queued:'等待开始', running:'进行中', paused:'已暂停', go_wait:'等待 Go 额度', stopping:'正在结束',
+  completed:'已结束', stopped:'已停止', needs_review:'待核实'};
+const memberStates = {waiting:'等待', thinking:'思考中', spoken:'已发言', listening:'旁听', left:'已离开',
+  failed:'本轮未完成', unconfirmed:'待核实', closed:'已结束'};
+const active = new Set(['queued','running','paused','go_wait','stopping']);
+const url = new URL(location.href);
+const initialView = url.searchParams.get('view');
+const displayTime = new Intl.DateTimeFormat('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+$('group').value = ['formal','test'].includes(initialView) ? initialView : 'current';
+let live, listSignature = '';
+const node = (tag, value = '', cls = '') => {
+  const result = document.createElement(tag);
+  result.textContent = value;
+  result.className = cls;
+  return result;
+};
+async function api(params, method = 'GET', body) {
+  const response = await fetch(path + '?' + new URLSearchParams(params), {
+    method, cache:'no-store', headers:body ? {'Content-Type':'application/json'} : {}, body:body && JSON.stringify(body)
+  });
+  if (response.status === 401) throw Error('请从 FishHome 控制台打开会场或重新打开 DSH。');
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || '会场暂时不可达。');
+  return result;
+}
+function select(id) {
+  if (live) clearTimeout(live.timer);
+  const view = $('group').value;
+  const params = new URLSearchParams({view});
+  if (id) params.set('id', id);
+  history.replaceState(null, '', location.pathname + '?' + params);
+  live = id ? {id, view, after:0, receipts:new Map()} : null;
+  $('topic').textContent = id ? '正在打开组会' : '选择一场组会';
+  for (const name of ['state','members','stream','feed-status']) $(name).replaceChildren();
+  for (const item of $('meetings').querySelectorAll('button[data-meeting]')) {
+    item.setAttribute('aria-current', String(item.dataset.meeting === id));
+  }
+  $('post').hidden = true;
+  $('comment').disabled = $('post').querySelector('button').disabled = false;
+  $('comment').value = '';
+  if (live) poll(live);
+}
+function listGroup(title, meetings) {
+  return [node('h3', title), ...(meetings.length ? meetings.map(meeting => {
+    const button = node('button', meeting.topic, 'meeting');
+    button.type = 'button';
+    button.dataset.meeting = meeting.id;
+    button.setAttribute('aria-current', String(meeting.id === live?.id));
+    button.append(node('small', [meeting.style === 'casual' ? '茶会' : '讨论会',
+      states[meeting.status] || meeting.status, meeting.rounds ? meeting.round + '/' + meeting.rounds + ' 轮' :
+        '已聊 ' + meeting.round + ' 轮'].join(' · '), active.has(meeting.status) ? 'live' : ''));
+    button.onclick = () => select(meeting.id);
+    return button;
+  }) : [node('p','暂无会议','muted hint')])];
+}
+let listTimer, listRead;
+async function list() {
+  clearTimeout(listTimer);
+  const read = listRead = {};
+  const view = $('group').value;
+  try {
+    const result = await api({view});
+    if (listRead !== read) return;
+    $('list-status').textContent = '';
+    const signature = JSON.stringify(result);
+    if (signature !== listSignature) {
+      listSignature = signature;
+      $('meetings').replaceChildren(...listGroup('进行中',result.meetings.filter(m => active.has(m.status))),
+        ...listGroup('历史组会',result.meetings.filter(m => !active.has(m.status))));
+    }
+  } catch (error) {
+    if (listRead === read) $('list-status').textContent = error.message;
+  } finally {
+    if (listRead === read) {
+      listTimer = setTimeout(list, document.hidden ? 6000 : 1500);
+    }
+  }
+}
+function render(meeting, state) {
+  $('topic').textContent = state.topic;
+  $('state').textContent = [state.style === 'casual' ? '茶会' : '讨论会', states[state.status] || state.status,
+    state.current_round ? '第 ' + state.current_round + ' 轮' : ''].filter(Boolean).join(' · ');
+  const members = state.members.map(member => node('span',
+    `${member.name} · ${memberStates[member.status] || member.status}`,
+    member.status === 'thinking' ? 'member live' : 'member'));
+  if ($('members').textContent !== members.map(member => member.textContent).join('')) $('members').replaceChildren(...members);
+  const stream = $('stream');
+  const follow = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 35;
+  for (const entry of state.transcript) {
+    const item = node('article', '', entry.receipt ? 'owner' : '');
+    item.append(node('strong', entry.name || (entry.kind === 'host' ? '大肥鱼' : '会议记录')),
+      node('small', [entry.round ? '第 ' + entry.round + ' 轮' : '', displayTime.format(entry.at * 1000)]
+        .filter(Boolean).join(' · ')), node('p', entry.text || ''));
+    if (entry.receipt) {
+      const label = node('small');
+      meeting.receipts.set(entry.receipt, label);
+      item.append(label);
+    }
+    stream.append(item);
+  }
+  for (const [id, label] of meeting.receipts) {
+    const names = (state.owner_receipts[id] || []).map(id => state.members.find(member => member.id === id)?.name || id);
+    label.textContent = names.length ? '已进入发言上下文 · ' + names.join('、')
+      : state.active ? '等待后续发言接收' : '散场前未确认有成员接收';
+  }
+  meeting.after = state.next_after;
+  $('post').hidden = !state.can_post;
+  if (follow) stream.scrollTop = stream.scrollHeight;
+}
+function params(meeting) {
+  return {id:meeting.id, view:meeting.view, after:meeting.after};
+}
+async function poll(meeting) {
+  if (live !== meeting) return;
+  let delay = document.hidden ? 5000 : 1200;
+  try {
+    const cursor = meeting.after;
+    const state = await api(params(meeting));
+    if (live !== meeting) return;
+    if (!meeting.sending && cursor === meeting.after) {
+      render(meeting, state);
+      if ($('feed-status').dataset.source === 'poll') $('feed-status').textContent = '';
+      if (!state.active && meeting.after >= state.transcript_count) return;
+      if (meeting.after < state.transcript_count) delay = 0;
+    }
+  } catch (error) {
+    if (live !== meeting) return;
+    $('feed-status').dataset.source = 'poll';
+    $('feed-status').textContent = error.message;
+    delay = 3000;
+  }
+  meeting.timer = setTimeout(() => poll(meeting), delay);
+}
+$('post').addEventListener('submit', async event => {
+  event.preventDefault();
+  const meeting = live, input = $('comment'), submit = event.submitter, text = input.value.trim();
+  if (!meeting || !text || meeting.sending) return;
+  if (meeting.draft?.text !== text) meeting.draft = {text, post_id:crypto.randomUUID().replaceAll('-','')};
+  meeting.sending = submit.disabled = input.disabled = true;
+  try {
+    const state = await api(params(meeting),'POST',meeting.draft);
+    if (live !== meeting) return;
+    input.value = '';
+    meeting.draft = null;
+    $('feed-status').textContent = '';
+    render(meeting,state);
+  } catch (error) {
+    if (live !== meeting) return;
+    $('feed-status').dataset.source = 'post';
+    $('feed-status').textContent = error.message;
+  } finally {
+    if (live === meeting) meeting.sending = submit.disabled = input.disabled = false;
+  }
+});
+$('group').onchange = () => { listSignature = ''; select(null); list(); };
+select(url.searchParams.get('id'));
+list();
+</script>

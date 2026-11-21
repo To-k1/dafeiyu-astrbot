@@ -92,6 +92,47 @@ class MeetingRunner:
 
 
 class MeetingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_web_post_reaches_unstarted_member_without_restarting_first(self):
+        runner = MeetingRunner()
+        runner.hold.add("1")
+        release_second = asyncio.Event()
+
+        async def recall(client, member_id, topic, turn):
+            if member_id == PROFILES[1]["id"]:
+                await release_second.wait()
+            return ""
+
+        with tempfile.TemporaryDirectory() as folder, closing(core.Store(folder)) as store:
+            meetings = DshMeetings(store, SCOPE)
+            ident = meetings.create("只讨论一轮", PROFILES, "background", 1, 0, 0, "web-test")["id"]
+            with patch("bili_activity_test.dsh_meetings._memory_prepare", side_effect=recall):
+                task = asyncio.create_task(meetings.dispatch_next(
+                    lambda _: runner, lambda _: "workspace", lambda _: True, None))
+                await asyncio.wait_for(runner.accepted.wait(), 2)
+                before = meetings._get(ident)
+                readonly = core.Store(folder, read_only=True)
+                with closing(readonly.db):
+                    self.assertEqual([m["status"] for m in DshMeetings(readonly, SCOPE).live(ident)["members"]],
+                                     ["thinking", "waiting"])
+                self.assertEqual(meetings._get(ident), before)
+                source = "web:" + "a" * 32
+                from_console = core.Store(folder, existing=True)
+                with closing(from_console.db):
+                    DshMeetings(from_console, SCOPE).post(ident, "请核对页码", source, owner_post=True)
+                    DshMeetings(from_console, SCOPE).post(ident, "请核对页码", source, owner_post=True)
+                runner.finish("1", "已有发言")
+                runner.hold.clear()
+                release_second.set()
+                await asyncio.wait_for(task, 4)
+            self.assertEqual(len(runner.sent), 2)
+            self.assertNotIn("请核对页码", runner.sent[0][2])
+            self.assertIn("请核对页码", runner.sent[1][2])
+            state = meetings.live(ident)
+            self.assertEqual(state["status"], "completed")
+            self.assertFalse(state["can_post"])
+            self.assertEqual(state["owner_receipts"], {source: [PROFILES[1]["id"]]})
+            self.assertEqual([post["name"] for post in state["transcript"] if post["kind"] == "host"], ["主人"])
+
     async def test_verified_material_is_in_prompts_and_failed_go_session_is_retired(self):
         runner = MeetingRunner()
         runner.errors.add("1")

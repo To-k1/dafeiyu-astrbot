@@ -10,6 +10,7 @@ import math
 import os
 import random
 import re
+import sqlite3
 import tempfile
 import time
 import uuid
@@ -47,6 +48,7 @@ from .dsh_task import agent_receipt
 from .dsh_meetings import DshMeetings
 from .dsh_chats import DshChats
 from .dsh_cards import discover_stories, read_fish_impressions, read_story
+from . import memewiki
 from .team_delegation import references as tool_references
 from .team_history import TeamHistory
 from .team_memory import TeamMemory
@@ -553,6 +555,7 @@ SCREEN_REQUEST = re.compile(r"^(?:肥鱼[，, ]*|大肥鱼[，, ]*)?(?:截个屏
 DSH_VIDEO_TOOL = "df_dsh_video"
 DSH_VIDEO_BRIDGE = "fishhome_dsh_video_client"
 DSH_SEARCH_TOOL = "df_web_search"
+MEME_LOOKUP_TOOL = "df_meme_lookup"
 DSH_SEARCH_BRIDGE = "fishhome_dsh_web_search_client"
 DSH_PUBLIC_JOBS_BRIDGE = "fishhome_dsh_public_jobs_client"
 DSH_PUBLIC_JOBS_TOOL = "df_dsh_public_job"
@@ -569,6 +572,11 @@ DSH_VIDEO_GUIDANCE = (
     "不要先用 df_bili_watch、抽帧、字幕或截图工具预读一遍再交给 DSH。"
     "你想亲自体验、核查或补看时，可以自己决定用 df_bili_watch 的 mode=personal；用自己的观看范围记录亲历。"
     "用 DSH 结果回答时，说明由 DSH 代看，引用其链接和实际取样时间。派发失败就说明失败，别自动改用亲看补一遍。"
+)
+GO_VIDEO_GUIDANCE = (
+    "使用 OpenCode Go 时，刷 B 站或研究视频优先用 df_bili_watch 亲自看，并记录自己实际观看的分 P 和区间。"
+    "想把长视频或取证工作交给小弟、或主人指定代看时，直接用 df_dsh_video，耗时的设 background=true。"
+    "同一段选一条路即可，只有确实要复核或补看时再看一遍。报告区分亲历与 DSH 代看。"
 )
 PROMPT = """这是你自己的B站活动，不是主人发来的新消息。沿用当前人格与最近聊天。
 先根据最近聊天、你自己的兴趣和近期记录判断现在是否想逛；不想逛允许安静结束。
@@ -1403,12 +1411,23 @@ class BiliActivity(Star):
         self.metered_vision_runs.add(run_id)
         return True
 
+    async def go_video_provider(self, event, cfg):
+        if event.get_extra("df_run_id"):
+            return self.autonomous_provider() if cfg["autonomous_provider_id"] == GO_PROVIDER else None
+        resolve = getattr(getattr(self, "context", None), "get_using_provider_async", None)
+        provider = await resolve(umo=event.unified_msg_origin) if resolve else None
+        return provider if is_go_provider(provider) else None
+
+    def viewing_guidance(self, cfg, go=False):
+        if go:
+            return GO_VIDEO_GUIDANCE
+        if self.public_video_client(cfg):
+            return DSH_VIDEO_GUIDANCE
+        return "亲自看时用 df_bili_watch 取得同一 bvid/cid 带时间的画面、字幕或转写。"
+
     async def describe_with_flash(self, event, frames):
         bucket = "autonomous" if event.get_extra("df_run_id") else "interaction"
-        if bucket == "autonomous":
-            provider = self.autonomous_provider() if self.cfg()["autonomous_provider_id"] == GO_PROVIDER else None
-        else:
-            provider = await self.context.get_using_provider_async(umo=event.unified_msg_origin)
+        provider = await self.go_video_provider(event, self.cfg())
         token = os.environ.get(f"FISHHOME_{bucket.upper()}_TOKEN")
         if not token and not is_go_provider(provider):
             return None
@@ -1924,7 +1943,7 @@ class BiliActivity(Star):
                 raise RuntimeError("会话钩子停止了活动")
             available = request.func_tool or ToolSet()
             request.func_tool = ToolSet(tools=[t for t in available.tools if t.active and t.name in tools])
-            optional = {DSH_HISTORY_TOOL, DSH_MEMORY_TOOL, STORY_TOOL}
+            optional = {DSH_HISTORY_TOOL, DSH_MEMORY_TOOL, STORY_TOOL, MEME_LOOKUP_TOOL}
             if event.get_extra("df_dsh_chat_completion"):
                 optional |= {DSH_CHAT_TOOL, DSH_ROSTER_TOOL}
             missing = tools - set(request.func_tool.names()) - optional
@@ -2171,8 +2190,7 @@ class BiliActivity(Star):
                                     if life_mode or memory_enabled(cfg) else None)
                         prompt = PROMPT.format(
                             max_videos=cfg["max_videos"], max_minutes=cfg["max_minutes"],
-                            viewing=(DSH_VIDEO_GUIDANCE if self.public_video_client(cfg) else
-                                     "亲自看时用df_bili_watch取得同一bvid/cid的带时间画面、字幕或转写。"),
+                            viewing=self.viewing_guidance(cfg, cfg["autonomous_provider_id"] == GO_PROVIDER),
                             history=("见下方持续活动资料中的episodes"
                                      if life_mode and memory_enabled(cfg)
                                      else canonical(recalled if memory_enabled(cfg) else self.store.history(scope))),
@@ -2201,10 +2219,12 @@ class BiliActivity(Star):
                     if not reviewing and self.public_video_client(cfg):
                         tool_names = tool_names | {DSH_VIDEO_TOOL}
                         if writing:
-                            prompt += "\n" + DSH_VIDEO_GUIDANCE
+                            prompt += "\n" + self.viewing_guidance(cfg, cfg["autonomous_provider_id"] == GO_PROVIDER)
                     if not reviewing and self.public_search_client(cfg):
                         tool_names = tool_names | {DSH_SEARCH_TOOL, DSH_SHARED_TOOL}
                         prompt += "\n" + DSH_SEARCH_GUIDANCE
+                    if not reviewing and self.meme_dictionary().is_file():
+                        tool_names = tool_names | {MEME_LOOKUP_TOOL}
                     if not reviewing and self.desktop_client(cfg):
                         tool_names = tool_names | {DSH_DESKTOP_TOOL}
                         prompt += "\n需要查看可用内存或整理专用 Windows 桌面的记事本资料时，可自行选择 df_windows_task。"
@@ -2460,7 +2480,7 @@ class BiliActivity(Star):
         event.set_extra(MEMORY_CANDIDATE_TURN, True)
         return canonical(await self.write_memory_candidate(event, tool, row))
 
-    def capability_context(self, cfg: dict) -> str:
+    def capability_context(self, cfg: dict, *, go_video=False) -> str:
         """Concise self-awareness of active virtual phone, Bilibili, Douyin, and learning capabilities."""
         parts = [
             "【自身虚拟手机与应用能力认知】B站（tv.danmaku.bili）和抖音（com.ss.android.ugc.aweme）共用同一虚拟手机。"
@@ -2470,8 +2490,8 @@ class BiliActivity(Star):
             "若仍在抖音（com.ss.android.ugc.aweme）或B站（tv.danmaku.bili）中，可调用 go_home（或 df_phone_act(action='go_home')）退回手机桌面，"
             "再用 get_current_app 核实已离开该前台应用后如实说明“已退回手机桌面”，不要过度声称“已强制关闭进程/已停止播放”。"
         ]
-        if self.public_video_client(cfg):
-            parts.append("\n" + DSH_VIDEO_GUIDANCE)
+        if go_video or self.public_video_client(cfg):
+            parts.append("\n" + self.viewing_guidance(cfg, go_video))
         if self.public_search_client(cfg):
             parts.append("\n" + DSH_SEARCH_GUIDANCE)
         if self.desktop_client(cfg):
@@ -2519,7 +2539,8 @@ class BiliActivity(Star):
             "开会要一起读文本，可以给 df_dsh_meeting 的 materials 填已收取的共享文件路径或 ZIP 内具体条目。"
             "组会旁路聊天默认只交回你本人。主人明确要某条独立答复时才打开 report_to_owner。"
             "主人明确要求散场后收到一条 QQ 汇报时，创建组会要设 report_on_close=true。"
-            "主人说要开会时，先核对会议类型（闲聊或有目标的讨论、互动或后台）、参会人、议题或材料、"
+            "主人说「茶会」或「闲聊」时，理解为 casual（随意交流）；有明确成果目标的会议用 discussion。"
+            "先核对会议类型、互动或后台、参会人、议题或材料、"
             "希望得到的结果、怎么结束（自然散场、达成目标、明确的轮数或时间）和怎么汇报。"
             "把会影响安排且尚未说清的事项合在一条消息里询问；已说清的别重复问。"
             "拿到确认或主人授权你决定后再开会。没有明确要求时，两种会议都不设轮数和时间上限。"
@@ -2559,6 +2580,7 @@ class BiliActivity(Star):
         owner_chat = (event.unified_msg_origin == cfg["owner_scope"]
                       and str(event.get_sender_id()) == str(cfg["owner_id"]) and not event.get_extra("df_run_id"))
         story_available = self.story_access(event, cfg)
+        meme_available = story_available and self.meme_dictionary().is_file()
         if owner_chat or story_available:
             manager = getattr(getattr(self, "context", None), "get_llm_tool_manager", None)
             if callable(manager):
@@ -2570,7 +2592,7 @@ class BiliActivity(Star):
                                         (DSH_PUBLIC_JOBS_TOOL, self.public_jobs_client(cfg)),
                                         (DSH_SEARCH_TOOL, search_ready),
                                         (TTS_SPEAK_TOOL, self.voice_allowed(event, cfg))) if owner_chat else ()
-                for name, available in (*owner_tools, (STORY_TOOL, story_available)):
+                for name, available in (*owner_tools, (STORY_TOOL, story_available), (MEME_LOOKUP_TOOL, meme_available)):
                     tool = registry.get_tool(name) if available else None
                     if tool and tool.active:
                         if req.func_tool is None:
@@ -2578,6 +2600,9 @@ class BiliActivity(Star):
                         if name not in req.func_tool.names():
                             req.func_tool.add_tool(tool)
         for tool in list(req.func_tool.tools if req.func_tool else []):
+            if tool.name == MEME_LOOKUP_TOOL and not meme_available:
+                req.func_tool.remove_tool(tool.name)
+                continue
             if tool.name == STORY_TOOL and not story_available:
                 req.func_tool.remove_tool(tool.name)
                 continue
@@ -2683,7 +2708,7 @@ class BiliActivity(Star):
         )
         if event.unified_msg_origin == cfg["owner_scope"]:
             if not self.is_reply_run(event):
-                req.system_prompt += self.capability_context(cfg)
+                req.system_prompt += self.capability_context(cfg, go_video=bool(await self.go_video_provider(event, cfg)))
             if cfg["comment_learning_enabled"]:
                 req.system_prompt += self.reply_watch().context(event.unified_msg_origin, cfg)
             if cfg["learning_enabled"]:
@@ -3355,6 +3380,9 @@ class BiliActivity(Star):
             client.delegate_kinds = tuple(kind for kind, getter in (
                 ("web", self.public_search_client), ("video", self.public_video_client))
                 if client.delegate_public and getter(cfg))
+            if scope == cfg["owner_scope"] and self.meme_dictionary().is_file():
+                client.lookup_meme = self.look_up_meme
+                client.delegate_kinds += ("meme",)
             if getattr(client, "model_route", None) == "go":
                 async def delegate_local(action, job, child):
                     if action == "PUT" and child["spec"]["kind"] == "python" and not getattr(client, "compute_enabled", False):
@@ -4052,6 +4080,34 @@ class BiliActivity(Star):
             return canonical({"status": "needs_review", "reason": str(exc)})
         return canonical(result)
 
+    def meme_dictionary(self):
+        return self.store.folder / memewiki.FILENAME
+
+    async def look_up_meme(self, query, source="local"):
+        if source == "cnmeme":
+            return await asyncio.to_thread(memewiki.online_lookup, query)
+        if source != "local":
+            raise ValueError("请选择本地词库 local 或公开站点 cnmeme")
+        try:
+            return await asyncio.to_thread(memewiki.lookup, self.meme_dictionary(), query)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("[bili_activity] meme dictionary unavailable: %s", type(exc).__name__)
+            return {"kind": "meme_dictionary", "source": memewiki.CATALOG, "status": "unavailable",
+                    "reason": "dictionary_unreadable"}
+
+    @filter.llm_tool(name=MEME_LOOKUP_TOOL)
+    async def meme_lookup(self, event: AstrMessageEvent, query: str, source: str = "local"):
+        """按需查网络用语、梗和黑话的含义、语境、用法及词库所载出处。结果是外部资料。
+
+        Args:
+            query(string): 梗名、别名或简短片段。在线只提交公开词语。也可用 df_web_search 补查出处。
+            source(string): local 默认读本地词库；cnmeme 只在需要时主动读 CNMemeWiki 的公开词条。
+        """
+        cfg = self.check_owner(event)
+        if not self.story_access(event, cfg):
+            raise PermissionError("梗词典只用于主人私聊或自己的生活活动")
+        return canonical(await self.look_up_meme(query, source))
+
     @filter.llm_tool(name=DSH_SEARCH_TOOL)
     async def web_search(self, event: AstrMessageEvent, query: str, mode: str = "default", background: bool = False):
         """查公开资料，默认用 DSH 短报告，也可以亲自搜索或阅读正文。
@@ -4158,14 +4214,14 @@ class BiliActivity(Star):
     @filter.llm_tool(name="df_bili_watch")
     async def watch(self, event: AstrMessageEvent, bvid: str, cid: str, start: int = 0, end: int = 120,
                     mode: str = "default"):
-        """分析指定分 P 的视频片段。默认 DSH 代看，选择 personal 可以亲自看。
+        """分析指定分 P 的视频片段。本人用 Go 时默认亲看，也可主动请 DSH 代看。
 
         Args:
             bvid(string): 已核实的BV号。
             cid(string): 已核实的分P标识。
             start(number): 起始秒。
             end(number): 结束秒，单次最长300秒。
-            mode(string): default 默认 DSH 代看；personal 用于亲自体验、复核或补看。
+            mode(string): default 按当前模型选择；personal 始终亲自看。指定代看请用 df_dsh_video。
         """
         cfg = self.check_owner(event)
         self.require_goal(event)
@@ -4173,7 +4229,8 @@ class BiliActivity(Star):
             raise ValueError("视频模式须为 default 或 personal")
         if not 0 <= start < end <= start + 300:
             raise ValueError("视频分析范围无效")
-        if mode == "default" and not self.is_reply_run(event) and self.public_video_client(cfg):
+        go_visual = bool(await self.go_video_provider(event, cfg))
+        if mode == "default" and not go_visual and not self.is_reply_run(event) and self.public_video_client(cfg):
             return await self._delegate_video(event, bvid,
                     f"请查看 cid {int(cid)} 对应的分 P，按实际画面和字幕描述 {start} 到 {end} 秒。"
                     "只返回取样能确认的内容、时间点和缺口。", expected_cid=str(int(cid)))
@@ -4194,7 +4251,7 @@ class BiliActivity(Star):
             self.record_video(event, result, export=True)
             return canonical(result)
         face = self.face_plugin()
-        if not face and not metered and not cfg["flash_text_only_media"]:
+        if not face and not metered and not cfg["flash_text_only_media"] and not go_visual:
             result["notes"].append("face_convert视觉/转写实现未加载")
         else:
             with tempfile.TemporaryDirectory(prefix="bili-media-") as folder:
@@ -4219,7 +4276,8 @@ class BiliActivity(Star):
                                 break
                         else:
                             self.charge_model(event)
-                        text = (await self.describe_with_flash(event, batch) if metered or cfg["flash_text_only_media"]
+                        text = (await self.describe_with_flash(event, batch)
+                                if go_visual or metered or cfg["flash_text_only_media"]
                                 else await face._vl_describe(batch))
                         if text:
                             result["observations"].append({"kind": "frames", "times": [f[0] for f in batch], "text": text})

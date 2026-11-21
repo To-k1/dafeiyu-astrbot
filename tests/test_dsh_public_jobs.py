@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import asynccontextmanager, closing, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,6 +15,7 @@ from deploy.dsh_bridge.go_relay import GoSubscriptionWaiting
 if os.name == "nt":
     from deploy.desktop_manager.manager import create_app
     from deploy.desktop_manager.public_jobs import PublicJobs
+    from deploy.desktop_manager import video_worker
     from deploy.desktop_manager.video_worker import VideoWorker
     from deploy.desktop_manager.windows import write_json
 
@@ -291,3 +292,32 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
             release.set()
         await eventually(lambda: all(jobs.get(ident)["state"] == "completed"
                                      for ident in (VIDEO_ID, SEARCH_ID, EXTRA_ID)))
+
+    async def test_worker_restarts_before_session_creation_and_executes_only_once(self):
+        (self.root / "Start-DSH-Video.cmd").touch()
+        (self.root / "AppData/Local/FishHome").mkdir(parents=True)
+        worker = VideoWorker(self.root, self.root, "runner")
+        connected = object()
+        connect = AsyncMock(side_effect=[video_worker.WorkerStartupError("early exit"), connected])
+        execute = AsyncMock(return_value=result(SEARCH))
+        phases = []
+
+        @asynccontextmanager
+        async def listener(_server, _token):
+            yield "http://127.0.0.1:1/mcp"
+
+        with patch.object(video_worker, "media_listener", listener), \
+                patch.object(video_worker, "impersonate", return_value=nullcontext("runner-token")), \
+                patch.object(video_worker.win32profile, "GetUserProfileDirectory", return_value=str(self.root)), \
+                patch.object(video_worker, "run_as", side_effect=[101, 102]) as launch, \
+                patch.object(video_worker, "connect_worker", connect), \
+                patch.object(video_worker, "stop_worker", AsyncMock()) as stop, \
+                patch.object(video_worker, "wait_for_memory", AsyncMock()):
+            report = await worker._run("unused", "unused", None, lambda *_: [], execute, None,
+                                       progress=phases.append)
+        self.assertEqual(report, result(SEARCH))
+        self.assertEqual(launch.call_count, 2)
+        self.assertEqual([call.args[-1] for call in stop.await_args_list], [101, 102])
+        self.assertEqual(execute.await_count, 1)
+        self.assertIs(execute.await_args.args[0], connected)
+        self.assertIn("restarting_worker", phases)

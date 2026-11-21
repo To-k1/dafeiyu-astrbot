@@ -1,4 +1,5 @@
-param([switch]$InstallBudgetBridge, [switch]$InstallActivity, [switch]$InstallAffectiveBridge, [switch]$InstallOwnerWork)
+param([switch]$InstallBudgetBridge, [switch]$InstallActivity, [switch]$InstallAffectiveBridge, [switch]$InstallOwnerWork,
+    [switch]$InstallMeetingPanel)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
@@ -22,6 +23,16 @@ if ($InstallOwnerWork) {
     $InstallActivity = $true
     $InstallBudgetBridge = $true
 }
+if ($InstallMeetingPanel) {
+    $dsh = Join-Path $dev 'dsh-0.2.2-rc.1'
+    $panel = Join-Path $dsh 'fishhome-meetings'
+    New-Item -ItemType Directory -Force -Path $panel | Out-Null
+    foreach ($name in @('package.json', 'index.mjs', 'client.js')) {
+        Copy-Item -LiteralPath (Join-Path $repo "deploy\dsh_bridge\fishhome-meetings\$name") -Destination $panel -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $repo 'deploy\dsh_bridge\Start-DSH-Compute.cmd') -Destination $dsh -Force
+}
+
 if ($InstallAffectiveBridge) {
     if (-not $InstallActivity) {
         throw 'Use -InstallActivity with -InstallAffectiveBridge to install the matching activity code.'

@@ -506,6 +506,21 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 0, 8, mode="personal")
         self.assertEqual(self.calls[0][0], "bili_prepare_video")
 
+    async def test_go_defaults_to_personal_video_and_keeps_delegated_search(self):
+        delegate = AsyncMock()
+        provider = types.SimpleNamespace(provider_config={"type": "openai_chat_completion",
+            "model": "deepseek-v4.1-flash", "api_base": "https://opencode.ai/zen/go/v1"})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda _: delegate,
+            fishhome_dsh_web_search_client=lambda _: AsyncMock(),
+            get_using_provider_async=AsyncMock(return_value=provider))
+        event = FakeEvent()
+        await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 0, 8)
+        self.assertEqual(self.calls[0][0], "bili_prepare_video")
+        delegate.assert_not_awaited()
+        self.assertIn("优先用 df_bili_watch", self.plugin.viewing_guidance(self.config, True))
+        self.assertIn("查公开网页时优先用 df_web_search",
+                      self.plugin.capability_context(self.config, go_video=True))
+
     async def test_dsh_goal_recovers_accepted_request_and_writes_back_once(self):
         store = self.plugin.store
         goal = store.life.create_goal(SCOPE, "文件研究", "保留出处", "汇总样例", "file-goal")

@@ -286,7 +286,8 @@ class DshChats:
         if not team_delegation.available(job, client):
             raise DshTaskFailure("delegate_unavailable", "原工具回报暂不可查，已保留派发记录。")
         if not await team_delegation.poll(job, call, lambda: allowed(self.get(row["id"])),
-                                          local=getattr(client, "delegate_local", None)):
+                                          local=getattr(client, "delegate_local", None),
+                                          lookup=getattr(client, "lookup_meme", None)):
             self._save(row)
             return
         self._save(row)

@@ -48,6 +48,7 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
     api = BiliAPI()
     server = public_mcp("FishHome public video")
     media_lock = asyncio.Lock()
+    sampled = {}
     asr_exhausted = False
 
     @server.tool(structured_output=False)
@@ -75,6 +76,12 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
                     return [TextContent(type="text", text=json.dumps({
                         "status": "choose_part", "bvid": bvid, "parts": identity["pages"],
                     }, ensure_ascii=False))]
+                selection = (identity["cid"], start, end, listen)
+                if selection in sampled:
+                    return [TextContent(type="text", text=json.dumps({
+                        "status": "already_sampled", **sampled[selection],
+                        "note": "这个分 P 和区间已取样。使用前次返回的证据；需要补看时选择另一区间。",
+                    }, ensure_ascii=False))]
                 enabled = bool(asr_key) and not asr_exhausted
                 data = await prepare_video(api, bvid, identity["cid"], start, end, include_audio=enabled,
                                            **({"force_audio": True} if enabled and listen else {}))
@@ -97,6 +104,8 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
             "transcript_segments": [item for item in audio_results if item["status"] == "transcribed"],
             "notes": data["notes"],
         }
+        if frames or evidence["subtitles"] or evidence["transcript_segments"]:
+            sampled[selection] = evidence
         if evidence_file is not None:
             receipt = {name: evidence[name] for name in ("source", "cid", "sampling_range", "frame_times")}
             receipt["subtitle_count"] = len(evidence["subtitles"])

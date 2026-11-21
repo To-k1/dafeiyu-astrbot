@@ -20,6 +20,7 @@ if os.name == "nt":
     from plugin.astrbot_plugin_bili_activity import dsh_cards
     from plugin.astrbot_plugin_bili_activity.core import Store as ActivityStore
     from plugin.astrbot_plugin_bili_activity.dsh_roster import DshRoster
+    from plugin.astrbot_plugin_bili_activity.dsh_meetings import DshMeetings
     from plugin.astrbot_plugin_bili_activity.dsh_task import assignment_prompt
     from plugin.astrbot_plugin_bili_activity.team_memory_backend import TeamMemoryBackend
 
@@ -61,6 +62,36 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, 200)
             self.assertNotIn("private-cookie", await result.text())
 
+    async def test_shared_meeting_page_uses_scoped_browser_session_and_lists_new_meeting(self):
+        route = "/api/dsh-team/meeting"
+        host = {"Host": "127.0.0.1:6196"}
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        self.config["agent_runner"] = {"runner_type": "local", "config": {"persona": {"persona_id": "fish-home-v3.0"}}}
+        write_json(self.manager.astrbot_settings, self.config)
+        with closing(ActivityStore(self.manager.activity)) as store:
+            group = DshMeetings(store, self.scope)
+            self.assertEqual((await self.client.get(route, headers=host)).status, 401)
+            page = await self.client.get("/meetings", headers=host)
+            self.assertIn("frame-ancestors http://127.0.0.1:59934", page.headers["Content-Security-Policy"])
+            granted = await self.client.get(route, headers=self.auth)
+            self.assertEqual((await granted.json())["meetings"], [])
+            cookies = {"fishhome-meeting-6196": granted.cookies["fishhome-meeting-6196"].value}
+            profiles = [{"id": ident * 16, "name": ident, "version": 1, "persona": "测试"} for ident in "ab"]
+            ident = group.create("新会议", profiles, "interactive", 1, 0, 0, "input", style="casual")["id"]
+            active = await self.client.get(route, headers=host, cookies=cookies)
+            self.assertEqual((await active.json())["meetings"][0]["id"], ident)
+            body = {"text": "一条主人插话", "post_id": "c" * 32}
+            params = {"id": ident, "view": "test"}
+            wrong_origin = {**host, "Origin": "http://127.0.0.1:59934"}
+            post = await self.client.post(route, headers=wrong_origin, params=params, cookies=cookies, json=body)
+            self.assertEqual(post.status, 401)
+            self.assertEqual(group.get(ident)["transcript"], [])
+            correct_origin = {**host, "Origin": "http://127.0.0.1:6196"}
+            post = await self.client.post(route, headers=correct_origin, params=params, cookies=cookies, json=body)
+            item = (await post.json())["transcript"][0]
+            self.assertEqual((item["name"], item["text"]), ("主人", body["text"]))
+            self.assertEqual((await self.client.get("/api/config", headers=host, cookies=cookies)).status, 401)
+
     async def test_shared_language_uses_owner_file_and_can_be_disabled(self):
         from plugin.astrbot_plugin_bili_activity import shared_language
         route = "/api/shared-language"
@@ -81,6 +112,16 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
             "enabled": True, "filename": "../elsewhere.md", "text": "试写"})
         self.assertEqual(invalid.status, 409)
         self.assertIn("TXT 或 Markdown", (await invalid.json())["error"])
+
+    async def test_meme_dictionary_update_is_console_only(self):
+        route = "/api/meme-dictionary"
+        unauthorized = await self.client.post(route, headers={"Host": self.auth["Host"]})
+        self.assertEqual(unauthorized.status, 401)
+        self.assertEqual(await (await self.client.get(route, headers=self.auth)).json(), {"available": False})
+        status = {"available": True, "entries": 12, "built_at": "定向测试"}
+        with patch("deploy.desktop_manager.manager.memewiki.update", return_value=status) as update:
+            self.assertEqual(await (await self.client.post(route, headers=self.auth)).json(), status)
+        update.assert_called_once_with(self.manager.activity)
 
     async def test_role_card_roundtrip_and_background_only_update(self):
         write_json(self.manager.bridge_settings, {"owner_scope": self.scope})

@@ -7,6 +7,7 @@ from uuid import uuid4
 from urllib.parse import parse_qs, urlsplit
 
 from .core import canonical
+from .memewiki import LIMIT as MEME_QUERY_LIMIT, validate_query as validate_meme_query
 
 MARKER = re.compile(r"<fishhome_delegate>(.*?)</fishhome_delegate>(?=\s*(?:<fishhome_memory>|$))", re.S)
 TERMINAL = {"completed", "failed", "cancelled", "needs_review"}
@@ -20,6 +21,8 @@ def guidance(kinds, source=None):
     choices = []
     if "web" in kinds:
         choices.append('{"kind":"web","query":"要核对的公开问题"}')
+    if "meme" in kinds:
+        choices.append('{"kind":"meme","query":"要了解的梗名或简短片段"}')
     if "video" in kinds:
         choices.append('{"kind":"video","reference":"BV号或公开B站视频链接","question":"要核对的画面"}')
     for kind, instruction in (("file", "只读整理一份已授权文件"), ("python", "在隔离 Python 中执行计算并留下结果")):
@@ -27,14 +30,19 @@ def guidance(kinds, source=None):
             choices.append(canonical({"kind": kind, "source": source or "", "instruction": instruction}))
     if not choices:
         return ""
+    meme_help = ""
+    if "meme" in kinds:
+        meme_help = ("查询梗百科只用 kind=meme。默认读本地词条，可选 source=cnmeme 获取网站公开词条，在线只提交公开词语。"
+                     + ("没有命中或语境不明时，也可用已列出的 web 查询。" if "web" in kinds else ""))
     return (
         "\n你可在当前工作范围内向无名工具委派取证或执行，由你判断怎么用。"
         "角色观点和文学正文默认由你亲自形成。工具回传不代表你亲眼看过。"
         "这是 FishHome 宿主读取的回复文本协议。它无需出现在 DSH 的工具列表里。"
         "要派发就在你的回复里直接输出协议块，宿主会执行并将结果交回这条会话。"
         "公开查证只带公开信息。file/python 只填当前授权的原始素材引用，如 sample.csv 或 shared/下的相对路径；"
-        "不涉及文件的 python 可留空 source。每个工具写自己的报告，不能扩大访问范围。"
-        "在记忆协议块之前单列一个 <fishhome_delegate>，"
+        "不涉及文件的 python 可留空 source。不能扩大访问范围。" + meme_help
+        + "只使用下列示例列出的 kind。把 <fishhome_delegate> 作为回复末尾的最后一段，"
+        "如果同时有记忆协议块，则紧挨在记忆块前。工具块后不要补普通说明。"
         "包含任务数组，例如 <fishhome_delegate>[" + ",".join(choices)
         + "]</fishhome_delegate>。只列实际需要执行的独立步骤。若要保存记忆，请在资料回报后的正式答复中提出。"
     )
@@ -53,13 +61,20 @@ def read_delegation(reply, kinds):
     for task in tasks:
         if not isinstance(task, dict) or task.get("kind") not in kinds:
             raise ValueError("当前会话没有这类无名工具权限")
-        fields = {"web": {"query": 4000}, "video": {"reference": 500, "question": 1000}}.get(
+        fields = {"web": {"query": 4000}, "meme": {"query": MEME_QUERY_LIMIT},
+                  "video": {"reference": 500, "question": 1000}}.get(
             task["kind"], {"source": 200, "instruction": 1500})
+        if task["kind"] == "meme" and "source" in task:
+            fields["source"] = 8
         if task.keys() != fields.keys() | {"kind"} or any(not isinstance(task[key], str)
                 or not (0 if key == "source" and task["kind"] == "python" else 1) <= len(task[key].strip()) <= limit
                 for key, limit in fields.items()):
             raise ValueError("无名工具请求缺少有效参数")
         spec = {"kind": task["kind"], **{key: task[key].strip() for key in fields}}
+        if spec["kind"] == "meme":
+            validate_meme_query(spec["query"])
+            if spec.get("source", "local") not in {"local", "cnmeme"}:
+                raise ValueError("请选择本地词库 local 或公开站点 cnmeme")
         if spec["kind"] == "video" and not re.fullmatch(BV, spec["reference"]):
             url = urlsplit(spec["reference"])
             parts = parse_qs(url.query).get("p", [])
@@ -83,17 +98,20 @@ def references(jobs):
 
 
 def reference(item):
+    if item["spec"]["kind"] == "meme":
+        return None
     if item["spec"]["kind"] in LOCAL_KINDS:
         return item.get("reference")
     return "public-job:" + item["id"]
 
 
 def available(job, client):
-    return all(callable(getattr(client, "delegate_local" if item["spec"]["kind"] in LOCAL_KINDS else "delegate_public", None))
+    handlers = {"meme": "lookup_meme", **dict.fromkeys(LOCAL_KINDS, "delegate_local")}
+    return all(callable(getattr(client, handlers.get(item["spec"]["kind"], "delegate_public"), None))
                for item in job["children"])
 
 
-async def poll(job, call, allowed, *, local=None, cancel=False, pause=False):
+async def poll(job, call, allowed, *, local=None, lookup=None, cancel=False, pause=False):
     """Both runners persist the child before execution and deduplicate its request."""
     async def child(item):
         if item.get("state") in TERMINAL:
@@ -101,6 +119,13 @@ async def poll(job, call, allowed, *, local=None, cancel=False, pause=False):
         ident = item["id"]
         is_local = item["spec"]["kind"] in LOCAL_KINDS
         if pause and not is_local:
+            return item
+        if item["spec"]["kind"] == "meme":
+            if cancel:
+                return {**item, "state": "cancelled"}
+            if allowed():
+                result = await lookup(item["spec"]["query"], item["spec"].get("source", "local"))
+                return {**item, "state": "completed", "lookup": result}
             return item
         if is_local:
             action = "DELETE" if cancel else "PAUSE" if pause else "GET"
@@ -145,6 +170,9 @@ async def poll(job, call, allowed, *, local=None, cancel=False, pause=False):
 def brief(job):
     items = []
     for item in job["children"]:
+        if item["spec"]["kind"] == "meme":
+            items.append({"kind": "meme", "state": item["state"], "result": item.get("lookup")})
+            continue
         report = item.get("report") or {}
         items.append({"reference": reference(item), "state": item["state"],
             "summary": str(report.get("summary", ""))[:1500], "failure": item.get("failure"),

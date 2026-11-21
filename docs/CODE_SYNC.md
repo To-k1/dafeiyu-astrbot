@@ -51,6 +51,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$sourceRoot\deploy\desk
 
 此安装步骤编译托盘、更新活动/心境/Bridge 插件及 DSH 启动文件，保留运行端配置、记忆和账户凭据。安装器针对已支持的 AstrBot 4.29.4；失败时先查看报错，不启动半更新的服务。以后依赖版本或 AstrBot 内核补丁变化须按对应版本说明执行，以上操作不会自动更新全部第三方软件。
 
+如果本次安装包含共用组会会场，停止控制台和两路 DSH 后，给 `install.ps1` 加 `-InstallMeetingPanel`。此开关把浏览器插件及启动脚本装入 DSH 0.2.2-rc.1 的安装目录。更新后从 FishHome 控制台打开「DSH 会场」，它会选中 DSH 的原生会场面板。台式机远程控制台需重新打开以加载新版页面及路由。插件回退时恢复原 DSH 启动脚本，移走此次安装的 `fishhome-meetings` 文件夹，重启两路 DSH。
+
 桌面 broker 的代码受管理员 ACL 保护。若本次也更新它，在 ThinkBook 管理员 PowerShell 另运行：
 
 ```powershell

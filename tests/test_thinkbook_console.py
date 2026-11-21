@@ -8,6 +8,43 @@ from deploy.desktop_manager import thinkbook
 
 
 class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_meeting_relay_forwards_view_and_owner_insert(self):
+        path = "/api/dsh-team/meeting"
+        query = {"id": "a" * 16, "view": "test", "after": "3"}
+        comment = {"text": "主人原话", "post_id": "b" * 32}
+
+        async def manager(request):
+            self.assertEqual(request.headers["Authorization"], "Bearer thinkbook-manager")
+            if request.method == "GET" and "id" not in request.query:
+                return web.json_response({"meetings": []})
+            self.assertEqual(dict(request.query), query)
+            if request.method == "POST":
+                self.assertEqual(await request.json(), comment)
+            return web.json_response({"active": True})
+
+        upstream = web.Application()
+        upstream.router.add_route("*", path, manager)
+        async with TestServer(upstream) as target, ClientSession() as session:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                app = thinkbook.create_relay(session, "desktop-browser", "thinkbook-manager")
+                async with TestClient(TestServer(app)) as browser:
+                    host = {"Host": "127.0.0.1:16196"}
+                    self.assertEqual((await browser.post(path, params=query, headers=host, json=comment)).status, 401)
+                    auth = {**host, "Authorization": "Bearer desktop-browser"}
+                    self.assertEqual((await browser.get(path, params=query, headers=auth)).status, 200)
+                    self.assertEqual((await browser.post(path, params=query, headers=auth, json=comment)).status, 200)
+                    page = await browser.get("/meetings", headers=host)
+                    self.assertIn("frame-ancestors http://127.0.0.1:15934", page.headers["Content-Security-Policy"])
+                    grant = await browser.get(path, headers=auth)
+                    self.assertEqual((await grant.json())["meetings"], [])
+                    key = "fishhome-meeting-16196"
+                    cookies = {key: grant.cookies[key].value}
+                    self.assertEqual((await browser.get(path, params=query, headers=host, cookies=cookies)).status, 200)
+                    origin = {**host, "Origin": "http://127.0.0.1:16196"}
+                    self.assertEqual((await browser.post(path, params=query, headers=origin,
+                                                         cookies=cookies, json=comment)).status, 200)
+                    self.assertEqual((await browser.get("/api/status", headers=host, cookies=cookies)).status, 401)
+
     async def test_relay_routes_actions_and_keeps_manager_token_off_the_browser(self):
         requests = []
 
@@ -61,6 +98,23 @@ class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
                     headers = {"Host": "127.0.0.1:16196", "Authorization": "Bearer desktop-browser"}
                     response = await browser.post("/api/config", headers=headers, json={"contact_daily_limit": 5})
                     self.assertEqual(await response.json(), {"message": "已保存"})
+
+    async def test_remote_console_updates_meme_dictionary_via_thinkbook(self):
+        route = "/api/meme-dictionary"
+
+        async def update(request):
+            self.assertEqual(request.headers["Authorization"], "Bearer thinkbook-manager")
+            return web.json_response({"available": True, "entries": 12})
+
+        upstream = web.Application()
+        upstream.router.add_post(route, update)
+        async with TestServer(upstream) as target, ClientSession() as upstream_client:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                relay = thinkbook.create_relay(upstream_client, "desktop-browser", "thinkbook-manager")
+                async with TestClient(TestServer(relay)) as browser:
+                    headers = {"Host": "127.0.0.1:16196", "Authorization": "Bearer desktop-browser"}
+                    response = await browser.post(route, headers=headers)
+                    self.assertEqual(await response.json(), {"available": True, "entries": 12})
 
     async def test_observatory_proxy_forwards_reads_and_queries_only(self):
         requests = []

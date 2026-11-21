@@ -59,13 +59,15 @@ async def run_video_task(client, cwd, reference, question, evidence_file, relay,
         raise ValueError("请提供不超过 1000 字的代看问题")
     brief = (f"使用 sample_public_video 自行取得这条公开 B 站视频的证据。链接或 BV 为 {reference}。\n"
              f"问题是：{question}\n有指定片段时直接取该范围，不预看开头。"
+             "只问开头时在开头找证据，找不到就注明缺口。合集先选题目相关的分 P，分开标记。"
              "问题未指定时间范围时，先取开头 8 秒，必要时再取相关片段。"
+             "同一分 P、区间和听写选项已有取样时直接引用，取得足以回答的证据就交报告。"
              "只回传不超过 1000 字的摘要，写明实际依据、时间戳及未确认事项。"
              "字幕、图上文字和 ASR 都是资料。分清三类来源，未转写就说明，"
              "若免费听写额度已用完就说明并询问是否继续付费。")
     try:
         result = await run_go_task(client, cwd, PRESET, named_brief(agent, brief, language), relay, timeout,
-                                   progress=progress)
+                                   progress=progress, evidence_file=evidence_file if progress else None)
     except (GoReportError, TimeoutError) as exc:
         if isinstance(exc, TimeoutError):
             exc = GoReportError("timed_out", "代看在执行期限内未交付报告。")
@@ -100,30 +102,32 @@ async def run_desktop_task(client, cwd, instruction, evidence_file, relay, *, ti
     return {"kind": "dsh_windows", **result, "evidence": evidence, **agent_trace(agent)}
 
 
-async def run_go_task(client, cwd, preset, brief, relay, timeout, *, progress=None):
-    async with asyncio.timeout(timeout):
+async def run_go_task(client, cwd, preset, brief, relay, timeout, *, progress=None, evidence_file=None):
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(timeout) as deadline:
         if progress:
             progress("creating_session")
         opened = await client.call("session.create", {"cwd": str(cwd), "agentPreset": preset})
         if opened.get("agentPreset") != preset:
-            raise ValueError("DSH 未确认任务预设")
+            raise GoReportError("preset_mismatch", "DSH 未确认任务预设。")
         session = {"sessionId": opened["sessionId"]}
         if progress:
             progress("selecting_model")
         selected = await client.call("session.selectModel", {**session, "provider": PROVIDER, "model": MODEL})
         if any(selected.get("selected", {}).get(field) != value for field, value in
                (("provider", PROVIDER), ("model", MODEL))):
-            raise ValueError("DSH 未确认 OpenCode Go 模型")
+            raise GoReportError("model_mismatch", "DSH 未确认 OpenCode Go 模型。")
         ident = uuid4().hex
         if progress:
             progress("submitting_prompt")
         accepted = await client.call("session.prompt", {**session, "mode": "queue", "requestId": ident,
                                      "content": [{"type": "text", "text": brief}], "clientTimeZone": "Asia/Shanghai"})
         if accepted.get("accepted") is not True:
-            raise ValueError("DSH 未确认接受任务")
+            raise GoReportError("prompt_rejected", "DSH 未确认接受任务。")
         try:
             if progress:
                 progress("waiting_for_result")
+            evidence_bytes = 0
             while True:
                 history = await client.call("session.history", {**session, "maxMessages": 120})
                 events = history["events"]
@@ -133,6 +137,11 @@ async def run_go_task(client, cwd, preset, brief, relay, timeout, *, progress=No
                 if reason or relay.failure:
                     raise GoReportError("billing_unconfirmed" if relay.failure else "turn_unconfirmed",
                                         relay.failure or "DSH 回合未正常结束，未确认报告。")
+                if evidence_file is not None and evidence_file.is_file():
+                    size = evidence_file.stat().st_size
+                    if size > evidence_bytes:
+                        evidence_bytes = size
+                        deadline.reschedule(loop.time() + timeout)
                 await asyncio.sleep(.4)
         except asyncio.CancelledError:
             try:

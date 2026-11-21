@@ -34,6 +34,14 @@
 
 2026-11-19 已上线 ThinkBook。正式 QQ 已重连，两路 DSH 均已恢复。台式机远程入口已实测角色 ZIP 下载、上传与预览；ThinkBook 用隔离样例实际恢复并检索了一条小弟记忆，回指原话成功。正式名册未新增测试对象。更新前源码留在 ThinkBook 的 `%LOCALAPPDATA%\FishHome\manager\before-dsh-copy-20261119-014702`。
 
+## 梗百科词库
+
+在本机控制台或台式机打开的「ThinkBook 远程控制」里，展开「FishHome 本机设置」，在「梗百科词库」点「更新词库」。对应主机经公开 CDN 镜像下载上游打包的 SQLite 文件，校验通过后才替换旧词库。页面显示词条数和上游构建时间。ThinkBook 实测完整下载约 49 秒；更新成功后下一次发起的对话即可按需查询。
+
+大肥鱼使用 `df_meme_lookup`，具名伙伴通过现有宿主工具协议使用 `kind=meme`。默认查询本地词库。主动选 `cnmeme` 可查 CNMemeWiki 的公开词条。两种来源都显示匹配方式及出处核实状态。无结果或语境不清时可按需走现有公开网页搜索。没有自动预查、串子引导、投稿或词条自动写入个人记忆。
+
+如果已有一份上游 `data/memes.db`，也可以用 AstrBot 的 Python 运行 `plugin/astrbot_plugin_bili_activity/memewiki.py <原词库> <AstrBot 活动插件数据目录>` 进行验证并导入。词库可从上游重新下载，移除活动插件数据目录的 `memewiki.sqlite3` 即可暂停新查词。从台式机的远程控制更新时，词库落在 ThinkBook。 [上游词库](https://github.com/thawline/dsh-memewiki/blob/main/data/memes.db) · [上游 MIT 许可](https://github.com/thawline/dsh-memewiki/blob/main/LICENSE)
+
 ## 台式机试运行
 
 1. 双击 `Start-FishHome.cmd`。组件陆续启动后，在控制台运行「试运行自检」。自检核对唯一的 QQ 主人私聊、OneBot、DSH Bridge、Ollama 向量模型、房间与 Android 连接。

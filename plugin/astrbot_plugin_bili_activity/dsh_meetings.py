@@ -22,10 +22,10 @@ DISPOSITIONS = {"[fishhome:listen]": "listening", "[fishhome:leave]": "left"}
 
 
 class DshMeetings:
-    def __init__(self, store, scope):
+    def __init__(self, store, scope, *, view=None):
         self.store = store
         self.prefix = f"{PREFIX}{scope}:"
-        self.persona_mode = store_mode(store)
+        self.persona_mode = view if view is not None else store_mode(store)
 
     def _get(self, ident):
         if not isinstance(ident, str) or not re.fullmatch(r"[a-f0-9]{16}", ident):
@@ -88,6 +88,45 @@ class DshMeetings:
                 "recovery_poll": row.get("recovery_poll"), "conclusion_status": row.get("conclusion_status"),
                 "unresolved_turns": self._unresolved(row)}
 
+    def live(self, ident, after=0):
+        if type(after) is not int or after < 0:
+            raise ValueError("会议记录页码无效")
+        row = self._get(ident)
+        batch = row["batch"]
+        turns = batch.get("turns", {})
+        active = row["status"] in ACTIVE | {"paused"}
+        entries = row["transcript"]
+        page = []
+        for item in entries[after:after + 100]:
+            entry = {key: item[key] for key in ("kind", "name", "round", "text", "at") if key in item}
+            if item.get("owner_post"):
+                entry.update(name="主人", receipt=item["source_id"], received_by=item.get("received_by", []))
+            page.append(entry)
+        overview = self._overview(row)
+        for member in overview["members"]:
+            ident = member["id"]
+            turn = turns.get(ident, {})
+            if row["members"][ident].get("left"):
+                status = "left"
+            elif turn.get("failure"):
+                status = "failed"
+            elif turn.get("pending_confirmation"):
+                status = "unconfirmed"
+            elif turn.get("verified"):
+                status = turn.get("disposition") or "spoken"
+            elif turn.get("prompt_started") and active:
+                status = "thinking"
+            elif not active and any(entry.get("agent_id") == ident and entry["kind"] == "member" for entry in entries):
+                status = "spoken"
+            else:
+                status = "waiting" if active else "closed"
+            member["status"] = status
+        return {**overview, "current_round": batch.get("number", row["round"]), "transcript": page,
+                "next_after": after + len(page), "transcript_count": len(entries), "active": active,
+                "can_post": row["status"] in ACTIVE - {"stopping"} | {"paused"},
+                "owner_receipts": {item["source_id"]: item.get("received_by", []) for item in entries
+                                   if item.get("owner_post")}}
+
     def create(self, topic, profiles, mode, rounds, report_every_rounds, report_every_minutes, source_id,
                autonomous=False, guides=None, style="discussion", report_on_close=False, materials=None,
                duration_minutes=0):
@@ -138,7 +177,7 @@ class DshMeetings:
                     "transcript": [], "notices": [], "batch": {}})
         return self.get(ident)
 
-    def post(self, ident, text, source_id, kind="comment", style=""):
+    def post(self, ident, text, source_id, kind="comment", style="", *, owner_post=False):
         if not isinstance(text, str) or not text.strip() or len(text) > 8000 or not source_id:
             raise ValueError("需要发言正文和来源")
         if kind not in {"comment", "agenda", "continue"}:
@@ -147,7 +186,13 @@ class DshMeetings:
             raise ValueError("仅调整议程或续聊时可改变组会风格")
         with self.store.transaction():
             row = self._get(ident)
-            if row["status"] == "stopping":
+            existing = next((item for item in row["transcript"] if item["kind"] == "host"
+                             and item.get("source_id") == str(source_id)), None) if owner_post else None
+            if existing and existing["text"] != text.strip():
+                raise ValueError("此插话编号已对应另一条发言")
+            if owner_post and existing is None and row["status"] not in ACTIVE - {"stopping"} | {"paused"}:
+                raise ValueError("会议已结束或正在停止")
+            if row["status"] == "stopping" and existing is None:
                 raise ValueError("会议正在停止，请等停止后再发言")
             entry = next((item for item in row["transcript"] if item["kind"] == "host"
                           and item.get("source_id") == str(source_id) and item["text"] == text.strip()), None)
@@ -170,7 +215,7 @@ class DshMeetings:
                 if style and not record_only:
                     row["style"] = style
                 target = row["round"] + 1 + bool(row["batch"])
-                if (row["status"] not in FINISHED and row.get("style") == "casual"
+                if (row["status"] not in FINISHED and (owner_post or row.get("style") == "casual")
                         and row["batch"] and kind == "comment"):
                     target = row["batch"]["number"]
                 round_cap = row.get("round_cap")
@@ -186,7 +231,8 @@ class DshMeetings:
                 visibility = "record_only" if record_only else "next_prompt"
                 entry = {"kind": "host", "round": row["batch"].get("number", row["round"]) if record_only else target,
                          "text": text.strip(), "at": time(), "source_id": str(source_id),
-                         "post_kind": kind, "visibility": visibility, **({"style": style} if style else {})}
+                         "post_kind": kind, "visibility": visibility, **({"style": style} if style else {}),
+                         **({"owner_post": True, "name": "主人"} if owner_post else {})}
                 row["transcript"].append(entry)
                 self._save(row)
         return {**self.get(ident), "post_receipt": {"visibility": entry.get("visibility", "next_prompt"),
@@ -279,13 +325,20 @@ class DshMeetings:
                 result[key] = [item[:800] for item in entry[:10] if isinstance(item, str) and item.strip()]
         return result
 
-    def _prompt_text(self, row, member):
+    def _prompt_text(self, row, member, owner_posts=None):
         batch = row["batch"]
         casual = batch.get("style", row.get("style")) == "casual"
         recorded = row["transcript"] if casual else row["transcript"][:batch["cursor"]]
+        present = [item for index, item in enumerate(row["transcript"])
+                   if (casual or index < batch["cursor"] or item.get("owner_post"))
+                   and item.get("visibility") != "record_only"
+                   and (batch["number"] - 1 <= item["round"] <= batch["number"]
+                        or (item.get("owner_post") and item["round"] < batch["number"]
+                            and not item.get("received_by")))]
+        if owner_posts is not None:
+            owner_posts.extend(item["source_id"] for item in present if item.get("owner_post"))
         context = [{key: item[key] for key in ("kind", "round", "text", "name") if key in item}
-                   for item in recorded if item.get("visibility") != "record_only"
-                   and batch["number"] - 1 <= item["round"] <= batch["number"]]
+                   for item in present]
         mode = ("这场是互动组会，大肥鱼或主人会从主持发言加入。"
                 if row["mode"] == "interactive" else "这场是后台组会，各成员应自行推进当前议题。")
         people = "、".join(person["name"] for person in row["members"].values())
@@ -345,16 +398,31 @@ class DshMeetings:
                 row["members"][member_id]["session_id"] = session_id
                 self._save(row)
             recall = await _memory_prepare(client, member_id, row["topic"], turn)
-            prompt = self._prompt_text(self._get(ident), member)
-            prompt += team_delegation.guidance(getattr(client, "delegate_kinds", ()))
-            if recall:
-                prompt += "\n\n" + recall
-            if turn.get("memory_error"):
+            owner_posts = []
+            with self.store.transaction():
+                fresh = self._get(ident)
+                if fresh["status"] != "running" or not allowed(fresh):
+                    # A prepared turn has never been sent and may be prepared again on resume.
+                    fresh["batch"]["turns"].pop(member_id, None)
+                    self._save(fresh)
+                    return
+                saved = fresh["batch"]["turns"][member_id]
+                # Refresh the prompt if an owner post arrived while this member prepared.
+                prompt = self._prompt_text(fresh, member, owner_posts) + team_delegation.guidance(
+                    getattr(client, "delegate_kinds", ())) + ("\n\n" + recall if recall else "")
+                saved["prompt_started"] = True
+                if owner_posts:
+                    saved["owner_posts"] = owner_posts
+                    turn["owner_posts"] = owner_posts
+                if turn.get("memory_error"):
+                    saved["memory_error"] = turn["memory_error"]
+                self._save(fresh)
+            await _prompt(client, turn, prompt)
+            if owner_posts:
                 with self.store.transaction():
                     fresh = self._get(ident)
-                    fresh["batch"]["turns"][member_id]["memory_error"] = turn["memory_error"]
+                    self._receive_owner_posts(fresh, member_id, turn)
                     self._save(fresh)
-            await _prompt(client, turn, prompt)
 
         if turn.get("memory_retry"):
             with self.store.transaction():
@@ -483,6 +551,7 @@ class DshMeetings:
             return latest["status"] == "running" and allowed(latest)
 
         done = await team_delegation.poll(job, call, may_send, local=getattr(client, "delegate_local", None),
+                                          lookup=getattr(client, "lookup_meme", None),
                                           cancel=row["status"] == "stopping")
         self._save_member_delegation(ident, member_id, turn)
         if self._get(ident)["status"] == "stopping":
@@ -499,7 +568,19 @@ class DshMeetings:
         await _prompt(client, turn, text)
         return True
 
+    @staticmethod
+    def _receive_owner_posts(row, member_id, turn):
+        owner_posts = set(turn.get("owner_posts", []))
+        if not owner_posts:
+            return
+        for entry in row["transcript"]:
+            if entry.get("owner_post") and entry["source_id"] in owner_posts:
+                received = entry.setdefault("received_by", [])
+                if member_id not in received:
+                    received.append(member_id)
+
     def _record_turn(self, row, number, member_id, turn, reply, count, *, late=False):
+        self._receive_owner_posts(row, member_id, turn)
         turn.pop("pending_memory_prompt", None)
         if any(entry.get("request_id") == turn["request_id"] for entry in row["transcript"]):
             return

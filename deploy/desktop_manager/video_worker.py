@@ -21,7 +21,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from deploy.dsh_bridge.go_profile import KEY_ENV, PROVIDER, render_go_patch
 from deploy.dsh_bridge.desktop_tools import desktop_call, desktop_server, render_desktop_preset
 from deploy.dsh_bridge.go_relay import GoRelay, GoSubscriptionWaiting
-from deploy.dsh_bridge.go_video_task import run_desktop_task, run_search_task, run_video_task
+from deploy.dsh_bridge.go_video_task import GoReportError, run_desktop_task, run_search_task, run_video_task
 from deploy.dsh_bridge.public_search import render_search_preset, search_server, validate_task_query
 from deploy.dsh_bridge.public_video import build_server, render_preset, video_reference
 from deploy.bili_activity.resource_capacity import MAX_WAIT_SECONDS, wait_for_memory
@@ -30,6 +30,10 @@ from .windows import impersonate, run_as
 
 BACKGROUND_TIMEOUT = 300
 BACKGROUND_STARTUP_TIMEOUT = 90
+
+
+class WorkerStartupError(RuntimeError):
+    pass
 
 
 class MediaServer(uvicorn.Server):
@@ -84,9 +88,9 @@ class VideoDshClient:
                    "payload": {"args": {"request": request}}}
         async with self.http.post(f"{self.base}/api/{path}", json=payload, headers={"Cookie": self.cookie},
                                   allow_redirects=False) as response:
-            reply = (await response.json(content_type=None))["result"]
-            if not reply["ok"]:
-                raise ValueError("DSH 未接受公开视频操作")
+            reply = (await response.json(content_type=None)).get("result")
+            if not isinstance(reply, dict) or not reply.get("ok"):
+                raise GoReportError("worker_rpc_rejected", f"DSH 未接受公开资料操作：{method}。")
             value = reply["value"]
             return {"events": value["records"]} if method == "session.history" else value
 
@@ -102,11 +106,11 @@ async def connect_worker(http, account, password, logfile, pid, *, timeout=30):
             async with http.get(base + "/connect", params={"token": unquote(token), "interactions": "none"},
                                 allow_redirects=False) as response:
                 if response.status != 302 or not response.cookies:
-                    raise ValueError("公开视频 DSH 未发放本机凭据")
+                    raise WorkerStartupError("工作进程未发放本机连接凭据")
                 cookie = "; ".join(f"{name}={value.value}" for name, value in response.cookies.items())
                 return VideoDshClient(http, base, cookie)
         if not psutil.pid_exists(pid):
-            raise RuntimeError("公开视频 DSH 在就绪前退出")
+            raise WorkerStartupError("工作进程在就绪前退出")
         await asyncio.sleep(.25)
     raise TimeoutError("等待公开资料 DSH 工作进程就绪超时")
 
@@ -212,13 +216,27 @@ class VideoWorker:
                             raise ValueError("本机 DSH 启动仍在排队，或可用内存低于 3 GiB，请稍后再试") from None
                         try:
                             cmd = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
-                            pid = run_as(account, password, [cmd, "/d", "/c", "call", str(launcher)],
-                                         env={"FISHHOME_VIDEO_JOB": str(work), "DSH_HOME": str(work / "dsh"),
-                                              KEY_ENV: model_token, "DSH_PERMISSION_MODE": "workspace-write"})
-                            if progress:
-                                progress("connecting_worker")
-                            client = await connect_worker(http, account, password, work / "worker.log", pid,
-                                                          timeout=startup_timeout)
+                            for attempt in range(2):
+                                logfile = work / "worker.log"
+                                pid = run_as(account, password, [cmd, "/d", "/c", "call", str(launcher)],
+                                             env={"FISHHOME_VIDEO_JOB": str(work), "DSH_HOME": str(work / "dsh"),
+                                                  KEY_ENV: model_token, "DSH_PERMISSION_MODE": "workspace-write"})
+                                if progress:
+                                    progress("connecting_worker" if not attempt else "restarting_worker")
+                                try:
+                                    client = await connect_worker(http, account, password, logfile, pid,
+                                                                  timeout=startup_timeout)
+                                    break
+                                except WorkerStartupError as exc:
+                                    if attempt:
+                                        raise GoReportError("worker_startup_failed", str(exc)) from exc
+                                    # No session or model request exists at this point.
+                                    await stop_worker(account, password, pid)
+                                    pid = None
+                                    with impersonate(account, password):
+                                        logfile.unlink(missing_ok=True)
+                                except TimeoutError as exc:
+                                    raise GoReportError("worker_startup_timed_out", str(exc)) from exc
                         finally:
                             self.cold_starts.release()
                         return await execute(client, work, relay)

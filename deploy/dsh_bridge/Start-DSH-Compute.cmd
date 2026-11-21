@@ -23,5 +23,6 @@ if not exist "%NODE%" set "NODE=C:\Program Files\nodejs\node.exe"
 set EXTRA=
 if not "%~2"=="" set EXTRA=--patch "%~2"
 if not "%~3"=="" set EXTRA=%EXTRA% --patch "%~3"
+if not "%~4"=="" set EXTRA=%EXTRA% --patch "%~4"
 "%NODE%" "%~dp0node_modules\@deepseek-ai\dsh\lib\bin.js" web --patch "%~dp0%PATCH%" %EXTRA% --host 127.0.0.1 --port %~1 --no-open > "%DSH_HOME%\web-start.log" 2>&1
 exit /b %errorlevel%

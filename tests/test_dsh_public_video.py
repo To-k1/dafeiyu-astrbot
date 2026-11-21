@@ -1,5 +1,7 @@
 import base64
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -38,6 +40,23 @@ class PublicVideoTests(unittest.IsolatedAsyncioTestCase):
             blocks = await public_video.build_server().call_tool("sample_public_video", {"reference": BVID})
         sample.assert_not_awaited()
         self.assertEqual(json.loads(blocks[0].text), {"status": "choose_part", "bvid": BVID, "parts": pages})
+
+    async def test_repeated_sample_does_not_refetch_frames_or_record_progress(self):
+        identity = {"cid": 42, "page": 2, "title": "Sample"}
+        evidence = {"covered_range": {"start": 0, "end": 12}, "notes": [],
+                    "subtitles": [{"from": 0, "to": 5, "content": "sample subtitle"}], "frames": []}
+        sample = AsyncMock(return_value=evidence)
+        with TemporaryDirectory() as folder, \
+                patch.object(public_video.BiliAPI, "identity", AsyncMock(return_value=identity)), \
+                patch.object(public_video, "prepare_video", sample):
+            path = Path(folder) / "evidence.jsonl"
+            server = public_video.build_server(evidence_file=path)
+            await server.call_tool("sample_public_video", {"reference": BVID, "page": 2, "end": 12})
+            repeat = await server.call_tool("sample_public_video", {
+                "reference": f"https://www.bilibili.com/video/{BVID}?p=2", "end": 12})
+            self.assertEqual(json.loads(repeat[0].text)["status"], "already_sampled")
+            self.assertEqual(sample.await_count, 1)
+            self.assertEqual(len(path.read_text(encoding="utf8").splitlines()), 1)
 
     def test_no_other_hosts_or_conflicting_part_selectors(self):
         with self.assertRaises(ValueError):

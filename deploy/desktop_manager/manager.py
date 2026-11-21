@@ -22,6 +22,7 @@ import pywintypes
 import win32profile
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
+from plugin.astrbot_plugin_bili_activity import memewiki
 from deploy.bili_activity.ops import DEFAULTS as ACTIVITY_DEFAULTS, NUMERIC_LIMITS, exclusive, ready, save_control, validate_dnd
 from deploy.dsh_bridge.public_page import fetch_public_page, page_slice, save_public_page
 from deploy.dsh_bridge.public_search import search_anysearch, validate_query
@@ -32,6 +33,7 @@ from plugin.astrbot_plugin_bili_activity import dsh_cards
 from plugin.astrbot_plugin_bili_activity.core import Store as ActivityStore
 from plugin.astrbot_plugin_bili_activity import dsh_history_archive
 from plugin.astrbot_plugin_bili_activity.dsh_roster import COPY_MEMORY_PREFIX, DshRoster
+from plugin.astrbot_plugin_bili_activity.dsh_meetings import DshMeetings
 from plugin.astrbot_plugin_bili_activity.team_mode import GROUP_SQL, configured_mode
 from plugin.astrbot_plugin_bili_activity import shared_language
 from scripts.m6_data import export_memory
@@ -39,7 +41,7 @@ from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sy
 
 from .windows import Credentials, impersonate, run_as, write_json
 from . import compute
-from . import desktop_session, persona_mode, provider_mode
+from . import desktop_session, meeting_web, persona_mode, provider_mode
 from .public_jobs import PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable, validate_agent
 from .recovery import capture_and_pull
 from .settings_sync import PEER_PATH, SettingsSync, SharedSettings, ThinkBookPeer
@@ -944,6 +946,13 @@ class Manager:
                     write_json(patch, render_file_go_patch(bucket, session_plugin))
                 extra_patches.append(patch)
                 env = {KEY_ENV: go_token}
+            meeting_plugin = service.cwd / "fishhome-meetings/index.mjs"
+            if meeting_plugin.is_file():
+                with impersonate(RUNNER, password) as token:
+                    folder = Path(win32profile.GetUserProfileDirectory(token)) / "AppData/Local/FishHome"
+                    patch = folder / "fishhome-meetings.json"
+                    write_json(patch, [{"insert": [{"id":"fishhome-dsh-meetings", "name":str(meeting_plugin)}]}])
+                extra_patches.append(patch)
             if public_workspace:
                 env = env | {"FISHHOME_DSH_WORKSPACE": str(public_workspace)}
             if extra_patches or public_workspace:
@@ -1091,8 +1100,9 @@ def create_app(manager, token):
                     or not hmac.compare_digest(request.headers.get("Authorization", "").encode(),
                                                f"Bearer {worker_token}".encode())):
                 return web.json_response({"error": "DSH 公开资料工作进程不可用"}, status=401)
-        elif request.path not in {"/", "/icon.png"} and not hmac.compare_digest(
-            request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()
+        elif request.path not in {"/", "/icon.png", meeting_web.PAGE} and not (
+            hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode())
+            or meeting_web.authorize(request, token, PORT)
         ):
             return web.json_response({"error": "请从系统托盘打开 WebUI"}, status=401)
         try:
@@ -1103,6 +1113,16 @@ def create_app(manager, token):
             return web.json_response({"error": f"Windows 操作失败（{type(exc).__name__}）"}, status=409)
 
     app = web.Application(middlewares=[local_only], client_max_size=8192)
+    meme_update_lock = asyncio.Lock()
+
+    async def meme_dictionary(request):
+        if request.method == "GET":
+            return web.json_response(await asyncio.to_thread(memewiki.status, manager.activity))
+        if meme_update_lock.locked():
+            raise ValueError("词库正在更新")
+        async with meme_update_lock:
+            result = await asyncio.to_thread(memewiki.update, manager.activity)
+        return web.json_response(result)
 
     async def configure_video(_app):
         manager.sync_video_worker()
@@ -1250,6 +1270,9 @@ def create_app(manager, token):
 
     async def icon(_request):
         return web.FileResponse(ICON)
+
+    async def meeting_page(_request):
+        return meeting_web.page((59934, 59935))
 
     async def status(_request):
         return web.json_response({"services": manager.statuses(), "official_key": bool(manager.creds.values.get("upstream_key")),
@@ -1589,8 +1612,6 @@ def create_app(manager, token):
         roster_prefix = f"dsh-roster:v1:{scope}:"
         import_prefix = f"{COPY_MEMORY_PREFIX}{scope}:"
         job_prefix = f"commissioned-file:v1:{scope}:"
-        meeting_prefix = f"dsh-meeting:v1:{scope}:"
-
         def read():
             with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
                 agents = db.execute(
@@ -1609,13 +1630,6 @@ def create_app(manager, token):
                     + "ORDER BY json_extract(value,'$.created') DESC LIMIT 20",
                     (len(job_prefix), job_prefix, group, group),
                 )
-                meetings = db.execute(
-                    "SELECT json_extract(value,'$.id'), json_extract(value,'$.topic'), "
-                    "json_extract(value,'$.status'), json_extract(value,'$.round'), json_extract(value,'$.rounds') "
-                    "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL
-                    + "ORDER BY json_extract(value,'$.created') DESC LIMIT 15",
-                    (len(meeting_prefix), meeting_prefix, group, group),
-                )
                 imports = {row[0][len(import_prefix):]: {"state": row[1], "copied": row[2], "total": row[3], "error": row[4]}
                            for row in db.execute(
                                "SELECT key, json_extract(value,'$.state'), json_extract(value,'$.next'), "
@@ -1626,12 +1640,69 @@ def create_app(manager, token):
                                     **({"copy_import": imports[row[0]]} if row[0] in imports else {})} for row in agents],
                         "jobs": [dict(zip(("id", "source", "state", "delivery", "job_kind", "agent", "project"), row))
                                  for row in jobs],
-                        "meetings": [dict(zip(("id", "topic", "status", "round", "rounds"), row)) for row in meetings]}
+                        "meetings": meeting_list(db, scope, group)}
 
         try:
             return web.json_response(await asyncio.to_thread(read))
         except sqlite3.Error:
             return web.json_response({"error": "暂时无法读取 DSH 小队和任务"}, status=503)
+
+    def meeting_list(db, scope, group):
+        prefix = f"dsh-meeting:v1:{scope}:"
+        rows = db.execute(
+            "SELECT json_extract(value,'$.id'), json_extract(value,'$.topic'), "
+            "json_extract(value,'$.status') AS status, json_extract(value,'$.round'), "
+            "json_extract(value,'$.rounds'), json_extract(value,'$.style') "
+            "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL
+            + "ORDER BY status IN ('queued','running','go_wait','stopping','paused') DESC, "
+              "json_extract(value,'$.created') DESC LIMIT 30", (len(prefix), prefix, group, group))
+        return [dict(zip(("id", "topic", "status", "round", "rounds", "style"), row)) for row in rows]
+
+    async def dsh_meeting_live(request):
+        current = configured_mode(manager.astrbot_settings)
+        view = request.query.get("view", "current")
+        if view not in {"current", "test", "formal"}:
+            raise ValueError("请选择正式或测试记录")
+        group = current if view == "current" else view
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        ident = request.query.get("id")
+        writing = request.method == "POST"
+        if ident is None and not writing:
+            def read():
+                if not scope or not manager.ledger.is_file():
+                    return []
+                with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
+                    return meeting_list(db, scope, group)
+
+            response = web.json_response({"meetings": await asyncio.to_thread(read), "group": group,
+                                          "current": current}, headers={"Cache-Control": "no-store"})
+            if hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()):
+                meeting_web.grant(response, token, PORT)
+            return response
+        if not scope or not manager.ledger.is_file():
+            raise ValueError("找不到这场会议")
+        after = int(request.query.get("after", 0))
+        body = await request.json() if writing else None
+        if writing and (not isinstance(body, dict) or set(body) != {"text", "post_id"}
+                        or not isinstance(body["post_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", body["post_id"])):
+            raise ValueError("请提供本次插话和编号")
+
+        def access():
+            if writing and group != configured_mode(manager.astrbot_settings):
+                raise ValueError("请切换到这场会议所属人格后再插话")
+            store = ActivityStore(manager.activity, existing=True, read_only=not writing)
+            with closing(store.db):
+                meeting = DshMeetings(store, scope, view=group)
+                if writing:
+                    meeting.post(ident, body["text"], "web:" + body["post_id"], owner_post=True)
+                result = meeting.live(ident, after)
+                result["can_post"] = result["can_post"] and group == current
+                return result
+
+        try:
+            return web.json_response(await asyncio.to_thread(access), headers={"Cache-Control": "no-store"})
+        except sqlite3.Error:
+            return web.json_response({"error": "暂时无法打开组会，请稍后重试"}, status=503)
 
     async def cancel_public_team_job(request):
         body = await request.json()
@@ -1692,8 +1763,10 @@ def create_app(manager, token):
         ticket = manager.dsh_launch_token()
         if not ticket:
             raise ValueError("DSH 登录票据尚未就绪，请重试或重启 DSH")
-        return web.json_response({"url": "http://127.0.0.1:59934/?" + urlencode({"token": ticket})},
-                                 headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        response = web.json_response({"url": "http://127.0.0.1:59934/?" + urlencode({"token": ticket})},
+                                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        meeting_web.grant(response, token, PORT)
+        return response
 
     async def archive_history(_request):
         pointer = manager.backups / "thinkbook-last-verified.json"
@@ -1752,6 +1825,8 @@ def create_app(manager, token):
     app.router.add_route("POST", "/api/fish-model-route", switch_provider)
     app.router.add_get("/api/shared-language", language_settings)
     app.router.add_post("/api/shared-language", language_settings)
+    app.router.add_get("/api/meme-dictionary", meme_dictionary)
+    app.router.add_post("/api/meme-dictionary", meme_dictionary)
     app.router.add_post(VIDEO_PATH, delegate_video)
     app.router.add_post(SEARCH_PATH, delegate_search)
     app.router.add_post(DESKTOP_PATH, delegate_desktop)
@@ -1760,6 +1835,9 @@ def create_app(manager, token):
     app.router.add_get(GO_USAGE_PATH, go_usage)
     app.router.add_get("/api/config", configuration)
     app.router.add_get("/api/dsh-team", dsh_team)
+    app.router.add_get(meeting_web.PAGE, meeting_page)
+    app.router.add_get(meeting_web.API, dsh_meeting_live)
+    app.router.add_post(meeting_web.API, dsh_meeting_live)
     app.router.add_get("/api/dsh-team/role-card", role_card)
     app.router.add_post("/api/dsh-team/role-card", role_card)
     app.router.add_get("/api/dsh-team/library", team_library)
