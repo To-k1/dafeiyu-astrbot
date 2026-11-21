@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
@@ -64,6 +64,10 @@ class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
                     page = await browser.get("/", headers=host)
                     html = await page.text()
                     self.assertIn("ThinkBook 远程控制", html)
+                    self.assertIn('data-target="ThinkBook 正式机"', html)
+                    classic = await (await browser.get("/classic", headers=host)).text()
+                    self.assertIn('id="services"', classic)
+                    self.assertNotIn('id="fish-workspace"', classic)
                     self.assertIn("自主生活与主动联系设置", html)
                     self.assertIn("/委托 列表", html)
                     self.assertIn("OpenCode API Key", html)
@@ -98,6 +102,22 @@ class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
                     headers = {"Host": "127.0.0.1:16196", "Authorization": "Bearer desktop-browser"}
                     response = await browser.post("/api/config", headers=headers, json={"contact_daily_limit": 5})
                     self.assertEqual(await response.json(), {"message": "已保存"})
+
+    async def test_console_recovers_manager_token_after_reboot(self):
+        async def manager(request):
+            if request.headers["Authorization"] != "Bearer refreshed":
+                return web.json_response({}, status=401)
+            return web.json_response({"services": []})
+
+        upstream = web.Application()
+        upstream.router.add_get("/api/status", manager)
+        async with TestServer(upstream) as target, ClientSession() as client:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                relay = thinkbook.create_relay(client, "browser", "previous", AsyncMock(return_value="refreshed"))
+                async with TestClient(TestServer(relay)) as browser:
+                    headers = {"Host": "127.0.0.1:16196", "Authorization": "Bearer browser"}
+                    self.assertEqual((await browser.get("/api/status", headers=headers)).status, 502)
+                    self.assertEqual((await browser.get("/api/status", headers=headers)).status, 200)
 
     async def test_remote_console_updates_meme_dictionary_via_thinkbook(self):
         route = "/api/meme-dictionary"

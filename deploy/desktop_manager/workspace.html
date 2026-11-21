@@ -1,0 +1,58 @@
+<div id="fish-workspace" data-target="__TARGET__">
+  <header class="fw-bar">
+    <div class="fw-brand"><img src="/icon.png" width="36" height="36" alt=""><strong>深海工作台</strong><span id="fw-target">__TARGET__</span></div>
+    <div id="fw-shortcuts" class="fw-actions"><a class="button" href="/classic">打开经典界面</a></div>
+  </header>
+  <div class="fw-layout">
+    <nav class="fw-nav" aria-label="工作台导航">
+      <a href="?tab=overview" data-tab="overview">总览</a>
+      <a href="?tab=team" data-tab="team">会场与小队</a>
+      <a href="?tab=services" data-tab="services">服务</a>
+      <a href="?tab=archives" data-tab="archives">资料与备份</a>
+      <a href="?tab=settings" data-tab="settings">设置</a>
+    </nav>
+    <main class="fw-main">
+      <div class="fw-health"><span id="fw-health" role="status">正在连接</span><time id="fw-observed"></time></div>
+      <div id="fw-alert" role="status" hidden></div>
+      <div id="fw-message"></div>
+      <section data-page="overview">
+        <div class="fw-heading"><h1>总览</h1><button id="fw-start" class="primary" hidden>启动全部</button></div>
+        <div class="fw-grid">
+          <div class="fw-column">
+            <section class="panel fw-live" hidden>
+              <div class="fw-heading fw-panel-title"><h2>正在开的会</h2><a class="button" href="/meetings" target="_blank" rel="noopener">查看全部组会</a></div>
+              <time class="fw-read-time" id="fw-live-time"></time><div id="fw-live"></div>
+            </section>
+            <section class="panel">
+              <div class="fw-heading fw-panel-title"><h2>最近散场</h2><a id="fw-ended-all" class="button" href="/meetings" target="_blank" rel="noopener">查看全部组会</a></div>
+              <time class="fw-read-time" id="fw-ended-time"></time><div id="fw-ended"></div>
+            </section>
+          </div>
+          <div class="fw-column">
+            <section class="panel">
+              <div class="fw-heading fw-panel-title"><h2>当前活动</h2></div>
+              <time class="fw-read-time" id="fw-activity-time"></time><div id="fw-running"></div>
+            </section>
+            <section class="panel">
+              <div class="fw-heading fw-panel-title"><h2>近期结果</h2></div>
+              <time class="fw-read-time" id="fw-results-time" hidden></time><div id="fw-results"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+      <section data-page="team" hidden><div class="fw-heading"><h1>会场与小队</h1><div id="fw-meeting-links" class="fw-actions"></div></div><div id="fw-team-live"></div><div id="fw-team"></div></section>
+      <section data-page="services" hidden>
+        <div class="fw-heading"><h1>服务</h1><div class="fw-actions"><button id="fw-service-start" class="primary">启动全部</button><button id="fw-stop">停止全部</button></div></div>
+        <div id="fw-services"></div><div id="fw-service-links" class="fw-actions"></div>
+      </section>
+      <section data-page="archives" hidden><h1>资料与备份</h1><div id="fw-archives"></div></section>
+      <section data-page="settings" hidden><div class="fw-heading"><h1>设置</h1><div id="fw-settings-actions" class="fw-actions"></div></div><div id="fw-settings"></div></section>
+    </main>
+  </div>
+  <dialog id="fw-stop-dialog" aria-labelledby="fw-stop-heading">
+    <form method="dialog">
+      <h2 id="fw-stop-heading">停止全部服务</h2><p id="fw-stop-target"></p><ul id="fw-stop-list"></ul>
+      <div class="fw-actions"><button value="cancel" autofocus>取消</button><button value="stop" class="fw-danger">确认停止</button></div>
+    </form>
+  </dialog>
+</div>

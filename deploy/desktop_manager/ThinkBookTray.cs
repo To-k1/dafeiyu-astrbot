@@ -50,6 +50,7 @@ internal sealed class ThinkBookTray : ApplicationContext
         badge = CreateBadge();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开 ThinkBook 控制台", null, delegate { OpenPage(); });
+        menu.Items.Add("打开经典界面", null, delegate { OpenPage(true); });
         menu.Items.Add("重新连接 ThinkBook", null, delegate { Reconnect(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出 ThinkBook 托盘", null, delegate { ExitThread(); });
@@ -76,9 +77,12 @@ internal sealed class ThinkBookTray : ApplicationContext
         }
     }
 
-    private void OpenPage()
+    private bool classicPending;
+
+    private void OpenPage(bool classic = false)
     {
         openPending = true;
+        classicPending = classic;
         if (backend == null) StartRelay();
     }
 
@@ -158,7 +162,7 @@ internal sealed class ThinkBookTray : ApplicationContext
         if (openPending)
         {
             openPending = false;
-            try { Process.Start(new ProcessStartInfo(address) { UseShellExecute = true }); }
+            try { Process.Start(new ProcessStartInfo(classicPending ? address.Replace("/#", "/classic#") : address) { UseShellExecute = true }); }
             catch (Exception exc) { icon.ShowBalloonTip(5000, "ThinkBook 控制台", exc.Message, ToolTipIcon.Error); }
         }
     }

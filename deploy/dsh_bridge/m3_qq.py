@@ -173,7 +173,8 @@ class Main(Star):
     def search_client(self, scope):
         request = self.public_worker(scope, "web_search_worker_enabled", "public-search")
         if request:
-            return lambda query, mode: request({"query": query, "mode": mode})
+            return lambda query, mode, *, bucket=None: request(
+                {"query": query, "mode": mode, **({"bucket": bucket} if bucket is not None else {})})
         return None
 
     def desktop_client(self, scope):
@@ -513,6 +514,9 @@ class Main(Star):
                 for key, label in (("interaction", "交互"), ("autonomous", "自主")):
                     entry = info["ledgers"][key]
                     reply += f"\n{label}剩 ¥{entry['remaining']} / ¥{entry['limit']}，预留 ¥{entry['reserved']}"
+                for key, label in (("web_search", "独立记账"), ("interaction", "计入交互"), ("autonomous", "计入自主")):
+                    if entry := info.get("search", {}).get(key):
+                        reply += f"\n网页搜索（{label}）{entry['calls']} 次，¥{entry['used']}，待确认 ¥{entry['reserved']}"
         except (aiohttp.ClientError, TimeoutError, OSError, KeyError, ValueError):
             reply = "暂时无法查询人民币账本。"
         if await self.owner_uses_go(event):

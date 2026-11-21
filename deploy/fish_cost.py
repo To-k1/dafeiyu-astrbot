@@ -11,7 +11,7 @@ from pathlib import Path
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from .fish_cost_ledger import BOUNDED_OPENAI_KIND, BUCKETS, CostLimit, Ledger, yuan
+from .fish_cost_ledger import BOUNDED_OPENAI_KIND, BUCKETS, UNCAPPED_SEARCH, CostLimit, Ledger, yuan
 from .fish_cost_prompt import openai_input_quote
 from plugin.astrbot_plugin_bili_activity.cost_window import peak_end
 
@@ -150,6 +150,7 @@ def error(status, code, message):
 
 
 def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFICIAL, offline=False, go_files=None,
+               search_token=None,
                use_request_bounds=False):
     """Bind credentials to ledgers, and reserve before making an upstream call."""
     if (set(tokens_by_bucket) != set(BUCKETS) or len(set(tokens_by_bucket.values())) != len(BUCKETS)
@@ -183,7 +184,12 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
 
     async def forward(request):
         bucket, kind = request.match_info["bucket"], request.match_info["kind"]
-        if bucket not in BUCKETS or not authorized(request, bucket):
+        if bucket == UNCAPPED_SEARCH:
+            authenticated = kind == "search" and search_token and secrets.compare_digest(
+                request.headers.get("Authorization", "").encode(), f"Bearer {search_token}".encode())
+        else:
+            authenticated = bucket in BUCKETS and authorized(request, bucket)
+        if not authenticated:
             return error(401, "authentication_error", "账本凭据无效")
         if offline:
             return error(503, "fish_cost_offline", "计费入口可查询余额，请先在本机配置 DeepSeek API Key。")
@@ -222,7 +228,7 @@ def create_app(ledger, prices, tokens_by_bucket, api_key, *, upstream_base=OFFIC
             async with session.post(upstream_base + ENDPOINTS[kind], json=body,
                                     headers=headers, allow_redirects=False) as upstream:
                 if not 200 <= upstream.status < 300:
-                    if tool and 400 <= upstream.status < 500:
+                    if tool:
                         ledger.settle(ident, 0)
                     return error(upstream.status if upstream.status >= 400 else 502,
                                  "upstream_error", "DeepSeek 未完成该请求")
@@ -289,6 +295,7 @@ def main():
         go_files = ({"key": go_key, "credentials": {
             bucket: os.environ["FISH_GO_FILE_" + bucket.upper()] for bucket in BUCKETS}} if go_key else None)
         app = create_app(ledger, load_prices(args.prices), local_tokens, key, offline=args.offline, go_files=go_files,
+                         search_token=os.environ.get("FISH_COST_WEB_SEARCH_TOKEN"),
                          use_request_bounds=args.request_bounds)
         web.run_app(app, host="127.0.0.1", port=args.port, access_log=None)
     else:

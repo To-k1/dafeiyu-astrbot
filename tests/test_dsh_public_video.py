@@ -58,6 +58,31 @@ class PublicVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sample.await_count, 1)
             self.assertEqual(len(path.read_text(encoding="utf8").splitlines()), 1)
 
+    async def test_long_video_returns_consecutive_batches_and_stops_at_part_end(self):
+        identity = {"cid": 42, "page": 2, "title": "Sample", "duration": 810}
+        async def prepare(_api, _bvid, _cid, start, end, **_options):
+            return {"covered_range": {"start": start, "end": end}, "notes": [],
+                    "subtitles": [{"from": start, "to": start + 1, "content": "sample"}], "frames": []}
+        with patch.object(public_video.BiliAPI, "identity", AsyncMock(return_value=identity)), \
+                patch.object(public_video, "prepare_video", AsyncMock(side_effect=prepare)) as sample:
+            server = public_video.build_server()
+            start, end = 100, 900
+            for expected in ([400, 810], [700, 810], None):
+                blocks = await server.call_tool("sample_public_video", {
+                    "reference": BVID, "page": 2, "start": start, "end": end})
+                receipt = json.loads(blocks[0].text)
+                self.assertEqual(receipt.get("next_range"), expected)
+                if expected:
+                    start, end = expected
+            self.assertEqual([call.args[3:] for call in sample.await_args_list],
+                             [(100, 400), (400, 700), (700, 810)])
+            repeat = await server.call_tool("sample_public_video", {
+                "reference": BVID, "page": 2, "start": 100, "end": 500})
+            receipt = json.loads(repeat[0].text)
+            self.assertEqual(receipt["status"], "already_sampled")
+            self.assertEqual(receipt["next_range"], [400, 500])
+            self.assertEqual(sample.await_count, 3)
+
     def test_no_other_hosts_or_conflicting_part_selectors(self):
         with self.assertRaises(ValueError):
             public_video.video_reference(f"https://example.com/video/{BVID}", None)

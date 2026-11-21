@@ -571,10 +571,12 @@ DSH_VIDEO_GUIDANCE = (
     "自主刷 B 站或研究视频时，拿到公开链接或 BV 后优先用 df_dsh_video 请小弟看并给短报告。"
     "不要先用 df_bili_watch、抽帧、字幕或截图工具预读一遍再交给 DSH。"
     "你想亲自体验、核查或补看时，可以自己决定用 df_bili_watch 的 mode=personal；用自己的观看范围记录亲历。"
+    "长区间每批最多 300 秒，工具返回 next_range 时可在同一分 P 续看。"
     "用 DSH 结果回答时，说明由 DSH 代看，引用其链接和实际取样时间。派发失败就说明失败，别自动改用亲看补一遍。"
 )
 GO_VIDEO_GUIDANCE = (
     "使用 OpenCode Go 时，刷 B 站或研究视频优先用 df_bili_watch 亲自看，并记录自己实际观看的分 P 和区间。"
+    "长区间每批最多 300 秒，工具返回 next_range 时在同一分 P 续看。"
     "想把长视频或取证工作交给小弟、或主人指定代看时，直接用 df_dsh_video，耗时的设 background=true。"
     "同一段选一条路即可，只有确实要复核或补看时再看一遍。报告区分亲历与 DSH 代看。"
 )
@@ -1423,7 +1425,8 @@ class BiliActivity(Star):
             return GO_VIDEO_GUIDANCE
         if self.public_video_client(cfg):
             return DSH_VIDEO_GUIDANCE
-        return "亲自看时用 df_bili_watch 取得同一 bvid/cid 带时间的画面、字幕或转写。"
+        return ("亲自看时用 df_bili_watch 取得同一 bvid/cid 带时间的画面、字幕或转写。"
+                "长区间每批最多 300 秒，按 next_range 续看。")
 
     async def describe_with_flash(self, event, frames):
         bucket = "autonomous" if event.get_extra("df_run_id") else "interaction"
@@ -4113,7 +4116,7 @@ class BiliActivity(Star):
         """查公开资料，默认用 DSH 短报告，也可以亲自搜索或阅读正文。
 
         Args:
-            query(string): 公开搜索问题（即时 500 字、后台 4000 字），或 mode=page 时的公开网页链接。
+            query(string): 公开搜索问题（即时委托 500 字、后台 4000 字、亲搜 128 字），或 mode=page 时的公开网页链接。
             mode(string): default 让 DSH 查正文并给短报告；personal 亲自搜索；page 亲自读链接并取得完整正文存档。
             background(bool): 长搜索设为 true，先入队。主人私聊回报给主人，自主生活的报告交还给你。
         """
@@ -4123,8 +4126,10 @@ class BiliActivity(Star):
         cfg = self.check_owner(event)
         if self.is_reply_run(event):
             raise PermissionError("评论回复监听不能派发公开搜索")
-        limit = 4000 if background and mode == "default" else 1000 if mode == "page" else 500
-        if mode not in {"default", "personal", "page"} or not isinstance(query, str) or not 1 <= len(query.strip()) <= limit:
+        limit = {"default": 4000 if background else 500, "personal": 128, "page": 1000}.get(mode)
+        if limit is None:
+            raise ValueError("请选择默认委托、亲搜或读网页")
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= limit:
             raise ValueError(f"请提供 1 至 {limit} 字的公开搜索问题")
         client = self.public_search_client(cfg)
         if not client:
@@ -4136,8 +4141,18 @@ class BiliActivity(Star):
             return self.accept_public_job(event, {"kind": "web", "query": query.strip(),
                                                   **({"agent": agent} if agent else {})})
         goal = self.active_goal(event) if self.is_life_run(event) else None
+        bucket = None
+        if mode == "personal":
+            if self.is_life_run(event):
+                if cfg["autonomous_provider_id"] == OFFICIAL_AUTONOMOUS:
+                    bucket = "autonomous"
+            else:
+                resolve = getattr(self.context, "get_using_provider_async", None)
+                provider = await resolve(umo=event.unified_msg_origin) if resolve else None
+                if is_interaction_provider(provider) and not is_go_provider(provider):
+                    bucket = "interaction"
         try:
-            report = await client(query.strip(), mode)
+            report = await client(query.strip(), mode, **({"bucket": bucket} if bucket else {}))
         except ValueError as exc:
             return canonical({"status": "needs_review", "reason": str(exc)})
         self.check_owner(event)
@@ -4220,20 +4235,31 @@ class BiliActivity(Star):
             bvid(string): 已核实的BV号。
             cid(string): 已核实的分P标识。
             start(number): 起始秒。
-            end(number): 结束秒，单次最长300秒。
+            end(number): 目标结束秒。每批最多取样 300 秒，按 next_range 给出的起止秒续看同一分 P。
             mode(string): default 按当前模型选择；personal 始终亲自看。指定代看请用 df_dsh_video。
         """
         cfg = self.check_owner(event)
         self.require_goal(event)
         if mode not in {"default", "personal"}:
             raise ValueError("视频模式须为 default 或 personal")
-        if not 0 <= start < end <= start + 300:
+        if not math.isfinite(end) or not 0 <= start < end:
             raise ValueError("视频分析范围无效")
+        requested_end = end
+        end = min(requested_end, start + 300)
         go_visual = bool(await self.go_video_provider(event, cfg))
         if mode == "default" and not go_visual and not self.is_reply_run(event) and self.public_video_client(cfg):
-            return await self._delegate_video(event, bvid,
+            report = await self._delegate_video(event, bvid,
                     f"请查看 cid {int(cid)} 对应的分 P，按实际画面和字幕描述 {start} 到 {end} 秒。"
                     "只返回取样能确认的内容、时间点和缺口。", expected_cid=str(int(cid)))
+            if end == requested_end:
+                return report
+            result = json.loads(report)
+            if result["status"] == "completed":
+                duration = result["evidence"]["samples"][0].get("duration")
+                requested_end = min(requested_end, duration) if duration and duration > 0 else requested_end
+                if end < requested_end:
+                    result["next_range"] = [end, requested_end]
+            return canonical(result)
         run_id = event.get_extra("df_run_id")
         if not self.reserve_video(event, bvid):
             return "本轮视频数量已达上限。"
@@ -4243,13 +4269,16 @@ class BiliActivity(Star):
             raise ValueError("本地媒体身份不匹配")
         result = {**identity, "requested_range": [start, end], "range": value.get("range"),
                   "subtitles": value.get("subtitles", []), "observations": [], "notes": value.get("notes", [])}
+        duration = identity.get("duration")
+        requested_end = min(requested_end, duration) if duration and duration > 0 else requested_end
+        continuation = {"next_range": [end, requested_end]} if end < requested_end else {}
         self.record_video(event, result)
         cfg = self.cfg()
         metered = bool(run_id and cfg["autonomous_provider_id"])
         if metered and not cfg["autonomous_visual_enabled"]:
             result["notes"].append("本轮只读视频文字资料，未查看画面或转写音频。")
             self.record_video(event, result, export=True)
-            return canonical(result)
+            return canonical({**result, **continuation})
         face = self.face_plugin()
         if not face and not metered and not cfg["flash_text_only_media"] and not go_visual:
             result["notes"].append("face_convert视觉/转写实现未加载")
@@ -4305,7 +4334,7 @@ class BiliActivity(Star):
                             result["notes"].append("部分音频转写失败: " + type(exc).__name__)
                         self.record_video(event, result)
         self.record_video(event, result, export=True)
-        return canonical(result)
+        return canonical({**result, **continuation})
 
     @filter.llm_tool(name="df_bili_propose")
     async def propose(self, event: AstrMessageEvent, action: str, arguments: str, reason: str):

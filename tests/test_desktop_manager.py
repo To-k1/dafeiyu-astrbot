@@ -92,6 +92,35 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((item["name"], item["text"]), ("主人", body["text"]))
             self.assertEqual((await self.client.get("/api/config", headers=host, cookies=cookies)).status, 401)
 
+    async def test_workspace_classic_and_read_only_activity(self):
+        host = {"Host": "127.0.0.1:6196"}
+        workspace = await (await self.client.get("/", headers=host)).text()
+        classic = await (await self.client.get("/classic", headers=host)).text()
+        self.assertIn('id="fish-workspace"', workspace)
+        self.assertIn('href="/classic"', workspace)
+        self.assertNotIn('id="fish-workspace"', classic)
+        self.assertIn('id="services"', classic)
+        self.assertEqual((await self.client.get("/api/dashboard", headers=host)).status, 401)
+        write_json(self.manager.bridge_settings, {"owner_scope": self.scope})
+        self.config["agent_runner"] = {"runner_type": "local", "config": {"persona": {"persona_id": "feiyu-v3.0"}}}
+        write_json(self.manager.astrbot_settings, self.config)
+        with closing(ActivityStore(self.manager.activity).db) as db:
+            for group in ("formal", "test"):
+                row = {"source": group, "created": 15, "state": "running", "job_kind": "video",
+                       "persona_mode": group, "worker_phase": "connecting_worker"}
+                db.execute("INSERT INTO settings VALUES(?,?)",
+                           (f"commissioned-file:v1:{self.scope}:{group}", json.dumps(row)))
+            for index in range(33):
+                meeting = {"id": str(index), "topic": "运行中", "status": "running", "created": index,
+                           "persona_mode": "formal"}
+                db.execute("INSERT INTO settings VALUES(?,?)",
+                           (f"dsh-meeting:v1:{self.scope}:{index}", json.dumps(meeting)))
+        data = await (await self.client.get("/api/dashboard", headers=self.auth)).json()
+        self.assertEqual([(row["title"], row["actor"], row["phase"]) for row in data["running"]],
+                         [("formal", "DSH 代看", "connecting_worker")])
+        meetings = await (await self.client.get("/api/dsh-team/meeting", headers=self.auth)).json()
+        self.assertEqual(len(meetings["meetings"]), 33)
+
     async def test_shared_language_uses_owner_file_and_can_be_disabled(self):
         from plugin.astrbot_plugin_bili_activity import shared_language
         route = "/api/shared-language"
@@ -182,6 +211,9 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
                                                          "filename": "大肥鱼-他人印象.txt"})
             response = await self.client.get(route, headers=self.auth)
             self.assertEqual(await response.json(), {"stories": []})
+            roster = await (await self.client.get("/api/dsh-team", headers=self.auth)).json()
+            self.assertEqual(roster["fish_documents"], {"impressions": "大肥鱼-他人印象.txt"})
+            self.assertNotIn("新印象", str(roster))
             self.assertEqual(list(self.manager.activity.glob("fish_impressions.*")),
                              [dsh_cards.fish_impressions_path(store)])
 
@@ -195,6 +227,9 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
             create = await self.client.post(route + "?action=create&filename=am.txt&name=阿墨",
                                             headers=self.auth, data=persona.encode())
             role = (await create.json())["id"]
+            empty = await (await self.client.get("/api/dsh-team", headers=self.auth)).json()
+            self.assertEqual(empty["agents"][0]["documents"], {"story": None, "impressions": None})
+            self.assertEqual(empty["fish_documents"], {"impressions": None})
             for action, kind, filename, text in (
                     ("save-personal-story", "story", "my-story.md", "# 自选标题\r\n故事正文\r\n"),
                     ("save-impressions", "impressions", "impressions.txt", "关于没入册的角色\r\n")):
@@ -203,6 +238,10 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await saved.json(), {"status": "saved"})
                 document = await self.client.get(library + f"?document={kind}&id={role}", headers=self.auth)
                 self.assertEqual((await document.json())["text"], text)
+            listing = await (await self.client.get("/api/dsh-team", headers=self.auth)).json()
+            self.assertEqual(listing["agents"][0]["documents"], {"story": "story.md", "impressions": "impressions.txt"})
+            self.assertNotIn("故事正文", str(listing))
+            self.assertNotIn("关于没入册的角色", str(listing))
             revised = persona + "新版本"
             response = await self.client.post(route + f"?action=update-background&filename=am.txt&id={role}",
                                               headers=self.auth, data=revised.encode())

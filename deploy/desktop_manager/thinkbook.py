@@ -21,7 +21,7 @@ import psutil
 
 from scripts.m6_data import sync_room
 from scripts.mock_backup import checksum, staged_directory
-from . import meeting_web
+from . import meeting_web, workspace_web
 
 
 HERE = Path(__file__).resolve().parent
@@ -33,7 +33,7 @@ OBSERVATORY_FORWARD = 18768
 THINKBOOK_OBSERVATORY = 8767
 MODULE_PORTS = {6185: 16185, 6099: 16099, 59934: 15934}
 ROUTES = {
-    "/api/ping": {"GET"}, "/api/status": {"GET"}, "/api/config": {"GET", "POST"},
+    "/api/ping": {"GET"}, "/api/status": {"GET"}, "/api/dashboard": {"GET"}, "/api/config": {"GET", "POST"},
     "/api/diagnostics": {"GET"}, "/api/ui/dsh": {"POST"}, "/api/archives": {"GET"},
     "/api/archives/backup": {"POST"}, "/api/archives/export": {"POST"},
     "/api/budgets": {"GET", "POST"}, "/api/provider-keys": {"GET"},
@@ -109,29 +109,33 @@ def qq_control_ready():
                    for row in psutil.process_iter(["exe"]))
 
 
-def console_page(qq_ready=False):
+def console_page(qq_ready=False, classic=False):
     page = (HERE / "index.html").read_text(encoding="utf-8")
     page = page.replace("台式机试运行", "ThinkBook 远程控制")
     page = page.replace("<title>深海工作台 · FishHome</title>", "<title>ThinkBook · FishHome</title>")
     if not qq_ready:
         page = page.replace('<button id="start" class="primary">', '<button id="start" class="primary" disabled>')
     page = page.replace("</head>", "<style>.locations button,#backup-folder,#recovery,#recovery-hint{display:none}</style></head>")
-    return module_url(page)
+    return module_url(page if classic else workspace_web.page(page, "ThinkBook 正式机"))
 
 
-def create_relay(client, browser_token, manager_token):
+def create_relay(client, browser_token, manager_token, renew_token=None):
+    token_retry_at = 0.0
+
     async def handle(request):
+        nonlocal manager_token, token_retry_at
         if request.host != f"127.0.0.1:{DESKTOP_PORT}":
             return web.Response(status=403)
-        if request.path == "/" and request.method == "GET":
-            return web.Response(text=console_page(await asyncio.to_thread(qq_control_ready)), content_type="text/html", headers={
+        if request.path in {"/", "/classic"} and request.method == "GET":
+            page = console_page(await asyncio.to_thread(qq_control_ready), classic=request.path == "/classic")
+            return web.Response(text=page, content_type="text/html", headers={
                 "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
                 "Content-Security-Policy": "default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'",
             })
         if request.path == "/icon.png" and request.method == "GET":
             return web.FileResponse(HERE / "fishhome.png")
         if request.path == meeting_web.PAGE and request.method == "GET":
-            return meeting_web.page((MODULE_PORTS[59934],))
+            return meeting_web.page((MODULE_PORTS[59934],), "ThinkBook 正式机")
         console_access = hmac.compare_digest(request.headers.get("Authorization", "").encode(),
                                               ("Bearer " + browser_token).encode())
         if not console_access and not meeting_web.authorize(request, browser_token, DESKTOP_PORT):
@@ -170,8 +174,16 @@ def create_relay(client, browser_token, manager_token):
                                                  "Content-Disposition": response.headers["Content-Disposition"]})
                 body = await response.text()
                 if response.status == 401:
-                    return web.json_response({"error": "ThinkBook 控制台已重启，请重新打开远程入口。"}, status=502)
-                result = web.Response(text=body if team_library or request.path == meeting_web.API else module_url(body),
+                    now = asyncio.get_running_loop().time()
+                    if renew_token and now >= token_retry_at:
+                        token_retry_at = now + 8
+                        try:
+                            manager_token = await renew_token()
+                        except (OSError, RuntimeError, subprocess.SubprocessError):
+                            pass
+                    return web.json_response({"error": "ThinkBook 控制台正在重新连接。"}, status=502)
+                result = web.Response(text=body if team_library or request.path in {meeting_web.API, "/api/dashboard"}
+                                      else module_url(body),
                                       status=response.status, content_type=response.content_type,
                                       headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
                 if response.status == 200 and console_access and (request.path == "/api/ui/dsh" or
@@ -308,14 +320,20 @@ print(token)
 
 
 async def open_console(root=None, *, check=False, tray_parent=None):
-    manager_token = await asyncio.to_thread(remote_token, root)
+    async def renew_token():
+        return await asyncio.to_thread(remote_token, root)
+
+    manager_token = await renew_token()
     forwards = [(MANAGER_FORWARD, THINKBOOK_PORT), (OBSERVATORY_FORWARD, THINKBOOK_OBSERVATORY),
                 *((local, remote) for remote, local in MODULE_PORTS.items())]
     options = [part for local, remote in forwards for part in ("-L", f"127.0.0.1:{local}:127.0.0.1:{remote}")]
-    tunnel = await asyncio.create_subprocess_exec(
-        *ssh_args(), "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-        *options, "fishbook", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    async def connect():
+        return await asyncio.create_subprocess_exec(
+            *ssh_args(), "-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+            *options, "fishbook", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    tunnel = await connect()
     runners = []
     try:
         async with ClientSession(timeout=ClientTimeout(total=50, sock_connect=3)) as client:
@@ -336,7 +354,7 @@ async def open_console(root=None, *, check=False, tray_parent=None):
             if tunnel.returncode is not None:
                 raise RuntimeError("SSH 转发无法启动，请确认本机远程控制端口未占用。")
             browser_token = secrets.token_urlsafe(32)
-            runner = web.AppRunner(create_relay(client, browser_token, manager_token), access_log=None)
+            runner = web.AppRunner(create_relay(client, browser_token, manager_token, renew_token), access_log=None)
             runners.append(runner)
             await runner.setup()
             await web.TCPSite(runner, "127.0.0.1", DESKTOP_PORT).start()
@@ -356,10 +374,18 @@ async def open_console(root=None, *, check=False, tray_parent=None):
                 close_event = win32event.OpenEvent(0x00100000, False, rf"Local\FishHome.ThinkBookTray.close.{tray_parent}")
                 parent = psutil.Process(tray_parent)
                 parent_started = parent.create_time()
+                reconnect_at = 0.0
                 try:
                     print(f"http://127.0.0.1:{DESKTOP_PORT}/#{browser_token}", flush=True)
-                    while (tunnel.returncode is None and parent.is_running() and parent.create_time() == parent_started
+                    while (parent.is_running() and parent.create_time() == parent_started
                            and win32event.WaitForSingleObject(close_event, 0) == win32event.WAIT_TIMEOUT):
+                        now = asyncio.get_running_loop().time()
+                        if tunnel.returncode is not None and now >= reconnect_at:
+                            reconnect_at = now + 5
+                            try:
+                                tunnel = await connect()
+                            except OSError:
+                                pass
                         await asyncio.sleep(.35)
                 finally:
                     close_event.Close()

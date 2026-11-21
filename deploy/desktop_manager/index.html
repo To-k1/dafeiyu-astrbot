@@ -112,8 +112,9 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <form id="personal-story-form">
         <label for="personal-story-role">角色</label><select id="personal-story-role" required></select>
         <label for="personal-story-file">单人故事文件</label><input id="personal-story-file" type="file" accept=".md,.txt" required>
-        <button type="submit">保存文本</button><button id="personal-story-download" type="button">下载现行文本</button>
+        <button type="submit">保存文本</button><button id="personal-story-download" type="button" disabled>下载现行文本</button>
       </form>
+      <p id="personal-story-availability" class="muted hint" aria-live="polite">请先选择角色。</p>
       <p id="personal-story-status" class="muted hint" role="status"></p>
     </details>
     <details class="panel"><summary>他人印象</summary>
@@ -123,6 +124,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
         <label for="impressions-file">他人印象文件</label><input id="impressions-file" type="file" accept=".md,.txt" required>
         <button type="submit">保存文本</button><button id="impressions-download" type="button">下载现行文本</button>
       </form>
+      <p id="impressions-availability" class="muted hint" aria-live="polite">保存状态待读取。</p>
       <p id="impressions-status" class="muted hint" role="status"></p>
     </details>
     <details class="panel"><summary>历史记录迁移</summary>
@@ -247,7 +249,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
 <script>
 const $ = id => document.getElementById(id);
 const fragment = location.hash.slice(1);
-if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.replaceState(null, '', '/'); }
+if (fragment) { sessionStorage.setItem('fishhome-session', fragment); history.replaceState(null, '', location.pathname + location.search); }
 const token = sessionStorage.getItem('fishhome-session') || '';
 let busy = false;
 let config = {};
@@ -309,13 +311,27 @@ function renderGoLimits() {
       return `${label}剩 ¥${item.remaining} / ¥${item.limit}，预留 ¥${item.reserved}` +
         (go ? ` · 本人${label}使用 Go，跳过此账本` : '');
     }).join('\n');
+    for (const [key, label] of [['web_search', '独立记账'], ['interaction', '计入交互'], ['autonomous', '计入自主']]) {
+      const entry = budgetView.search?.[key];
+      if (entry) $('budgets').textContent += `\n网页搜索（${label}）${entry.calls} 次 · ¥${entry.used} · 待确认 ¥${entry.reserved}`;
+    }
   }
 }
 let syncView;
 async function api(path, method = 'GET', body) {
-  const response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store'});
+  const workspace = window.fishhomeWorkspace;
+  if (workspace && method !== 'GET' && !workspace.canWrite()) throw Error('连接中断，操作已暂停。');
+  let response;
+  try {
+    response = await fetch(path, {method, headers: {Authorization: 'Bearer ' + token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), cache:'no-store',
+      ...(workspace && method === 'GET' ? {signal: AbortSignal.timeout(8000)} : {})});
+  } catch (error) {
+    workspace?.connectionLost();
+    throw error;
+  }
   const result = await response.json();
-  if (!response.ok) throw Error(result.error || '本机请求失败');
+  if ([401, 502, 504].includes(response.status)) workspace?.connectionLost(Error(result.error));
+  if (!response.ok) throw Object.assign(Error(result.error || '本机请求失败'), {status: response.status});
   return result;
 }
 
@@ -561,6 +577,9 @@ $('dsh-story-form').onsubmit = async event => {
   } catch (error) { $('dsh-story-status').textContent = error.message; }
 };
 async function cardRequest(query, file) {
+  if (file && window.fishhomeWorkspace && !window.fishhomeWorkspace.canWrite()) {
+    throw Error('连接中断，操作已暂停。');
+  }
   const params = new URLSearchParams(query);
   if (file) params.set('filename', file.name);
   const response = await fetch('/api/dsh-team/role-card?' + params, {
@@ -589,9 +608,35 @@ async function downloadCard(query, filename, status = 'dsh-card-status') {
     downloadFile(await response.blob(), extension ? filename + '.' + extension : filename);
   } catch (error) { $(status).textContent = error.message; }
 }
+const roleDocumentKinds = [['personal-story', 'story', '单人故事'], ['impressions', 'impressions', '他人印象']];
+let roleDocuments = new Map();
+function roleDocumentLabel(document) {
+  return document === undefined ? '状态待核' : document ? '已保存' : '尚未上传';
+}
+function showRoleDocuments() {
+  for (const [form, kind, label] of roleDocumentKinds) {
+    const selector = $(form + '-role');
+    const id = selector.value;
+    for (const option of selector.options) {
+      if (option.dataset.roleName) {
+        option.textContent = `${option.dataset.roleName} · ${roleDocumentLabel(roleDocuments.get(option.value)?.[kind])}`;
+      }
+    }
+    const filename = roleDocuments.get(id)?.[kind];
+    $(form + '-availability').textContent = !id ? '请先选择角色。' : filename ?
+      `已保存 · ${filename}` : `${label} · ${roleDocumentLabel(filename)}`;
+    $(form + '-download').disabled = !id || filename === null;
+    $(form + '-form').querySelector('button[type=submit]').textContent = filename ? '替换文本' : '保存文本';
+  }
+}
 function bindRoleText(form, kind) {
   const role = $(form + '-role'), input = $(form + '-file'), status = $(form + '-status');
   const route = '/api/dsh-team/library';
+  role.addEventListener('change', () => {
+    input.value = '';
+    status.textContent = '';
+    showRoleDocuments();
+  });
   $(form + '-form').onsubmit = async event => {
     event.preventDefault();
     const id = role.value, file = input.files[0];
@@ -602,8 +647,9 @@ function bindRoleText(form, kind) {
       const text = new TextDecoder('utf-8', {fatal:true}).decode(await file.arrayBuffer());
       await api(route, 'POST', {action:'save-' + form,id,filename:file.name,text});
       if (input.files[0] === file) input.value = '';
-      status.textContent = '已保存文本。';
-    } catch (error) { status.textContent = error.message; }
+      if (role.value === id) status.textContent = '已保存文本。';
+      await refreshDshTeam();
+    } catch (error) { if (role.value === id) status.textContent = error.message; }
     finally { save.disabled = false; }
   };
   $(form + '-download').onclick = async () => {
@@ -704,31 +750,45 @@ $('dsh-history-export').onclick = () => {
   if (id) return downloadCard({action:'history', id}, 'fishhome-history-' + id, 'dsh-copy-status');
   $('dsh-copy-status').textContent = '请先选择要导出历史记录的小弟。';
 };
+let dshTeamRead;
 async function refreshDshTeam() {
+  const read = dshTeamRead = {};
   try {
     const view = $('dsh-team-view').value;
-    const {agents, jobs, group, current} = await api('/api/dsh-team?view=' + view);
-    if ($('dsh-team-view').value !== view) return;
+    const {agents, jobs, group, current, fish_documents} = await api('/api/dsh-team?view=' + view);
+    if (dshTeamRead !== read || $('dsh-team-view').value !== view) return;
     $('dsh-team-group').textContent = group === 'formal' ? '正式记录' : group === 'test' ? '测试记录' : '当前记录';
     const names = {active:'可用', paused:'暂停', archived:'已归档'};
     storyAgents = agents;
+    roleDocuments = new Map([['fish', fish_documents], ...agents.map(agent => [agent.id, agent.documents])]);
     showStoryParticipants();
     if ($('dsh-stories').open) loadStories();
     for (const [key, label, initial] of [['dsh-card-agent','作为新小弟',''],
         ['personal-story-role','选择小弟',''], ['impressions-role','大肥鱼','fish'], ['dsh-history-role','选择小弟','']]) {
       const selector = $(key), previous = selector.value;
-      selector.replaceChildren(new Option(label, initial),
-        ...agents.map(agent => new Option(storyRoleLabel(agent), agent.id)));
+      const documentKind = roleDocumentKinds.find(([form]) => key === form + '-role')?.[1];
+      const option = (name, id) => {
+        const item = new Option(name, id);
+        if (documentKind && id) item.dataset.roleName = name;
+        return item;
+      };
+      selector.replaceChildren(option(label, initial), ...agents.map(agent => option(storyRoleLabel(agent), agent.id)));
       if (agents.some(agent => agent.id === previous)) selector.value = previous;
       else if (key === 'dsh-card-agent' && previous) resetCardPreview();
     }
+    showRoleDocuments();
     const displayAgents = (target, members) => $(target).replaceChildren(
       ...(members.length ? members.map(agent => {
         const row = node('div', '', 'row');
         const copy = agent.copy_import;
         const progress = copy?.state === 'pending' ? ` · 记忆导入 ${copy.copied}/${copy.total}`
           : copy?.state === 'needs_review' ? ' · 记忆导入待核对' : '';
-        row.append(node('span', `${storyRoleLabel(agent)} · ${names[agent.status] || agent.status} · 人格 v${agent.version}${progress}`),
+        const description = node('div', '');
+        description.append(node('strong', storyRoleLabel(agent)),
+          node('div', `${names[agent.status] || agent.status} · 人格 v${agent.version}${progress}`, 'muted'),
+          node('div', roleDocumentKinds.map(([, kind, label]) =>
+            `${label} ${roleDocumentLabel(agent.documents?.[kind])}`).join(' · '), 'muted'));
+        row.append(description,
           button('导出角色卡', () => downloadCard({action:'download', id:agent.id}, agent.name), false),
           button(agent.status === 'archived' ? '恢复角色' : '归档角色', async () => {
             try {
@@ -765,7 +825,10 @@ async function refreshDshTeam() {
       })
         : [node('p', '还没有 DSH 任务。', 'muted')]));
   } catch (error) {
-    $('dsh-team-agents').textContent = error.message;
+    if (dshTeamRead !== read) return;
+    roleDocuments.clear();
+    showRoleDocuments();
+    if (!window.fishhomeWorkspace?.hasConnectionFailure()) $('dsh-team-agents').textContent = error.message;
   }
 }
 const meetingActive = new Set(['queued','running','paused','go_wait','stopping']);
@@ -783,9 +846,12 @@ async function refreshMeetingDashboard() {
   clearTimeout(meetingDashboardTimer);
   const read = meetingDashboardRead = {};
   const view = $('dsh-team-view').value;
+  let currentLoaded = false;
   try {
     const current = await api('/api/dsh-team/meeting?view=current');
     if (meetingDashboardRead !== read) return;
+    currentLoaded = true;
+    window.fishhomeWorkspace?.meetings(current);
     const running = current.meetings.filter(m => meetingActive.has(m.status));
     const shortcuts = running.length ? running : current.meetings.slice(0,1);
     const liveKey = JSON.stringify([current.group,shortcuts]);
@@ -813,8 +879,11 @@ async function refreshMeetingDashboard() {
   } catch (error) {
     if (meetingDashboardRead !== read) return;
     shortcutSignature = historySignature = null;
-    $('active-meeting-shortcuts').textContent = '';
-    $('dsh-team-meetings').textContent = error.message;
+    if (!currentLoaded) window.fishhomeWorkspace?.meetingsFailed();
+    if (!window.fishhomeWorkspace) {
+      $('active-meeting-shortcuts').textContent = '';
+      $('dsh-team-meetings').textContent = error.message;
+    }
   } finally {
     if (meetingDashboardRead === read) {
       meetingDashboardTimer = setTimeout(refreshMeetingDashboard,document.hidden ? 6000 : 1500);
@@ -836,6 +905,12 @@ async function refresh() {
     $('room-state').textContent = ready('room') ? '房间与星海在线' : '房间服务待启动';
     $('dsh-ui').disabled = $('dsh-meeting-ui').disabled = !ready('dsh');
     $('setup').textContent = `DeepSeek Key ${official_key ? '已加密保存' : '待填写，计费服务当前仅供查询'}。DSH 账户密码${runner_password ? '已保存' : '待填写'}。`;
+    const workspace = window.fishhomeWorkspace;
+    workspace?.activity();
+    if (workspace && !workspace.redrawServices(services, busy)) {
+      workspace.serviceSnapshot(services);
+      return;
+    }
     const rows = services.map(s => {
       const row = node('div', '', 'row'), info = node('div', '', ''), actions = node('div', '', 'actions');
       info.append(node('strong', s.name), node('div', s.port ? '127.0.0.1:' + s.port : '本机图形应用 · 实例 0', 'muted'));
@@ -848,11 +923,15 @@ async function refresh() {
       row.append(info,status,actions); return row;
     });
     $('services').replaceChildren(...rows);
-  } catch (error) { $('overview').textContent = error.message; }
+    workspace?.serviceSnapshot(services);
+  } catch (error) {
+    $('overview').textContent = error.message;
+    if (![401, 502, 504].includes(error.status)) window.fishhomeWorkspace?.connectionLost();
+  }
 }
-async function act(name, mode) {
+async function act(name, mode, confirmed = false) {
   if (busy) return;
-  if (name === 'all' && mode === 'stop' && !confirm('停止全部已识别的 FishHome 服务？')) return;
+  if (!confirmed && name === 'all' && mode === 'stop' && !confirm('停止全部已识别的 FishHome 服务？')) return;
   busy = true; $('message').textContent = '正在执行…';
   try {
     const result = await api(`/api/services/${name}/${mode}`, 'POST');

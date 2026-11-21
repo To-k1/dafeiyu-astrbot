@@ -124,8 +124,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(fake.close)
         self.keys = {"interaction": "interactive-test-credential-1234", "autonomous": "autonomous-test-credential-1234"}
         self.upstream_base = str(fake.make_url("/")).rstrip("/")
+        self.search_key = "private-manager-search-credential"
         app = create_app(self.ledger, load_prices(PRICE_FILE), self.keys, "fake-upstream-only",
-                         upstream_base=self.upstream_base)
+                         upstream_base=self.upstream_base, search_token=self.search_key)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
@@ -180,6 +181,21 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.ledger.snapshot()["ledgers"]
         self.assertEqual(snapshot["interaction"]["used"], "0.0000244")
         self.assertEqual(snapshot["autonomous"]["used"], "0.010028")
+
+    async def test_delegated_search_is_itemized_with_no_daily_cap(self):
+        self.ledger.adjust("interaction", "0", temporary=False)
+        path = "/tools/web_search/search"
+        self.assertEqual((await self.post(path, {"query": "match"})).status, 401)
+        self.assertEqual((await self.post("/tools/interaction/search", {"query": "match"})).status, 402)
+        headers = {"Authorization": "Bearer " + self.search_key}
+        for query in ("match", "empty"):
+            reply = await self.client.post(path, json={"query": query}, headers=headers)
+            self.assertEqual(reply.status, 200)
+        self.assertEqual((await self.client.post("/tools/web_search/fetch", json={}, headers=headers)).status, 401)
+        self.assertEqual(len(self.calls), 2)
+        report = self.ledger.snapshot()
+        self.assertEqual(report["ledgers"]["interaction"]["used"], "0")
+        self.assertEqual(report["search"]["web_search"], {"calls": 1, "used": "0.005", "reserved": "0"})
 
     async def test_reservation_blocks_a_concurrent_request_and_unknown_usage_is_retained(self):
         path = "/openai/interaction/v1/chat/completions"

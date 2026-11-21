@@ -48,9 +48,9 @@ class PublicPageTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             evidence = root / 'evidence.jsonl'
-            server = search_server(evidence, lambda content: save_public_page(root, content))
-            with patch('deploy.dsh_bridge.public_search.fetch_public_page', AsyncMock(return_value=page)) as fetch, \
-                    patch('deploy.dsh_bridge.public_search.search_anysearch', AsyncMock(return_value=snippet)):
+            server = search_server(evidence, lambda content: save_public_page(root, content),
+                                   search=AsyncMock(return_value=snippet))
+            with patch('deploy.dsh_bridge.public_search.fetch_public_page', AsyncMock(return_value=page)) as fetch:
                 await server._tool_manager.call_tool('search_public_web', {'query': 'example'})
                 invalid = await server._tool_manager.call_tool('read_public_page', {'url': url, 'offset': 1})
                 self.assertEqual(invalid['status'], 'unavailable')

@@ -59,6 +59,8 @@ async def run_video_task(client, cwd, reference, question, evidence_file, relay,
         raise ValueError("请提供不超过 1000 字的代看问题")
     brief = (f"使用 sample_public_video 自行取得这条公开 B 站视频的证据。链接或 BV 为 {reference}。\n"
              f"问题是：{question}\n有指定片段时直接取该范围，不预看开头。"
+             "单批最多覆盖视频时间轴上的 300 秒；收到 next_range 时，在同一分 P 用它接着取样。"
+             "要求通看时，按工具返回的分 P 时长分批；若未取完，写明未覆盖区间。"
              "只问开头时在开头找证据，找不到就注明缺口。合集先选题目相关的分 P，分开标记。"
              "问题未指定时间范围时，先取开头 8 秒，必要时再取相关片段。"
              "同一分 P、区间和听写选项已有取样时直接引用，取得足以回答的证据就交报告。"

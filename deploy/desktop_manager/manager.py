@@ -25,10 +25,10 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from plugin.astrbot_plugin_bili_activity import memewiki
 from deploy.bili_activity.ops import DEFAULTS as ACTIVITY_DEFAULTS, NUMERIC_LIMITS, exclusive, ready, save_control, validate_dnd
 from deploy.dsh_bridge.public_page import fetch_public_page, page_slice, save_public_page
-from deploy.dsh_bridge.public_search import search_anysearch, validate_query
+from deploy.dsh_bridge.public_search import search_deepseek, validate_task_query
 from deploy.dsh_bridge.go_profile import KEY_ENV, render_file_go_patch
 from deploy.dsh_bridge.go_usage import read_go_key_usage, read_go_usage
-from deploy.fish_cost_ledger import BUCKETS, Ledger, amount
+from deploy.fish_cost_ledger import BUCKETS, UNCAPPED_SEARCH, Ledger, amount
 from plugin.astrbot_plugin_bili_activity import dsh_cards
 from plugin.astrbot_plugin_bili_activity.core import Store as ActivityStore
 from plugin.astrbot_plugin_bili_activity import dsh_history_archive
@@ -41,7 +41,7 @@ from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sy
 
 from .windows import Credentials, impersonate, run_as, write_json
 from . import compute
-from . import desktop_session, meeting_web, persona_mode, provider_mode
+from . import dashboard, desktop_session, meeting_web, persona_mode, provider_mode, workspace_web
 from .public_jobs import PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable, validate_agent
 from .recovery import capture_and_pull
 from .settings_sync import PEER_PATH, SettingsSync, SharedSettings, ThinkBookPeer
@@ -130,6 +130,7 @@ class Manager:
         self.dev, self.state = dev, state
         state.mkdir(parents=True, exist_ok=True)
         self.creds = Credentials(state / "credentials.bin")
+        self.creds.values.setdefault(UNCAPPED_SEARCH, secrets.token_urlsafe(32))
         for bucket in ("interaction", "autonomous"):
             self.creds.values.setdefault(bucket, secrets.token_urlsafe(32))
             self.creds.values.setdefault("go_file_" + bucket, secrets.token_urlsafe(32))
@@ -210,6 +211,10 @@ class Manager:
         with impersonate(RUNNER, self.runner_password()):
             return save_public_page(Path(root), page)
 
+    async def search_web(self, query, bucket=UNCAPPED_SEARCH):
+        return await search_deepseek(query, endpoint=f"http://127.0.0.1:6197/tools/{bucket}/search",
+                                     token=self.creds.values[bucket])
+
     async def run_public_job(self, body, started):
         kind = body["kind"]
         if not self.public_job_enabled(kind):
@@ -219,7 +224,8 @@ class Manager:
         if kind == "web":
             return await self.video_worker.search(password, go_key, body["query"],
                                                   background_started=started, agent=body.get("agent"),
-                                                  archive_page=self.archive_web_page, language=language)
+                                                  archive_page=self.archive_web_page, language=language,
+                                                  search=self.search_web)
         return await self.video_worker.run(password, go_key, body["reference"], body["question"],
                                            asr_key=self.dsh_asr_key(), background_started=started,
                                            agent=body.get("agent"), language=language)
@@ -245,7 +251,8 @@ class Manager:
                        ("--astrbot-root", self.astro, "--life-data-dir", self.activity))
         key = self.creds.values.get("upstream_key")
         cost_env = {"FISH_COST_INTERACTION_TOKEN": self.creds.values["interaction"],
-                    "FISH_COST_AUTONOMOUS_TOKEN": self.creds.values["autonomous"]}
+                    "FISH_COST_AUTONOMOUS_TOKEN": self.creds.values["autonomous"],
+                    "FISH_COST_WEB_SEARCH_TOKEN": self.creds.values[UNCAPPED_SEARCH]}
         if key:
             cost_env["FISH_COST_UPSTREAM_KEY"] = key
         if self.options.get("dsh_go_files_enabled") is True and self.creds.values.get("opencode_key"):
@@ -1100,7 +1107,7 @@ def create_app(manager, token):
                     or not hmac.compare_digest(request.headers.get("Authorization", "").encode(),
                                                f"Bearer {worker_token}".encode())):
                 return web.json_response({"error": "DSH 公开资料工作进程不可用"}, status=401)
-        elif request.path not in {"/", "/icon.png", meeting_web.PAGE} and not (
+        elif request.path not in {"/", "/classic", "/icon.png", meeting_web.PAGE} and not (
             hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode())
             or meeting_web.authorize(request, token, PORT)
         ):
@@ -1175,11 +1182,13 @@ def create_app(manager, token):
 
     async def delegate_search(request):
         body = await request.json()
-        if not isinstance(body, dict) or body.keys() != {"query", "mode"} or body["mode"] not in ("default", "personal", "page"):
+        if (not isinstance(body, dict) or body.keys() - {"bucket"} != {"query", "mode"}
+                or body["mode"] not in ("default", "personal", "page")
+                or ("bucket" in body and (body["mode"] != "personal" or body["bucket"] not in BUCKETS))):
             raise ValueError("只接受公开搜索问题和搜索方式")
         try:
             if body["mode"] == "personal":
-                rows = await search_anysearch(validate_query(body["query"]))
+                rows = await manager.search_web(body["query"], body.get("bucket", UNCAPPED_SEARCH))
                 report = {"kind": "personal_web_search", "results": rows}
             elif body["mode"] == "page":
                 page = await fetch_public_page(body["query"])
@@ -1187,8 +1196,8 @@ def create_app(manager, token):
                 report = page_slice(page, 0)
             else:
                 report = await manager.video_worker.search(manager.runner_password(),
-                    manager.creds.values["opencode_key"], validate_query(body["query"]),
-                    archive_page=manager.archive_web_page)
+                    manager.creds.values["opencode_key"], validate_task_query(body["query"]),
+                    search=manager.search_web, archive_page=manager.archive_web_page)
         except (ClientError, TimeoutError, KeyError, TypeError):
             raise RuntimeError("DSH 未返回可核实的网页资料") from None
         return web.json_response(report, headers={"Cache-Control": "no-store"})
@@ -1264,6 +1273,8 @@ def create_app(manager, token):
                 'id="recovery-hint" class="muted hint" hidden', 'id="recovery-hint" class="muted hint"')
             page = page.replace('id="sync-backup" hidden', 'id="sync-backup"')
             page = page.replace('id="export-thinkbook" hidden', 'id="export-thinkbook"')
+        if _request.path == "/":
+            page = workspace_web.page(page, "台式机本机" if manager.dev.parent == DESKTOP_HOME else "ThinkBook 正式机")
         return web.Response(text=page, content_type="text/html",
             headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
                      "Content-Security-Policy": "default-src 'none'; img-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'"})
@@ -1272,7 +1283,8 @@ def create_app(manager, token):
         return web.FileResponse(ICON)
 
     async def meeting_page(_request):
-        return meeting_web.page((59934, 59935))
+        target = "台式机本机" if manager.dev.parent == DESKTOP_HOME else "ThinkBook 正式机"
+        return meeting_web.page((59934, 59935), target)
 
     async def status(_request):
         return web.json_response({"services": manager.statuses(), "official_key": bool(manager.creds.values.get("upstream_key")),
@@ -1608,12 +1620,29 @@ def create_app(manager, token):
         group = current if view == "current" else view
         scope = read_settings(manager.bridge_settings).get("owner_scope")
         if not scope or not manager.ledger.is_file():
-            return web.json_response({"agents": [], "jobs": [], "meetings": [], "group": group, "current": current})
+            return web.json_response({"agents": [], "fish_documents": None, "jobs": [], "meetings": [],
+                                      "group": group, "current": current})
         roster_prefix = f"dsh-roster:v1:{scope}:"
         import_prefix = f"{COPY_MEMORY_PREFIX}{scope}:"
         job_prefix = f"commissioned-file:v1:{scope}:"
         def read():
-            with closing(sqlite3.connect(manager.ledger.as_uri() + "?mode=ro", uri=True, timeout=4)) as db:
+            store = ActivityStore(manager.activity, existing=True, read_only=True)
+            with closing(store.db) as db:
+                def role_documents(ident):
+                    try:
+                        background = dsh_cards.load_card(store, ident)["background"]
+                    except (OSError, ValueError):
+                        return None
+                    return {
+                        kind: next((name for name in background if name in files), None)
+                        for kind, files in (("story", dsh_cards.STORY_FILES), ("impressions", dsh_cards.IMPRESSION_FILES))
+                    }
+
+                try:
+                    fish_documents = {"impressions": "大肥鱼-他人印象.txt" if
+                                      dsh_cards.load_fish_impressions(store) is not None else None}
+                except (OSError, ValueError):
+                    fish_documents = None
                 agents = db.execute(
                     "SELECT json_extract(value,'$.id'), json_extract(value,'$.name'), "
                     "json_extract(value,'$.status'), json_extract(value,'$.version'), json_extract(value,'$.persona_mode') "
@@ -1635,8 +1664,9 @@ def create_app(manager, token):
                                "SELECT key, json_extract(value,'$.state'), json_extract(value,'$.next'), "
                                "json_extract(value,'$.total'), json_extract(value,'$.error') "
                                "FROM settings WHERE substr(key,1,?)=?", (len(import_prefix), import_prefix))}
-                return {"group": group, "current": current,
+                return {"group": group, "current": current, "fish_documents": fish_documents,
                         "agents": [{**dict(zip(("id", "name", "status", "version", "persona_mode"), row)),
+                                    "documents": role_documents(row[0]),
                                     **({"copy_import": imports[row[0]]} if row[0] in imports else {})} for row in agents],
                         "jobs": [dict(zip(("id", "source", "state", "delivery", "job_kind", "agent", "project"), row))
                                  for row in jobs],
@@ -1647,15 +1677,30 @@ def create_app(manager, token):
         except sqlite3.Error:
             return web.json_response({"error": "暂时无法读取 DSH 小队和任务"}, status=503)
 
+    async def overview(_request):
+        scope = read_settings(manager.bridge_settings).get("owner_scope")
+        group = configured_mode(manager.astrbot_settings)
+        try:
+            return web.json_response(await asyncio.to_thread(dashboard.read_activity, manager.ledger, scope, group),
+                                     headers={"Cache-Control": "no-store"})
+        except sqlite3.Error:
+            return web.json_response({"error": "暂时无法读取活动记录"}, status=503)
+
     def meeting_list(db, scope, group):
         prefix = f"dsh-meeting:v1:{scope}:"
         rows = db.execute(
-            "SELECT json_extract(value,'$.id'), json_extract(value,'$.topic'), "
-            "json_extract(value,'$.status') AS status, json_extract(value,'$.round'), "
-            "json_extract(value,'$.rounds'), json_extract(value,'$.style') "
-            "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL
-            + "ORDER BY status IN ('queued','running','go_wait','stopping','paused') DESC, "
-              "json_extract(value,'$.created') DESC LIMIT 30", (len(prefix), prefix, group, group))
+            "WITH meetings AS (SELECT json_extract(value,'$.id') AS id, "
+            "json_extract(value,'$.topic') AS topic, json_extract(value,'$.status') AS status, "
+            "json_extract(value,'$.round') AS round, json_extract(value,'$.rounds') AS rounds, "
+            "json_extract(value,'$.style') AS style, "
+            "max(coalesce(json_extract(value,'$.created'),0), coalesce(json_extract(value,'$.last_notice'),0), "
+            "coalesce(json_extract(value,'$.transcript[#-1].at'),0)) AS observed, "
+            "json_extract(value,'$.status') IN ('queued','running','go_wait','stopping','paused') AS active "
+            "FROM settings WHERE substr(key,1,?)=? " + GROUP_SQL +
+            "), ranked AS (SELECT *, row_number() OVER (PARTITION BY active ORDER BY observed DESC) AS rank "
+            "FROM meetings) SELECT id, topic, status, round, rounds, style FROM ranked "
+            "WHERE active OR rank <= 30 ORDER BY active DESC, observed DESC",
+            (len(prefix), prefix, group, group))
         return [dict(zip(("id", "topic", "status", "round", "rounds", "style"), row)) for row in rows]
 
     async def dsh_meeting_live(request):
@@ -1814,9 +1859,11 @@ def create_app(manager, token):
                                  headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/", home)
+    app.router.add_get("/classic", home)
     app.router.add_get("/icon.png", icon)
     app.router.add_get("/api/ping", ping)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/dashboard", overview)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
     app.router.add_get("/api/persona-mode", switch_persona)

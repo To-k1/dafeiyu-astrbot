@@ -190,6 +190,18 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         fetch.assert_awaited_with(evidence[0]["url"], "page")
         self.assertEqual(result["text"], "original text")
 
+    async def test_personal_deepseek_search_uses_the_interaction_bucket(self):
+        from plugin.astrbot_plugin_bili_activity.model_route import OFFICIAL_INTERACTION_BASE
+
+        search = AsyncMock(return_value={"kind": "personal_web_search", "results": []})
+        provider = types.SimpleNamespace(get_model=lambda: "deepseek-flash",
+                                         provider_config={"api_base": OFFICIAL_INTERACTION_BASE})
+        self.plugin.context = types.SimpleNamespace(
+            fishhome_dsh_web_search_client=lambda scope: search if scope == SCOPE else None,
+            get_using_provider_async=AsyncMock(return_value=provider))
+        await self.plugin.web_search(FakeEvent(), "site:docs.python.org pathlib", mode="personal")
+        search.assert_awaited_once_with("site:docs.python.org pathlib", "personal", bucket="interaction")
+
     async def test_dsh_history_recalls_prior_media_without_dispatching_again(self):
         store = self.plugin.store
         source = "BV1g8Wq6DEXj"
@@ -520,6 +532,40 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("优先用 df_bili_watch", self.plugin.viewing_guidance(self.config, True))
         self.assertIn("查公开网页时优先用 df_web_search",
                       self.plugin.capability_context(self.config, go_video=True))
+
+    async def test_personal_video_continues_one_batch_at_a_time(self):
+        async def prepare(_tool, args):
+            return {"identity": {"bvid": args["bvid"], "cid": args["cid"], "duration": 810},
+                    "range": [args["start"], min(args["end"], 810)]}
+
+        self.backend.json_call.side_effect = prepare
+        event = FakeEvent()
+        bvid = "BV1g8Wq6DEXj"
+        start, end = 100, 900
+        for expected in ([400, 810], [700, 810], None):
+            result = json.loads(await self.plugin.watch(event, bvid, "11", start, end, mode="personal"))
+            self.assertEqual(result.get("next_range"), expected)
+            self.assertEqual(result["range"][0], start)
+            if expected:
+                start, end = expected
+        self.assertEqual([(call.args[1]["start"], call.args[1]["end"]) for call in
+                          self.backend.json_call.await_args_list], [(100, 400), (400, 700), (700, 810)])
+
+    async def test_default_delegation_returns_the_remaining_range_for_the_same_part(self):
+        worker = AsyncMock(return_value={"kind": "dsh_video", "task_id": "first", "summary": "代看首批",
+                                         "evidence": [{"cid": 11, "duration": 810, "frame_times": [100]}],
+                                         "billing": []})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda _: worker)
+        event = FakeEvent()
+        result = json.loads(await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 100, 900))
+        self.assertEqual(result["next_range"], [400, 810])
+        self.assertIn("cid 11", worker.await_args.args[1])
+        self.assertIn("100 到 400 秒", worker.await_args.args[1])
+        self.assertEqual(self.calls, [])
+        worker.return_value["evidence"][0]["cid"] = 12
+        result = json.loads(await self.plugin.watch(event, "BV1g8Wq6DEXj", "11", 100, 900))
+        self.assertEqual(result["status"], "needs_review")
+        self.assertNotIn("next_range", result)
 
     async def test_dsh_goal_recovers_accepted_request_and_writes_back_once(self):
         store = self.plugin.store

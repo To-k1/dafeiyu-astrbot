@@ -4,39 +4,64 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>组会会场 · FishHome</title>
 <style>
-:root{color-scheme:dark;--bg:#08111d;--panel:#101e2e;--line:#294158;--ink:#edf5ff;--muted:#a8bed4;--accent:#8ed8ff;--warn:#f2c67b;--selected:#15334d}
+:root{color-scheme:dark;--bg:#0a111b;--panel:#131e2b;--wash:#192736;--line:#344252;--ink:#eaf0f7;--muted:#a6b5c6;--accent:#f4cb69;--signal-ink:#17180f}
 *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI","Microsoft YaHei",sans-serif}
-main{width:min(1320px,100%);margin:auto;padding:clamp(12px,2vw,28px);display:grid;grid-template-columns:minmax(190px,280px) minmax(0,1fr);gap:15px;min-height:100dvh}
-h1,h2,h3,p{margin:0}h1{font-size:23px}h2{font-size:clamp(19px,2.3vw,27px);overflow-wrap:anywhere}h3{font-size:13px;color:var(--muted)}
-aside,section{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}aside{align-self:start}
-button,select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:6px 9px}button{cursor:pointer}button:disabled,textarea:disabled{opacity:.65}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-select{width:100%;margin:9px 0 14px}a{color:var(--accent)}.muted,small{color:var(--muted)}.hint{font-size:13px;margin-top:7px}.live{color:var(--accent)}.warn{color:var(--warn)}
-.meeting{display:block;width:100%;text-align:left;margin:5px 0 8px;overflow-wrap:anywhere}.meeting[aria-current=true]{background:var(--selected);border-color:var(--accent)}.meeting small{display:block}
-#members{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.member{border:1px solid var(--line);border-radius:14px;padding:2px 9px;font-size:13px}#stream{max-height:58dvh;min-height:12dvh;overflow:auto}
-article{border-bottom:1px solid var(--line);padding:10px 3px}article strong{color:var(--accent)}article small{padding-left:8px}article p{white-space:pre-wrap;overflow-wrap:anywhere}article.owner{border-left:2px solid var(--warn);padding-left:10px}
-form{display:grid;gap:6px;margin-top:12px}textarea{width:100%;min-height:58px;resize:vertical}form button{justify-self:end;background:var(--accent);color:#081827;font-weight:650}
-@media(max-width:640px){main{grid-template-columns:1fr;min-height:auto}aside{max-height:38dvh;overflow:auto}#stream{max-height:52dvh}}
+.top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel);border-bottom:1px solid var(--line);padding:12px clamp(14px,4vw,42px)}
+.top a{color:var(--ink);text-underline-offset:4px}.top span{font-weight:650}.top span,.muted,small,time{color:var(--muted)}
+main{width:min(1400px,100%);margin:auto;padding:clamp(14px,3vw,34px);display:grid;grid-template-columns:minmax(0,1fr) minmax(175px,235px);gap:28px;min-height:100dvh}
+h1,h2,h3,p{margin:0}h1{font-size:clamp(26px,3.4vw,44px);line-height:1.2;letter-spacing:-.02em;overflow-wrap:anywhere}
+h2{font-size:16px}h3{font-size:13px;color:var(--muted)}section,aside{min-width:0}
+aside{align-self:start;border-top:1px solid #526173;padding-top:10px}
+button,select,textarea{font:inherit;color:var(--ink);background:var(--wash);border:1px solid var(--line);border-radius:0;padding:7px 10px}
+button{cursor:pointer;clip-path:polygon(0 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%)}
+button:hover{border-color:var(--accent)}button:disabled,textarea:disabled{opacity:.65}
+:is(button,select,textarea,a,#stream):focus-visible{outline:2px solid var(--ink);outline-offset:-3px}
+select{width:100%;margin:7px 0 13px}.hint{font-size:13px}.warn{color:var(--accent)}
+.meeting{display:block;width:100%;text-align:left;margin:5px 0 8px;overflow-wrap:anywhere}
+.meeting[aria-current=true],#follow,form button{background:var(--accent);color:var(--signal-ink);font-weight:700}
+.meeting[aria-current=true] small{color:var(--signal-ink)}.meeting small{display:block}
+#state{margin:7px 0 14px;font-size:13px}
+.record{background:var(--panel);border-top:3px solid var(--accent)}
+.record-heading,.record-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.record-heading{justify-content:space-between;padding:8px 16px;min-height:48px;border-bottom:1px solid var(--line)}
+.record-heading time,article small{font-variant-numeric:tabular-nums;font-size:12px}
+#feed-status:not(:empty),#post-status:not(:empty){padding:8px 16px;border-bottom:1px solid var(--line)}
+#members{display:flex;flex-wrap:wrap;gap:6px 16px;padding:8px 16px;border-bottom:1px solid var(--line)}
+#members:empty{display:none}.member{font-size:13px}.member.live{background:var(--accent);color:var(--signal-ink);padding:0 5px}
+#stream{max-height:clamp(220px,43dvh,550px);min-height:12dvh;overflow:auto;overflow-anchor:none;scrollbar-color:#526173 var(--panel)}
+article{border-bottom:1px solid var(--line);padding:13px 17px}article small{padding-left:9px}
+article p{max-width:42em;line-height:1.88;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}
+article.owner strong{color:var(--accent)}
+form{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:7px;padding:10px 16px}
+form label{grid-column:1/-1;font-size:13px;color:var(--muted)}
+textarea{width:100%;min-height:58px;resize:vertical;background:var(--bg)}
+@media(max-width:680px){main{grid-template-columns:1fr;min-height:auto;gap:16px}aside{max-height:38dvh;overflow:auto}}
 </style>
+<header class="top"><a href="/" id="workbench">返回深海工作台</a><span>__TARGET__</span></header>
 <main>
+  <section aria-labelledby="topic">
+    <h1 id="topic">选择一场组会</h1>
+    <p id="state" class="muted"></p>
+    <div class="record">
+      <div class="record-heading"><h2>会议记录</h2><div class="record-actions"><time id="read-time"></time><button id="follow" type="button" hidden>回到最新</button></div></div>
+      <p id="feed-status" class="hint warn" role="status"></p>
+      <div id="members"></div>
+      <div id="stream" role="log" aria-label="组会发言" tabindex="0"></div>
+      <form id="post" hidden>
+        <label for="comment">以主人身份插话</label>
+        <textarea id="comment" maxlength="8000" required></textarea>
+        <button type="submit">发送</button>
+      </form>
+      <p id="post-status" class="hint warn" role="status"></p>
+    </div>
+  </section>
   <aside aria-label="会议列表">
-    <h1>组会会场</h1>
+    <h2>会议列表</h2>
     <label for="group" class="muted">会议分组</label>
     <select id="group"><option value="current">当前人格</option><option value="formal">正式</option><option value="test">测试</option></select>
     <div id="meetings"></div>
     <p id="list-status" class="hint warn" role="status"></p>
   </aside>
-  <section aria-labelledby="topic">
-    <h2 id="topic">选择一场组会</h2>
-    <p id="state" class="muted"></p>
-    <div id="members"></div>
-    <div id="stream" role="log" aria-label="组会发言" tabindex="0"></div>
-    <form id="post" hidden>
-      <label for="comment">以主人身份插话</label>
-      <textarea id="comment" maxlength="8000" required></textarea>
-      <button type="submit">发送</button>
-    </form>
-    <p id="feed-status" class="hint warn" role="status"></p>
-  </section>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -48,7 +73,11 @@ const memberStates = {waiting:'等待', thinking:'思考中', spoken:'已发言'
 const active = new Set(['queued','running','paused','go_wait','stopping']);
 const url = new URL(location.href);
 const initialView = url.searchParams.get('view');
-const displayTime = new Intl.DateTimeFormat('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+const displayTime = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'});
+if (window.self !== window.top) {
+  $('workbench').target = '_blank';
+  $('workbench').rel = 'noopener';
+}
 $('group').value = ['formal','test'].includes(initialView) ? initialView : 'current';
 let live, listSignature = '';
 const node = (tag, value = '', cls = '') => {
@@ -74,11 +103,12 @@ function select(id) {
   history.replaceState(null, '', location.pathname + '?' + params);
   live = id ? {id, view, after:0, receipts:new Map()} : null;
   $('topic').textContent = id ? '正在打开组会' : '选择一场组会';
-  for (const name of ['state','members','stream','feed-status']) $(name).replaceChildren();
+  for (const name of ['state','members','stream','feed-status','read-time','post-status']) $(name).replaceChildren();
   for (const item of $('meetings').querySelectorAll('button[data-meeting]')) {
     item.setAttribute('aria-current', String(item.dataset.meeting === id));
   }
   $('post').hidden = true;
+  $('follow').hidden = true;
   $('comment').disabled = $('post').querySelector('button').disabled = false;
   $('comment').value = '';
   if (live) poll(live);
@@ -121,14 +151,21 @@ async function list() {
 }
 function render(meeting, state) {
   $('topic').textContent = state.topic;
+  const rounds = state.round_limit || (state.style !== 'casual' && state.rounds);
+  const group = {current:'当前人格', formal:'正式记录', test:'测试记录'}[meeting.view];
   $('state').textContent = [state.style === 'casual' ? '茶会' : '讨论会', states[state.status] || state.status,
-    state.current_round ? '第 ' + state.current_round + ' 轮' : ''].filter(Boolean).join(' · ');
+    state.current_round ? '第 ' + state.current_round + (rounds ? ' / ' + rounds : '') + ' 轮' : '',
+    group, !state.can_post ? '只读' : '可插话'].filter(Boolean).join(' · ');
+  meeting.offline = false;
+  meeting.readAt = displayTime.format(Date.now());
+  $('read-time').textContent = '读到 ' + meeting.readAt;
+  $('feed-status').textContent = '';
   const members = state.members.map(member => node('span',
     `${member.name} · ${memberStates[member.status] || member.status}`,
     member.status === 'thinking' ? 'member live' : 'member'));
   if ($('members').textContent !== members.map(member => member.textContent).join('')) $('members').replaceChildren(...members);
   const stream = $('stream');
-  const follow = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 35;
+  const follow = caughtUp();
   for (const entry of state.transcript) {
     const item = node('article', '', entry.receipt ? 'owner' : '');
     item.append(node('strong', entry.name || (entry.kind === 'host' ? '大肥鱼' : '会议记录')),
@@ -148,8 +185,25 @@ function render(meeting, state) {
   }
   meeting.after = state.next_after;
   $('post').hidden = !state.can_post;
-  if (follow) stream.scrollTop = stream.scrollHeight;
+  if (!meeting.sending) $('comment').disabled = $('post').querySelector('button').disabled = false;
+  if (follow) {
+    stream.scrollTop = stream.scrollHeight;
+    $('follow').hidden = true;
+  } else if (state.transcript.length) {
+    $('follow').hidden = false;
+  }
 }
+function caughtUp() {
+  const stream = $('stream');
+  return stream.scrollHeight - stream.scrollTop - stream.clientHeight < 35;
+}
+$('stream').onscroll = () => { if (caughtUp()) $('follow').hidden = true; };
+$('follow').onclick = () => {
+  const stream = $('stream');
+  stream.scrollTop = stream.scrollHeight;
+  $('follow').hidden = true;
+  stream.focus({preventScroll:true});
+};
 function params(meeting) {
   return {id:meeting.id, view:meeting.view, after:meeting.after};
 }
@@ -162,14 +216,15 @@ async function poll(meeting) {
     if (live !== meeting) return;
     if (!meeting.sending && cursor === meeting.after) {
       render(meeting, state);
-      if ($('feed-status').dataset.source === 'poll') $('feed-status').textContent = '';
       if (!state.active && meeting.after >= state.transcript_count) return;
       if (meeting.after < state.transcript_count) delay = 0;
     }
   } catch (error) {
     if (live !== meeting) return;
-    $('feed-status').dataset.source = 'poll';
+    meeting.offline = true;
     $('feed-status').textContent = error.message;
+    $('read-time').textContent = meeting.readAt ? '上次读到 ' + meeting.readAt : '尚未读到会议记录';
+    $('comment').disabled = $('post').querySelector('button').disabled = true;
     delay = 3000;
   }
   meeting.timer = setTimeout(() => poll(meeting), delay);
@@ -177,7 +232,7 @@ async function poll(meeting) {
 $('post').addEventListener('submit', async event => {
   event.preventDefault();
   const meeting = live, input = $('comment'), submit = event.submitter, text = input.value.trim();
-  if (!meeting || !text || meeting.sending) return;
+  if (!meeting || !text || meeting.sending || meeting.offline) return;
   if (meeting.draft?.text !== text) meeting.draft = {text, post_id:crypto.randomUUID().replaceAll('-','')};
   meeting.sending = submit.disabled = input.disabled = true;
   try {
@@ -185,14 +240,16 @@ $('post').addEventListener('submit', async event => {
     if (live !== meeting) return;
     input.value = '';
     meeting.draft = null;
-    $('feed-status').textContent = '';
+    $('post-status').textContent = '';
     render(meeting,state);
   } catch (error) {
     if (live !== meeting) return;
-    $('feed-status').dataset.source = 'post';
-    $('feed-status').textContent = error.message;
+    $('post-status').textContent = error.message;
   } finally {
-    if (live === meeting) meeting.sending = submit.disabled = input.disabled = false;
+    if (live === meeting) {
+      meeting.sending = false;
+      submit.disabled = input.disabled = !!meeting.offline;
+    }
   }
 });
 $('group').onchange = () => { listSignature = ''; select(null); list(); };

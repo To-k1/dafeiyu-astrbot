@@ -75,6 +75,7 @@ internal sealed class FishHomeTray : ApplicationContext
         backend.BeginErrorReadLine();
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开 WebUI", null, delegate { OpenPage(); });
+        menu.Items.Add("打开经典界面", null, delegate { OpenPage(true); });
         menu.Items.Add("启动全部服务", null, delegate { startPending = true; });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出控制台", null, delegate { ExitThread(); });
@@ -101,7 +102,7 @@ internal sealed class FishHomeTray : ApplicationContext
 
     private void Tick(object sender, EventArgs args)
     {
-        if (openEvent.WaitOne(0)) openPending = true;
+        if (openEvent.WaitOne(0)) OpenPage();
         if (startEvent.WaitOne(0)) startPending = true;
         if (backend.HasExited)
         {
@@ -116,7 +117,7 @@ internal sealed class FishHomeTray : ApplicationContext
             try { Request("/api/ping", "GET", 450); ready = true; icon.Text = "FishHome 控制台"; }
             catch (WebException) { if (++ticks == 25) icon.Text = "FishHome 等待本机控制台"; }
         }
-        if (ready && openPending) { openPending = false; OpenPage(); }
+        if (ready && openPending) { openPending = false; OpenPage(classicPending); }
         if (ready && startPending)
         {
             startPending = false;
@@ -127,10 +128,12 @@ internal sealed class FishHomeTray : ApplicationContext
         }
     }
 
-    private void OpenPage()
+    private bool classicPending;
+
+    private void OpenPage(bool classic = false)
     {
-        if (!ready) { openPending = true; return; }
-        Process.Start(new ProcessStartInfo(Address + "/#" + token) { UseShellExecute = true });
+        if (!ready) { openPending = true; classicPending = classic; return; }
+        Process.Start(new ProcessStartInfo(Address + (classic ? "/classic#" : "/#") + token) { UseShellExecute = true });
     }
 
     protected override void ExitThreadCore()

@@ -10,6 +10,7 @@ from plugin.astrbot_plugin_bili_activity.cost_window import budget_day
 
 
 BUCKETS = ("interaction", "autonomous")
+UNCAPPED_SEARCH = "web_search"
 YUAN = 1_000_000_000
 DEFAULT_LIMIT = 5 * YUAN
 BOUNDED_OPENAI_KIND = "openai:v41-bounded"
@@ -75,15 +76,17 @@ class Ledger:
                        (bucket, day if temporary else "", amount(value)))
 
     def reserve(self, bucket, kind, maximum, now):
-        if bucket not in BUCKETS or type(maximum) is not int or maximum <= 0:
+        uncapped_search = bucket == UNCAPPED_SEARCH and kind == "search"
+        if (bucket not in BUCKETS and not uncapped_search) or type(maximum) is not int or maximum <= 0:
             raise ValueError("invalid reservation")
         day, ident = budget_day(now), uuid4().hex
         with self.transaction() as db:
-            cap, settled, reserved = self.totals(db, bucket, day)
-            if kind == BOUNDED_OPENAI_KIND and self._bound_overrun(db):
-                raise CostLimit("请求用量超出已核对的范围，已恢复整窗预留，请重试。")
-            if settled + reserved + maximum > cap:
-                raise CostLimit("剩余额度不足以预留本次请求。预算日于北京时间 00:00 切换。")
+            if not uncapped_search:
+                cap, settled, reserved = self.totals(db, bucket, day)
+                if kind == BOUNDED_OPENAI_KIND and self._bound_overrun(db):
+                    raise CostLimit("请求用量超出已核对的范围，已恢复整窗预留，请重试。")
+                if settled + reserved + maximum > cap:
+                    raise CostLimit("剩余额度不足以预留本次请求。预算日于北京时间 00:00 切换。")
             db.execute("INSERT INTO fish_cost_calls VALUES (?, ?, ?, ?, ?, NULL)",
                        (ident, bucket, day, kind, maximum))
         return ident
@@ -112,4 +115,11 @@ class Ledger:
                 cap, settled, reserved = self.totals(db, bucket, day)
                 ledgers[bucket] = {"limit": yuan(cap), "used": yuan(settled), "reserved": yuan(reserved),
                                    "remaining": yuan(max(0, cap - settled - reserved))}
-        return {"day": day, "ledgers": ledgers}
+            search = {}
+            for bucket, count, settled, reserved in db.execute(
+                "SELECT bucket, COUNT(CASE WHEN actual>0 THEN 1 END), COALESCE(SUM(actual),0), "
+                "COALESCE(SUM(CASE WHEN actual IS NULL THEN reserved END),0) "
+                "FROM fish_cost_calls WHERE day=? AND kind='search' GROUP BY bucket", (day,)
+            ):
+                search[bucket] = {"calls": count, "used": yuan(settled), "reserved": yuan(reserved)}
+        return {"day": day, "ledgers": ledgers, "search": search}

@@ -149,7 +149,7 @@ class VideoWorker:
                 upstream, progress=background_started,
                 startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started is not None else 30)
 
-    async def search(self, password, key, query, *, upstream=None, background_started=None, agent=None,
+    async def search(self, password, key, query, *, search, upstream=None, background_started=None, agent=None,
                      archive_page=None, language=""):
         query = validate_task_query(query)
         timeout = 72
@@ -158,7 +158,7 @@ class VideoWorker:
             timeout = BACKGROUND_TIMEOUT
         with tempfile.TemporaryDirectory(prefix="search-evidence-", dir=self.state) as folder:
             evidence = Path(folder) / "sources.jsonl"
-            return await self._run(password, key, search_server(evidence, archive_page), render_search_preset,
+            return await self._run(password, key, search_server(evidence, archive_page, search=search), render_search_preset,
                 lambda client, work, relay: run_search_task(
                     client, work, query, evidence, relay, timeout=timeout, agent=agent, language=language,
                     progress=background_started), upstream, progress=background_started,
