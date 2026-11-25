@@ -282,7 +282,7 @@ class PublicJobTests(unittest.IsolatedAsyncioTestCase):
 
         worker._run = run
         jobs = PublicJobs(self.root / "jobs", lambda body, started:
-            worker.search("unused", "unused", body["query"], background_started=started))
+            worker.search("unused", "unused", body["query"], search=AsyncMock(), background_started=started))
         jobs.start()
         self.addAsyncCleanup(jobs.close)
         async with worker.desktop_lock:

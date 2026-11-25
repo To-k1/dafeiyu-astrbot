@@ -10,6 +10,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from plugin.astrbot_plugin_bili_activity.qq_conversations import restore_persona_chat
 from scripts.native_archive import snapshot
 
 
@@ -85,7 +86,7 @@ def require_idle(astro, state, *, operation="切换人格"):
     ledger = data / "plugin_data/astrbot_plugin_bili_activity/activity.sqlite3"
     with closing(sqlite3.connect(ledger.as_uri() + "?mode=ro", uri=True)) as db:
         busy = db.execute("""SELECT 1 FROM settings WHERE
-            ((key LIKE 'dsh-chat:v1:%' OR key LIKE 'dsh-meeting:v1:%')
+            ((key LIKE 'dsh-chat:v1:%' OR key LIKE 'dsh-owner-chat:v1:%' OR key LIKE 'dsh-meeting:v1:%')
              AND json_extract(value,'$.status') IN ('queued','running','stopping'))
             OR (key LIKE 'commissioned-file:v1:%'
                 AND json_extract(value,'$.state') IN ('submitting','submitted')) LIMIT 1""").fetchone()
@@ -131,14 +132,15 @@ async def activate(astro, mode, scope):
                 raise ValueError("测试人格配置未能从正式版同步")
             refresh_team(astro, scope)
         manager = ConversationManager(db_helper)
-        previous = await manager.get_curr_conversation_id(scope)
-        await manager.new_conversation(scope, content=[], persona_id=desired)
+        previous = await restore_persona_chat(manager, sp, scope, pair["current"], desired)
         try:
             target["persona_id"] = desired
             _write_config(path, cfg)
         except BaseException:
             if previous:
                 await manager.switch_conversation(scope, previous)
+            else:
+                await sp.session_remove(scope, "sel_conv_id")
             raise
     finally:
         await db_helper.engine.dispose()

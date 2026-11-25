@@ -21,6 +21,8 @@
   let pausedByBrowser = false;
   let serviceRows = null;
   let activityRead = false;
+  let resourcesRead = false;
+  let resourceTime;
   const state = {meetings: null, activity: null};
   const readTimes = {};
 
@@ -53,6 +55,7 @@
     }
     for (const page of root.querySelectorAll('[data-page]')) page.hidden = page.dataset.page !== selected;
     if (selected === 'team') $('dsh-team').open = true;
+    if (selected === 'overview') void readResources();
   }
 
   root.querySelector('.fw-nav').addEventListener('click', event => {
@@ -190,6 +193,61 @@
     }
   }
 
+  const gib = bytes => (bytes / 1024 ** 3).toFixed(1) + ' GiB';
+
+  function resourceMetric(name, percent, detail) {
+    const box = node('dl', '', 'fw-resource-metric');
+    const title = node('dt', name);
+    title.append(node('strong', Math.round(percent) + '%'));
+    const bar = node('meter');
+    bar.max = 100;
+    bar.value = percent;
+    bar.setAttribute('aria-label', name + '占用');
+    bar.toggleAttribute('data-high', percent >= 90);
+    const info = node('dd');
+    info.append(bar);
+    box.append(title, info);
+    if (detail) box.append(node('dd', detail));
+    return box;
+  }
+
+  function resourceStatus(stale) {
+    const label = $('fw-resources-time');
+    label.classList.toggle('is-stale', stale);
+    label.textContent = resourceTime ? (stale ? '连接中断 · 上次采样 ' : '采样 ') + clock(resourceTime) :
+      '暂时无法读取资源';
+  }
+
+  async function readResources() {
+    if (resourcesRead || document.hidden || currentTab() !== 'overview') return;
+    resourcesRead = true;
+    try {
+      const sample = await api('/api/host-resources');
+      const ram = sample.memory;
+      $('fw-resource-metrics').replaceChildren(
+        resourceMetric('CPU', sample.cpu_percent),
+        resourceMetric('内存', ram.percent, gib(ram.available) + ' 可用 / ' + gib(ram.total)),
+        ...sample.disks.map(disk => resourceMetric(disk.label + ' ' + disk.volume, disk.percent,
+          gib(disk.free) + ' 可用 / ' + gib(disk.total))));
+      const processes = $('fw-resource-processes');
+      processes.hidden = !sample.processes.length;
+      if (sample.processes.length) {
+        $('fw-resource-rows').replaceChildren(...sample.processes.map(process => {
+          const row = node('tr');
+          row.append(node('td', process.name), node('td', process.pid),
+            node('td', Math.round(process.rss / 1024 ** 2) + ' MiB'));
+          return row;
+        }));
+      }
+      resourceTime = sample.observed_at;
+      resourceStatus(false);
+    } catch {
+      resourceStatus(true);
+    } finally {
+      resourcesRead = false;
+    }
+  }
+
   window.fishhomeWorkspace = {
     canWrite: () => connected && !pausedByBrowser,
     hasConnectionFailure: () => pausedByBrowser || !!connectionError,
@@ -228,11 +286,14 @@
   window.addEventListener('offline', () => {
     pausedByBrowser = true;
     health();
+    resourceStatus(true);
   });
   window.addEventListener('online', () => {
     pausedByBrowser = false;
     refresh();
+    void readResources();
   });
+  document.addEventListener('visibilitychange', readResources);
   $('fw-start').onclick = $('fw-service-start').onclick = () => act('all','start');
   $('fw-stop').onclick = () => {
     const dialog = $('fw-stop-dialog');
@@ -247,4 +308,5 @@
   selectTab();
   health();
   for (const id of ['fw-live','fw-ended','fw-running','fw-results']) drawList(id, [], '正在读取');
+  setInterval(readResources, 5000);
 })();

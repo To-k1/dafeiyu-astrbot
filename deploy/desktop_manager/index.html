@@ -38,6 +38,7 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <button id="dsh-ui" disabled>DeepSeek Harness ↗</button>
       <a class="button" href="/meetings" target="_blank" rel="noopener">组会会场 ↗</a>
       <button id="dsh-meeting-ui" disabled>DSH 会场 ↗</button>
+      <button id="dsh-owner-work-ui" disabled>主人工作台 ↗</button>
     </div>
     <div id="active-meeting-shortcuts" class="meeting-shortcuts"></div>
   </nav>
@@ -201,7 +202,8 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
       <dt>自主活动</dt><dd><code>暂停自主活动</code> 或 <code>恢复自主活动</code>。也可以问「你最近一次生活安排是什么？计划和实际结果分开说」或「查一下你自己发起的 DSH 文件任务」。后者查已有成果。</dd>
       <dt>长项目与工坊</dt><dd>模块开启后，可以问「你现在有哪些长期项目？」或「你在创作工坊里有哪些草稿？」。需要查原始来源时，可以请她检索已有活动记录。</dd>
       <dt>语音与截图</dt><dd>肥鱼可自行选择语音回你，也可以直接说「只用语音回答」或「这轮只用文字」。<code>截图看看</code> 获取手机画面。</dd>
-      <dt>B 站与会话</dt><dd><code>/bili互动 状态</code> 查 B 站互动额度和审批。<code>/new</code> 开新对话，<code>/sid</code> 查当前会话来源。</dd>
+      <dt>QQ 对话</dt><dd><code>/对话</code> 列出当前人格组的旧对话，<code>/对话 列表 2</code> 看下一页，<code>/对话 切换 ID</code> 恢复到那段对话。<code>/new</code> 开新对话，<code>/sid</code> 查当前会话来源。</dd>
+      <dt>B 站互动</dt><dd><code>/bili互动 状态</code> 查 B 站互动额度和审批。</dd>
     </dl>
   </details>
   <details class="panel"><summary>人民币预算与凭据</summary>
@@ -227,7 +229,6 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <button id="dsh-video-toggle" type="button" hidden>启用 DSH 视频代看</button>
     <button id="dsh-search-toggle" type="button" hidden>启用 DSH 网页搜索</button>
     <button id="dsh-go-files-toggle" type="button" hidden>文件 DSH 使用 Go 订阅</button>
-    <button id="dsh-asr-toggle" type="button" hidden>已在百炼开启用完即停，启用 DSH 听写</button>
     <form id="go-usage-pair" hidden><label for="go-server-password">OpenCode 本机额度查询密码</label><input id="go-server-password" type="password" autocomplete="off" required maxlength="250"><button>保存</button></form>
     <p class="muted hint">保存正式任务的 OpenCode Go API Key 后，QQ 的 <code>/go额度</code> 可直接查官方订阅窗口。已有本机额度服务配对可继续保留。</p>
     <div id="dsh-desktop-settings" hidden>
@@ -240,6 +241,46 @@ button,a.button{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
     <form id="compute-credential"><label for="compute-password">FishHomeCompute</label><input id="compute-password" type="password" autocomplete="off" required placeholder="本地标准账户密码"><button>保存</button></form>
     <p class="muted hint">保存 Key 后重启「人民币计费」。AstrBot 交互 Provider 使用 <code>http://127.0.0.1:6197/openai/interaction/v1</code> 和交互本机凭据。</p>
     <button id="showkeys">显示本机 Provider 凭据</button><pre id="keys" hidden></pre>
+  </details>
+  <details class="panel" id="media-models"><summary>语音与模型</summary>
+    <p class="muted hint">使用 AstrBot 和 FishHome 已保存的设置。Key 只显示保存状态，留空沿用已保存的 Key。</p>
+    <button id="media-models-refresh" type="button">重新读取设置</button>
+    <form id="speech-settings">
+      <label for="tts_model">百炼 TTS 模型</label><input id="tts_model" maxlength="128">
+      <label for="tts_voice">音色 ID</label><input id="tts_voice" maxlength="250">
+      <label for="tts_key">TTS Key</label><input id="tts_key" type="password" autocomplete="off" maxlength="250">
+      <label for="asr_model">QQ 与肥鱼亲看 ASR 模型</label><input id="asr_model" maxlength="128" list="asr-models" required>
+      <label for="dsh_asr_model">DSH 音轨 ASR 模型</label><input id="dsh_asr_model" maxlength="128" list="asr-models" required>
+      <datalist id="asr-models"><option value="qwen3-asr-flash"><option value="qwen-audio-3.1-asr-flash"></datalist>
+      <label for="asr_workspace">百炼北京业务空间 ID</label><input id="asr_workspace" maxlength="80" placeholder="Qwen-Audio 3.1 使用">
+      <label for="asr_language">QQ 听写语种</label><input id="asr_language" maxlength="8" placeholder="自动识别">
+      <label for="dsh_asr_language">DSH 默认听写语种</label><input id="dsh_asr_language" maxlength="8" placeholder="自动识别">
+      <label for="asr_keep_dialect"><input id="asr_keep_dialect" type="checkbox"> Qwen-Audio 3.1 保留方言表达</label>
+      <label for="asr_mode">ASR Key</label><select id="asr_mode">
+        <option value="auto">沿用现有配置</option>
+        <option value="shared">与百炼 TTS 共用</option>
+        <option value="separate">使用独立 ASR Key</option>
+      </select>
+      <label for="asr_key">独立 ASR Key</label><input id="asr_key" type="password" autocomplete="off" maxlength="250">
+      <button disabled>保存语音设置</button>
+    </form>
+    <p id="speech-status" class="muted hint" role="status"></p>
+    <button id="dsh-asr-toggle" type="button" hidden>已在百炼开启用完即停，启用 DSH 听写</button>
+    <button type="button" data-model-probe="tts" disabled>测试 TTS</button>
+    <button type="button" data-model-probe="asr" disabled>测试 ASR</button>
+    <button type="button" data-model-probe="dsh_asr" disabled>测试 DSH 音轨</button>
+    <form id="chat-model-settings">
+      <label for="deepseek-model">官方 DeepSeek</label>
+      <select id="deepseek-model" disabled></select>
+      <button type="button" data-model-probe="deepseek" disabled>测试 DeepSeek</button>
+      <label for="go-model">大肥鱼 OpenCode Go 模型</label><select id="go-model" disabled></select>
+      <button type="button" id="go-models-refresh" disabled>读取订阅模型</button>
+      <button id="go-model-save" disabled>保存 Go 模型</button>
+      <button type="button" data-model-probe="go" disabled>测试 OpenCode Go</button>
+    </form>
+    <p id="chat-model-status" class="muted hint"></p>
+    <p class="muted hint">测试使用已保存的设置，会请求一次服务商。DeepSeek 走交互账本，Go 使用订阅，语音测试使用百炼。保存语音或 Go 模型后，从服务页重启 AstrBot 以应用到 QQ 和肥鱼本人。</p>
+    <p id="model-probe-status" role="status"></p>
   </details>
   <details class="panel"><summary>各模块设置与日志位置</summary>
     <p class="muted hint">有 WebUI 的模块可从常用入口打开。PhoneMCP、Ollama、B 站伴侣和计费网关使用 API，本机配置与日志见下方。</p><ul class="locations" id="locations"></ul>
@@ -467,12 +508,12 @@ function setTheme(night) {
 }
 setTheme(localStorage.getItem('fishhome-theme') === 'night');
 $('theme').onclick = () => setTheme(document.documentElement.dataset.theme !== 'night');
-async function openDsh(meetings = false) {
+async function openDsh(panel = '') {
   const tab = window.open('about:blank', '_blank');
   if (tab) tab.opener = null;
   try {
     const {url} = await api('/api/ui/dsh', 'POST');
-    const destination = meetings ? url + "#fishhome-meetings" : url;
+    const destination = panel ? url + "#" + panel : url;
     if (tab) tab.location.replace(destination);
     else location.assign(destination);
   } catch (error) {
@@ -481,7 +522,8 @@ async function openDsh(meetings = false) {
   }
 }
 $('dsh-ui').onclick = () => openDsh();
-$('dsh-meeting-ui').onclick = () => openDsh(true);
+$('dsh-meeting-ui').onclick = () => openDsh('fishhome-meetings');
+$('dsh-owner-work-ui').onclick = () => openDsh('fishhome-owner-work');
 let previewedCard = null;
 let previewedArchive = null;
 let storyAgents = [];
@@ -903,7 +945,7 @@ async function refresh() {
     $('overview').textContent = `${services.filter(s => s.state === 'running' && s.recognized).length} / ${services.length} 个组件已运行`;
     const ready = id => services.some(s => s.id === id && s.state === 'running' && s.recognized);
     $('room-state').textContent = ready('room') ? '房间与星海在线' : '房间服务待启动';
-    $('dsh-ui').disabled = $('dsh-meeting-ui').disabled = !ready('dsh');
+    $('dsh-ui').disabled = $('dsh-meeting-ui').disabled = $('dsh-owner-work-ui').disabled = !ready('dsh');
     $('setup').textContent = `DeepSeek Key ${official_key ? '已加密保存' : '待填写，计费服务当前仅供查询'}。DSH 账户密码${runner_password ? '已保存' : '待填写'}。`;
     const workspace = window.fishhomeWorkspace;
     workspace?.activity();
@@ -1066,6 +1108,80 @@ $('confirm-settings').onclick = () => {
   }
   readSettingsSync('POST', {expected, choices});
 };
+const speechNames = ['tts_model','tts_voice','asr_model','dsh_asr_model','asr_mode','asr_workspace','asr_language','dsh_asr_language'];
+const mediaRequest = body => api('/api/media-models', body ? 'POST' : 'GET', body);
+let mediaState = null, goModels = [];
+function renderMediaModels(data) {
+  mediaState = data;
+  for (const name of speechNames) $(name).value = data[name] ?? '';
+  $('asr_keep_dialect').checked = data.asr_keep_dialect === true;
+  for (const name of ['tts_model','tts_voice','tts_key']) $(name).disabled = !data.tts_provider;
+  for (const name of ['tts_key','asr_key']) {
+    $(name).value = '';
+    $(name).placeholder = data[name + '_saved'] ? '已保存，留空沿用' : '尚未保存';
+  }
+  $('speech-settings').querySelector('button').disabled = false;
+  $('speech-status').textContent = data.tts_provider
+    ? `AstrBot TTS · ${data.tts_provider}。听写 Key ${data.asr_ready ? '已就绪' : '尚未就绪'}。`
+    : '当前主机未配置百炼 TTS 提供商。';
+  $('deepseek-model').replaceChildren(new Option(data.deepseek_model, data.deepseek_model));
+  $('chat-model-status').textContent = `官方 DeepSeek 当前计费规则支持 ${data.deepseek_model}。DSH 的 Go 工作进程使用 ${data.dsh_go_model}。`;
+  $('go-models-refresh').disabled = !data.go_key_saved;
+  $('go-model').replaceChildren(...[...new Set([data.go_model, ...goModels])].map(
+    model => new Option(model, model, false, model === data.go_model)));
+  $('go-model').disabled = !data.go_provider_ready;
+  $('go-model-save').disabled = true;
+  const ready = {tts:data.tts_key_saved, asr:data.asr_ready, dsh_asr:data.dsh_asr_ready && data.dsh_asr_enabled,
+    deepseek:data.deepseek_key_saved, go:data.go_key_saved};
+  for (const button of document.querySelectorAll('[data-model-probe]')) button.disabled = !ready[button.dataset.modelProbe];
+}
+async function loadMediaModels() {
+  try { renderMediaModels(await mediaRequest()); }
+  catch (error) { $('model-probe-status').textContent = error.message; }
+}
+$('media-models').ontoggle = () => { if ($('media-models').open) loadMediaModels(); };
+$('media-models-refresh').onclick = loadMediaModels;
+$('speech-settings').onsubmit = async event => {
+  event.preventDefault();
+  const body = {action:'save-speech'};
+  for (const name of speechNames) {
+    if (!$(name).disabled && $(name).value !== (mediaState[name] ?? '')) body[name] = $(name).value.trim();
+  }
+  if ($('asr_keep_dialect').checked !== (mediaState.asr_keep_dialect === true)) {
+    body.asr_keep_dialect = $('asr_keep_dialect').checked;
+  }
+  for (const name of ['tts_key','asr_key']) {
+    if ($(name).value.trim()) body[name] = $(name).value.trim();
+  }
+  if (Object.keys(body).length === 1) return;
+  try {
+    const data = await mediaRequest(body);
+    renderMediaModels(data);
+    $('model-probe-status').textContent = data.message;
+  } catch (error) { $('model-probe-status').textContent = error.message; }
+};
+$('go-models-refresh').onclick = async () => {
+  try {
+    goModels = (await mediaRequest({action:'catalog'})).models;
+    renderMediaModels(mediaState);
+  } catch (error) { $('model-probe-status').textContent = error.message; }
+};
+$('go-model').onchange = () => { $('go-model-save').disabled = $('go-model').value === mediaState.go_model; };
+$('chat-model-settings').onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const data = await mediaRequest({action:'save-go', model:$('go-model').value});
+    renderMediaModels(data);
+    $('model-probe-status').textContent = data.message;
+  } catch (error) { $('model-probe-status').textContent = error.message; }
+};
+for (const button of document.querySelectorAll('[data-model-probe]')) button.onclick = async () => {
+  button.disabled = true;
+  $('model-probe-status').textContent = '正在请求已保存的模型…';
+  try { $('model-probe-status').textContent = (await mediaRequest({action:'probe', provider:button.dataset.modelProbe})).message; }
+  catch (error) { $('model-probe-status').textContent = error.message; }
+  finally { button.disabled = false; }
+};
 async function loadConfig() {
   try {
     config = await api('/api/config');
@@ -1206,7 +1322,10 @@ $('dsh-search-toggle').onclick = () => configure('dsh_web_search_enabled', !conf
 $('dsh-desktop-toggle').onclick = () => configure('dsh_desktop_enabled', !config.dsh_desktop_enabled);
 $('desktop-auto-toggle').onclick = () => configure('desktop_auto_enabled', !config.desktop_auto_enabled);
 $('dsh-go-files-toggle').onclick = () => configure('dsh_go_files_enabled', !config.dsh_go_files_enabled);
-$('dsh-asr-toggle').onclick = () => configure('dsh_asr_free_only_confirmed', !config.dsh_asr_free_only_confirmed);
+$('dsh-asr-toggle').onclick = async () => {
+  await configure('dsh_asr_free_only_confirmed', !config.dsh_asr_free_only_confirmed);
+  if ($('media-models').open) await loadMediaModels();
+};
 $('public').onclick = () => {
   if (config.public_write || confirm('打开公共写入总开关？B 站和抖音仍按各自开关、审批与额度执行。')) configure('public_write', !config.public_write);
 };

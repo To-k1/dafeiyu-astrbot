@@ -167,7 +167,7 @@ class Main(Star):
     def video_client(self, scope):
         request = self.public_worker(scope, "video_worker_enabled", "public-video", default=True)
         if request:
-            return lambda reference, question: request({"reference": reference, "question": question})
+            return lambda reference, question, **options: request({"reference": reference, "question": question, **options})
         return None
 
     def search_client(self, scope):
@@ -185,10 +185,11 @@ class Main(Star):
         return None
 
     def public_jobs_client(self, scope):
-        async def call(method, ident, body=None):
+        async def call(method, ident, body=None, *, full_report=False):
             if method not in {"PUT", "GET", "DELETE"} or not re.fullmatch(r"[0-9a-f]{32}", ident):
                 raise ValueError("无效的公开资料任务请求")
-            request = self.public_worker(scope, None, "public-jobs/" + ident, method=method, timeout=8)
+            route = "public-jobs/" + ident + ("?report=full" if method == "GET" and full_report else "")
+            request = self.public_worker(scope, None, route, method=method, timeout=8)
             if not request:
                 raise ValueError("公开资料任务接口暂不可用")
             return await request(body)

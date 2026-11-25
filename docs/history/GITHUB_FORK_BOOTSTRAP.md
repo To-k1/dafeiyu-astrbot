@@ -1,5 +1,7 @@
 # Codex 自动 Fork、克隆、分支与长期同步合同 v0.7
 
+> 历史记录。现有工作树、公开分支与正式机安装流程以[代码同步](../CODE_SYNC.md)为准。
+
 **用户已授权**：使用自己已登录的 GitHub CLI `gh` 创建公开 Fork、克隆、建立 `main` 与 `fish-home` 分支、正常 commit/push/PR 管理。**未授权**：删除现有 repo、删除 GitHub 仓库、`reset --hard`、强制推送、丢弃本地未提交文档、未经检查即发布 ThinkBook 生产实例。
 
 ## 1. M0 首先探测，不做破坏性重置

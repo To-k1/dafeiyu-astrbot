@@ -15,11 +15,13 @@ from mcp.types import ImageContent, TextContent
 
 from deploy.bili_activity.bili_api import BiliAPI, BiliError
 from deploy.bili_activity.media import MAX_SECONDS, prepare_video
-from deploy.dsh_bridge.media_asr import transcribe_audio
+from deploy.dsh_bridge.media_asr import MODEL as ASR_MODEL, transcribe_audio
 
 
 VIDEO_ID = r"BV[1-9A-HJ-NP-Za-km-z]{10}"
 PRESET = "fishhome-public-video"
+ASR_MODES = ("auto", "preview", "off", "audio", "both")
+PREVIEW_SECONDS = 12
 
 
 def video_reference(reference, page):
@@ -45,12 +47,16 @@ def public_mcp(name):
                        allowed_hosts=["127.0.0.1:*"], allowed_origins=[]))
 
 
-def build_server(*, requested=None, evidence_file=None, asr_key=""):
+def build_server(*, requested=None, evidence_file=None, asr_key="", asr_model=ASR_MODEL, asr_mode="auto",
+                 media_cache=None, asr_workspace="", asr_language="", keep_dialect=False):
+    if asr_mode not in ASR_MODES:
+        raise ValueError("无效的视频处理方式")
     api = BiliAPI()
     server = public_mcp("FishHome public video")
     media_lock = asyncio.Lock()
     sampled = {}
     asr_exhausted = False
+    preview_selection = None
 
     @server.tool(structured_output=False)
     async def sample_public_video(reference: str, start: float = 0, end: float = 30,
@@ -70,7 +76,7 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
             if bvid != requested[0] or (page is not None and requested[1] is not None and page != requested[1]):
                 raise ValueError("只能查看当前委托的视频及指定分 P")
             page = requested[1] if page is None else page
-        nonlocal asr_exhausted
+        nonlocal asr_exhausted, preview_selection
         audio_results = []
         try:
             async with media_lock:
@@ -83,19 +89,28 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
                 requested_end = min(end, duration) if duration and duration > 0 else end
                 if start >= requested_end:
                     raise ValueError("取样起点超出该分 P 的时长")
-                end = min(requested_end, start + MAX_SECONDS)
-                continuation = {"next_range": [end, requested_end]} if end < requested_end else {}
-                selection = (identity["cid"], start, end, listen)
+                preview = asr_mode == "preview"
+                end = min(requested_end, start + (PREVIEW_SECONDS if preview else MAX_SECONDS))
+                continuation = {"next_range": [end, requested_end]} if not preview and end < requested_end else {}
+                selection = (identity["cid"], start, end, listen if asr_mode == "auto" else False)
+                if preview and preview_selection is not None and preview_selection != selection:
+                    raise ValueError("本次只试看一个片段。请用已有证据回执，等待选择后再继续。")
                 if selection in sampled:
                     return [TextContent(type="text", text=json.dumps({
                         "status": "already_sampled", **sampled[selection], **continuation,
                         "note": "这个分 P 和区间已取样。使用前次返回的证据；需要补看时选择另一区间。",
                     }, ensure_ascii=False))]
-                enabled = bool(asr_key) and not asr_exhausted
+                enabled = bool(asr_key) and not asr_exhausted and asr_mode not in ("preview", "off")
+                forced = asr_mode in ("audio", "both") or asr_mode == "auto" and listen
                 data = await prepare_video(api, bvid, identity["cid"], start, end, include_audio=enabled,
-                                           **({"force_audio": True} if enabled and listen else {}))
-                for audio in data.get("audio", []):
-                    result = await transcribe_audio(audio, asr_key)
+                                           **({"force_audio": True} if enabled and forced else {}),
+                                           **({"include_video": False} if asr_mode == "audio" else {}),
+                                           **({"media_cache": media_cache} if media_cache is not None else {}))
+                if preview:
+                    preview_selection = selection
+                for audio in data.get("audio", []) if enabled else ():
+                    result = await transcribe_audio(audio, asr_key, model=asr_model, workspace=asr_workspace,
+                                                    language=asr_language, keep_dialect=keep_dialect)
                     audio_results.append(result)
                     if result["status"] == "free_quota_exhausted":
                         asr_exhausted = True
@@ -111,15 +126,19 @@ def build_server(*, requested=None, evidence_file=None, asr_key=""):
             "frame_times": [frame["at"] for frame in frames], "subtitles": data["subtitles"],
             "audio_transcription": ("free_quota_exhausted" if asr_exhausted else
                 "transcribed" if any(item["status"] == "transcribed" for item in audio_results) else "not_run"),
-            "transcript_segments": [item for item in audio_results if item["status"] == "transcribed"],
-            "notes": data["notes"],
+            "transcript_segments": [{**item, "text": item["text"][:2500]} for item in audio_results
+                                    if item["status"] == "transcribed"],
+            "notes": data["notes"], "subtitle_track": data.get("subtitle_track", "unknown"),
+            "asr_mode": asr_mode,
         }
-        if frames or evidence["subtitles"] or evidence["transcript_segments"]:
+        if preview or frames or evidence["subtitles"] or evidence["transcript_segments"]:
             sampled[selection] = evidence
         if evidence_file is not None:
             receipt = {name: evidence[name] for name in ("source", "cid", "sampling_range", "frame_times", "duration")}
             receipt["subtitle_count"] = len(evidence["subtitles"])
-            if audio_results or asr_exhausted:
+            if asr_mode != "auto":
+                receipt.update(asr_mode=asr_mode, subtitle_track=evidence["subtitle_track"])
+            if audio_results or asr_exhausted or asr_mode in ("audio", "both"):
                 receipt["audio_status"] = evidence["audio_transcription"]
                 receipt["audio_segments"] = [{name: item[name] for name in ("model", "start", "end")}
                                              for item in evidence["transcript_segments"]]

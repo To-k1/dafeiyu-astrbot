@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>伙伴直聊 · FishHome</title>
+<style>
+:root{color-scheme:dark;--bg:#0a111b;--panel:#131e2b;--line:#344252;--ink:#eaf0f7;--muted:#aabacb;--accent:#f5d66d;font:15px/1.55 "Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}main{max-width:1220px;margin:auto;padding:24px}
+h1,h2,p{margin:0}h1{font-size:clamp(1.5rem,4vw,2.2rem);line-height:1.15}h2{font-size:1.1rem;overflow-wrap:anywhere}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:16px}
+a{color:var(--accent)}nav{display:flex;gap:14px;margin-top:12px}nav [aria-current=page]{font-weight:700;color:var(--ink)}
+.muted,header span{color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(230px,.65fr) minmax(0,1.8fr);gap:20px;margin-top:20px}
+.panel{background:var(--panel);border:1px solid var(--line);padding:16px;min-width:0}
+label,form{display:grid;gap:6px}input,textarea,select,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);padding:7px 10px;border-radius:0}
+input,textarea,select{width:100%}textarea{resize:vertical;min-height:80px}
+button{width:fit-content;cursor:pointer}button:not(:disabled):hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--accent);color:#161809;font-weight:700;border-color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+#sessions{display:grid;gap:4px;margin:10px 0}
+#sessions button{text-align:left;width:100%;overflow-wrap:anywhere}
+#sessions button[aria-current=true]{border-color:var(--accent)}
+.conversation{display:grid;grid-template-rows:auto minmax(180px,1fr) auto;min-height:420px;max-height:calc(100dvh - 150px)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#turns{overflow:auto;display:block;margin:12px 0;padding-right:6px;scrollbar-gutter:stable}
+article{padding:8px 10px;max-width:94%;margin-bottom:8px;border:1px solid var(--line);overflow-wrap:anywhere;background:var(--bg)}
+article.owner{margin-left:auto;border-left:3px solid var(--accent)}article p{white-space:pre-wrap}
+article strong,small{font-size:.85rem;color:var(--muted)}
+#status{margin-top:7px;min-height:1.5em}
+[hidden]{display:none!important}
+@media(max-width:720px){main{padding:14px}.layout{grid-template-columns:1fr;gap:12px}.conversation{min-height:360px;max-height:75dvh}}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>主人工作台</h1><span>__TARGET__ · DSH</span></header>
+  <nav aria-label="主人工作台"><a href="/owner-work">直接派活</a><a href="/owner-work/chat" aria-current="page">伙伴直聊</a></nav>
+  <div class="layout">
+    <section class="panel">
+      <label>伙伴<select id="agent" disabled></select></label>
+      <p id="group" class="muted"></p>
+      <div id="sessions"></div>
+      <form id="new">
+        <label>新对话标题<input id="title" maxlength="80" placeholder="可留空"></label>
+        <button id="create" type="submit" disabled>新建对话</button>
+      </form>
+    </section>
+    <section class="panel conversation" aria-labelledby="topic">
+      <div class="row"><h2 id="topic">选择一位伙伴</h2><button id="archive" type="button" hidden></button></div>
+      <div id="turns" role="region" aria-label="聊天记录" tabindex="0"></div>
+      <form id="compose">
+        <label>消息<textarea id="message" maxlength="2000" required></textarea></label>
+        <button id="send" class="primary" disabled type="submit">发送</button>
+        <p id="status" class="muted" role="status"></p>
+      </form>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const path = '/api/owner-work/chat';
+const labels = {queued:'已排队', running:'等待伙伴答复', go_wait:'等待 Go 额度', needs_review:'待核实'};
+let agent='', session='', group='', data=null, ready=false, busy=false, reading=0, pending;
+let agentSignature='', sessionSignature='', turnSignature='';
+const node = (tag, text) => Object.assign(document.createElement(tag), {textContent:text});
+
+async function api(query = {}, body) {
+  const response = await fetch(path+'?'+new URLSearchParams(query), {method:body ? 'POST' : 'GET', cache:'no-store',
+    headers:body ? {'Content-Type':'application/json'} : {}, body:body && JSON.stringify(body)});
+  if (response.status === 401) throw Error('请从 FishHome 控制台重新打开 DSH。');
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw Error(result.error || '暂时无法读取直聊。');
+  return result;
+}
+function sessionRow() { return data?.sessions.find(row => row.id === session); }
+function controls() {
+  const row = sessionRow(), available = ready && !busy && data?.agent.status === 'active';
+  $('create').disabled = !available;
+  $('send').disabled = !available || !row || row.status !== 'active';
+  $('archive').hidden = !row || !available;
+  $('archive').textContent = row?.status === 'archived' ? '恢复对话' : '归档对话';
+}
+function draw() {
+  const row = sessionRow();
+  const list = data?.sessions || [];
+  $('topic').textContent = row ? data.agent.name + ' · ' + row.title : data ? data.agent.name : '选择一位伙伴';
+  const sessionKey = JSON.stringify([list,session,busy]);
+  if (sessionKey !== sessionSignature) {
+    sessionSignature = sessionKey;
+    $('sessions').replaceChildren(...list.map(item => {
+      const button = node('button', item.title + (item.status === 'archived' ? ' · 已归档' : ''));
+      button.type = 'button';
+      button.setAttribute('aria-current', String(item.id === session));
+      button.disabled = busy;
+      button.onclick = () => item.status === 'archived' ? openSession(item.id) : void change('select',{session:item.id});
+      return button;
+    }));
+  }
+  const turns = data?.turns || [];
+  const key = JSON.stringify([agent,session,turns]);
+  if (key !== turnSignature) {
+    const feed = $('turns');
+    const follow = !turnSignature || feed.scrollHeight-feed.scrollTop-feed.clientHeight < 40;
+    const position = feed.scrollTop;
+    turnSignature = key;
+    feed.replaceChildren(...turns.flatMap(turn => {
+      const sent = node('article',''), reply = node('article','');
+      sent.className='owner';
+      sent.append(node('strong','主人'),node('p',turn.message || ''));
+      reply.append(node('strong',data.agent.name),
+        node('p',turn.result || turn.failure?.detail || labels[turn.status] || turn.status));
+      if (turn.memory_saved?.length) reply.append(node('small','已保存至伙伴记忆 · '+turn.memory_saved.join('、')));
+      else if (turn.memory_error) reply.append(node('small','这轮记忆写入未确认'));
+      return [sent,reply];
+    }));
+    if (!turns.length && row) feed.append(node('p','这里是你和这位伙伴的对话。'));
+    feed.scrollTop = follow ? feed.scrollHeight : position;
+  }
+  controls();
+}
+function openSession(id) {
+  session = id;
+  turnSignature = '';
+  void refresh();
+}
+async function refresh() {
+  const token = ++reading;
+  try {
+    const roster = await api();
+    if (token !== reading) return;
+    if (group && group !== roster.group) {
+      agent=''; session=''; pending=null; $('message').value='';
+    }
+    group = roster.group;
+    ready = roster.ready;
+    const list = roster.agents;
+    if (!list.some(row => row.id === agent)) {
+      agent = list.find(row => row.status === 'active')?.id || list[0]?.id || '';
+      session = '';
+    }
+    const key = JSON.stringify([agent,list]);
+    if (key !== agentSignature) {
+      agentSignature=key;
+      $('agent').replaceChildren(...list.map(row => Object.assign(
+        node('option',row.name + (row.status === 'archived' ? ' · 已归档' : row.status === 'paused' ? ' · 已暂停' : '')),
+        {value:row.id})));
+      $('agent').value=agent;
+      $('agent').disabled=!list.length;
+    }
+    $('group').textContent=(group === 'test' ? '测试名册' : '正式名册') + (ready ? '' : ' · 等待受托 DSH');
+    const detail = agent ? await api({agent,...(session && {session})}) : null;
+    if (token !== reading) return;
+    data=detail;
+    session=data?.session || '';
+    draw();
+  } catch (error) {
+    if (token !== reading) return;
+    ready=false;
+    controls();
+    $('status').textContent=error.message;
+  }
+}
+async function change(action, fields) {
+  if (busy || !agent) return;
+  busy=true; controls();
+  const target=agent;
+  const body={action, agent:target, group, ...fields};
+  try {
+    const result=await api({},body);
+    $('status').textContent=action === 'send' ? '已交给伙伴' : '';
+    if (action === 'send') { $('message').value=''; pending=null; }
+    if (action === 'new') $('title').value='';
+    if (agent === target && ['new','select'].includes(action)) {
+      session=result.id; turnSignature='';
+    }
+    await refresh();
+  } catch (error) {
+    $('status').textContent=error.message;
+  } finally {
+    busy=false;
+    draw();
+  }
+}
+$('agent').onchange = () => {agent=$('agent').value;session='';data=null;turnSignature='';$('message').value='';pending=null;draw();void refresh();};
+$('new').onsubmit = event => {event.preventDefault();void change('new',{title:$('title').value});};
+$('archive').onclick = () => void change(sessionRow()?.status === 'archived' ? 'select' : 'archive',{session});
+$('compose').onsubmit = event => {
+  event.preventDefault();
+  if ($('send').disabled) return;
+  const text=$('message').value.trim(), key=JSON.stringify([agent,session,text]);
+  if (pending?.key !== key) pending={key,id:crypto.randomUUID().replaceAll('-','')};
+  void change('send',{session,text,request_id:pending.id});
+};
+(async function poll() {await refresh();setTimeout(poll,2600);})();
+</script>
+</body>
+</html>

@@ -13,6 +13,7 @@ import psutil
 from aiohttp.test_utils import TestClient, TestServer
 
 if os.name == "nt":
+    from deploy.desktop_manager import model_settings
     from deploy.desktop_manager.manager import Manager, create_app, qq_owner, read_settings
     from deploy.desktop_manager.windows import Credentials, write_json
     from deploy.fish_cost_ledger import Ledger
@@ -61,6 +62,51 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.get("/api/config", headers=self.auth) as result:
             self.assertEqual(result.status, 200)
             self.assertNotIn("private-cookie", await result.text())
+
+    async def test_media_model_settings_share_native_configuration_without_returning_keys(self):
+        route = "/api/media-models"
+        face_path = self.manager.astro / model_settings.FACE_PATH
+        face_path.parent.mkdir(parents=True)
+        (face_path.parent / "main.py").touch()
+        tts = {"id": "bailian", "type": "dashscope_tts", "enable": True, "model": "fixture-tts",
+               "api_key": "fixture-tts-key", "dashscope_tts_voice": "fixture-voice"}
+        go = {"id": model_settings.GO_PROVIDER, "enable": True, "model": "deepseek-v4.1-flash"}
+        write_json(self.manager.astrbot_settings, {**self.config, "provider": [tts, go]})
+        write_json(face_path, {"asr_api_key": "fixture-asr-key", "vl_model": "existing-vision"})
+        self.manager.options["dsh_asr_free_only_confirmed"] = True
+        self.assertEqual((await self.client.get(route, headers={"Host": "127.0.0.1:6196"})).status, 401)
+
+        async def save(**body):
+            reply = await self.client.post(route, headers=self.auth, json=body)
+            self.assertEqual(reply.status, 200, await reply.text())
+            self.assertNotIn("fixture-tts-key", await reply.text())
+            self.assertNotIn("fixture-asr-key", await reply.text())
+            return await reply.json()
+
+        await save(action="save-speech", asr_mode="shared", tts_model="another-tts", asr_model="qq-asr-fixture",
+                   dsh_asr_model="dsh-asr-fixture")
+        native = read_settings(self.manager.astrbot_settings)
+        self.assertEqual(native["provider"][0]["model"], "another-tts")
+        self.assertEqual(native["provider"][0]["dashscope_tts_voice"], "fixture-voice")
+        self.assertEqual(read_settings(face_path)["vl_model"], "existing-vision")
+        self.assertEqual(self.manager.dsh_asr_options(),
+                         {"asr_key": "fixture-tts-key", "asr_model": "dsh-asr-fixture"})
+        native["provider"][0].update(api_key="fixture-native-key", model="native-tts-model")
+        write_json(self.manager.astrbot_settings, native)
+        reply = await self.client.get(route, headers=self.auth)
+        self.assertEqual((await reply.json())["tts_model"], "native-tts-model")
+        self.assertNotIn("fixture-native-key", await reply.text())
+        self.assertEqual(self.manager.dsh_asr_options()["asr_key"], "fixture-native-key")
+        await save(action="save-speech", asr_mode="separate", asr_key="")
+        self.assertEqual(self.manager.dsh_asr_options()["asr_key"], "fixture-asr-key")
+        with patch.object(model_settings, "go_models", AsyncMock(return_value=["deepseek-v4-fixture"])):
+            selected = await save(action="save-go", model="deepseek-v4-fixture")
+        self.assertEqual(selected["go_model"], "deepseek-v4-fixture")
+        self.assertEqual(read_settings(self.manager.astrbot_settings)["provider"][1]["model"], "deepseek-v4-fixture")
+        self.assertEqual(selected["dsh_go_model"], "deepseek-v4.1-flash")
+        with patch.object(model_settings, "asr_probe", AsyncMock(return_value="Fixture accepted")) as probe:
+            await save(action="probe", provider="dsh_asr")
+            probe.assert_awaited_once_with("fixture-asr-key", "dsh-asr-fixture")
 
     async def test_shared_meeting_page_uses_scoped_browser_session_and_lists_new_meeting(self):
         route = "/api/dsh-team/meeting"
@@ -120,6 +166,22 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
                          [("formal", "DSH 代看", "connecting_worker")])
         meetings = await (await self.client.get("/api/dsh-team/meeting", headers=self.auth)).json()
         self.assertEqual(len(meetings["meetings"]), 33)
+
+    async def test_host_resources_reads_cpu_ram_and_project_volume_on_local_machine(self):
+        route = "/api/host-resources"
+        host = {"Host": "127.0.0.1:6196"}
+        self.assertEqual((await self.client.get(route, headers=host)).status, 401)
+        reply = await self.client.get(route, headers=self.auth)
+        self.assertEqual(reply.status, 200)
+        self.assertEqual(reply.headers["Cache-Control"], "no-store")
+        sample = await reply.json()
+        self.assertTrue(0 <= sample["cpu_percent"] <= 100)
+        self.assertGreater(sample["memory"]["total"], 0)
+        self.assertGreaterEqual(sample["memory"]["total"], sample["memory"]["available"])
+        self.assertIn(self.manager.dev.drive.casefold(), {disk["volume"].casefold() for disk in sample["disks"]})
+        memory = [row["rss"] for row in sample["processes"]]
+        self.assertEqual(memory, sorted(memory, reverse=True))
+        self.assertLessEqual(len(memory), 5)
 
     async def test_shared_language_uses_owner_file_and_can_be_disabled(self):
         from plugin.astrbot_plugin_bili_activity import shared_language
@@ -557,7 +619,23 @@ class DesktopManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get("/api/config", headers=headers)).status, 401)
         result = await self.client.post(path, headers=headers, json=body)
         self.assertEqual(await result.json(), {"kind": "dsh_video", "summary": "sample"})
-        worker.assert_awaited_once_with("runner-fixture", "go-key-fixture", *body.values())
+        worker.assert_awaited_once()
+        self.assertEqual(worker.await_args.args, ("runner-fixture", "go-key-fixture", *body.values()))
+        self.assertEqual(worker.await_args.kwargs["media_cache"].parent.name, "media-temp")
+        report_id = "e" * 32
+        worker.return_value = {"kind": "dsh_video", "task_id": report_id, "summary": "试看结果",
+                               "full_report": "完整原报告\n末行"}
+        result = await self.client.post(path, headers=headers, json={**body, "asr_mode": "preview"})
+        brief = await result.json()
+        self.assertTrue(brief["has_full_report"])
+        report_id = brief["task_id"]
+        self.assertNotIn("full_report", brief)
+        self.assertEqual(worker.await_args.kwargs["asr_mode"], "preview")
+        archive = f"/api/worker/public-jobs/{report_id}"
+        default = await (await self.client.get(archive, headers=headers)).json()
+        self.assertNotIn("full_report", default["report"])
+        full = await (await self.client.get(archive, headers=headers, params={"report": "full"})).json()
+        self.assertEqual(full["report"]["full_report"], "完整原报告\n末行")
         await self.client.post("/api/config", headers=self.auth, json={"dsh_video_enabled": False})
         self.assertEqual((await self.client.post(path, headers=headers, json=body)).status, 401)
 

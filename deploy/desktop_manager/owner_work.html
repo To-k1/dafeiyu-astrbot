@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>主人工作台 · FishHome</title>
+<style>
+:root{color-scheme:dark;--bg:#0a111b;--panel:#131e2b;--line:#344252;--ink:#eaf0f7;--muted:#aabacb;--accent:#f5d66d;--error:#f7a3a0;font:15px/1.55 "Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}
+.shell{max-width:1220px;margin:auto;padding:24px}
+h1,h2,p{margin:0}h1{font-size:clamp(1.5rem,4vw,2.2rem);line-height:1.15}h2{font-size:1.1rem}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding:0 0 16px}
+header span,.muted{color:var(--muted)}a{color:var(--accent)}.error{color:var(--error)}
+nav{margin-top:12px;display:flex;gap:14px}nav [aria-current=page]{font-weight:700;color:var(--ink)}
+.layout{display:grid;grid-template-columns:minmax(270px,.85fr) minmax(0,1.45fr);gap:20px;margin-top:20px}
+.panel{border:1px solid var(--line);background:var(--panel);padding:16px;min-width:0}
+form{display:grid;gap:10px;margin-top:12px}
+label{display:grid;gap:5px}input,textarea,select,button{font:inherit;color:inherit}
+input,textarea,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:0;background:var(--bg)}
+textarea{min-height:100px;resize:vertical}
+button{width:fit-content;border:1px solid var(--line);padding:7px 12px;border-radius:0;background:var(--bg);cursor:pointer}
+button:disabled{cursor:default;opacity:.5}button:not(:disabled):hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#161809;font-weight:700;border-color:var(--accent);clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px))}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.history{margin-top:16px}#jobs{display:grid;margin-top:6px}
+#jobs-updated{display:block;margin-top:4px;font-size:.85rem;color:var(--muted);font-variant-numeric:tabular-nums}
+#jobs-updated[data-stale]{color:var(--accent)}
+#jobs button{width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);background:transparent;padding:8px 4px}
+#jobs button:hover,#jobs [aria-current=true]{background:var(--bg)}
+#jobs strong{display:block;overflow-wrap:anywhere;font-weight:600}
+#jobs span{display:block;color:var(--muted);font-size:.85rem}
+.result-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+#job-status,#report,#report-archive,#sources,#receipts{margin-top:10px}
+#report,#full-report{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:12px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
+li{overflow-wrap:anywhere;margin-bottom:6px}
+[hidden]{display:none!important}
+@media(max-width:720px){.shell{padding:14px}.layout{grid-template-columns:1fr;gap:12px;margin-top:12px}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header><h1>主人工作台</h1><span>__TARGET__ · DSH</span></header>
+  <nav aria-label="主人工作台"><a href="/owner-work" aria-current="page">直接派活</a><a href="/owner-work/chat">伙伴直聊</a></nav>
+  <div class="layout">
+    <section>
+      <div class="panel">
+        <h2>直接派活</h2>
+        <form id="task">
+          <label>任务类型
+            <select id="kind"><option value="web">网页查证</option><option value="video">B 站视频</option><option value="desktop">Windows 桌面</option></select>
+          </label>
+          <label id="reference-label" hidden>B 站链接或 BV 号
+            <input id="reference" maxlength="500">
+          </label>
+          <label id="video-mode-label" hidden>视频处理方式
+            <select id="video-mode">
+              <option value="preview">先试看，等我选择</option>
+              <option value="off">画面与字幕，不听写</option>
+              <option value="ocr">提取画面字幕</option>
+              <option value="audio">只转写原音</option>
+              <option value="ocr_audio">提取字幕并转写原音</option>
+            </select>
+          </label>
+          <div id="video-transcript-options" hidden>
+            <label>起始秒数 <input id="video-start" type="number" min="0" step="any" placeholder="从开头"></label>
+            <label>结束秒数 <input id="video-end" type="number" min="0" step="any" placeholder="到片尾"></label>
+            <label>字幕语言 <select id="ocr-language"><option value="auto">通用（中英日）</option>
+              <option value="zh">中文</option><option value="en">英文</option><option value="ja">日文</option>
+              <option value="ko">韩文</option></select></label>
+            <label>听写语种 <input id="asr-language" maxlength="8" placeholder="沿用默认设置"></label>
+          </div>
+          <label><span id="brief-label">公开搜索问题</span>
+            <textarea id="brief" maxlength="4000" required></textarea>
+          </label>
+          <p id="kind-state" class="muted">正在连接</p>
+          <button id="submit" class="primary" disabled type="submit">交给 DSH</button>
+          <p id="submit-status" role="status"></p>
+        </form>
+      </div>
+      <section class="panel history" aria-labelledby="my-jobs">
+        <div class="result-head"><h2 id="my-jobs">我的任务</h2><button id="refresh-jobs" type="button">刷新任务</button></div>
+        <time id="jobs-updated">正在读取</time>
+        <div id="jobs"></div>
+      </section>
+    </section>
+    <section class="panel" aria-labelledby="result-title">
+      <div class="result-head"><h2 id="result-title">任务回执</h2><button id="pause-video" hidden>暂停</button><button id="cancel" hidden>取消任务</button></div>
+      <p id="job-status" class="muted" role="status">选择一条任务查看进度和结果。</p>
+      <div id="report"></div>
+      <div id="preview-result" hidden>
+        <p id="preview-evidence"></p>
+        <button type="button" data-video-mode="off">用画面和字幕继续</button>
+        <button type="button" data-video-mode="ocr">提取画面字幕</button>
+        <button type="button" data-video-mode="audio">只转写原音</button>
+        <button type="button" data-video-mode="ocr_audio">提取字幕并转写原音</button>
+      </div>
+      <div id="transcript-downloads" hidden></div>
+      <details id="report-archive" hidden>
+        <summary>查看完整报告</summary>
+        <p><a id="download-report">下载 Markdown 报告</a></p>
+        <div id="full-report"></div>
+      </details>
+      <div id="sources" hidden><h2>来源</h2><ul id="evidence-links"></ul></div>
+      <details id="receipts" hidden><summary>执行回执</summary><pre id="raw-receipts"></pre></details>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const apiPath = '/api/owner-work';
+const specs = {
+  web:{name:'网页查证',label:'公开搜索问题',limit:4000},
+  video:{name:'B 站视频',label:'要核对的画面或时间段',limit:1000},
+  desktop:{name:'Windows 桌面',label:'要执行的操作',limit:1000}
+};
+const states = {queued:'排队中', running:'执行中', go_wait:'等待 Go 额度', cancelling:'取消中', paused:'已暂停',
+  cancelled:'已取消', completed:'已完成', failed:'失败', needs_review:'待核实'};
+const phases = {waiting_for_desktop:'等待专用桌面', waiting_local_resources:'等待本机资源',
+  starting_tools:'启动工具', connecting_worker:'连接 DSH', restarting_worker:'重新连接 DSH',
+  creating_session:'创建会话', selecting_model:'选择模型', submitting_prompt:'发送任务',
+  waiting_for_result:'等待回执', waiting_for_go_quota:'等待订阅额度', reading_subtitles:'检查外挂字幕',
+  fetching_media:'获取媒体', ocr:'识别画面字幕', vad:'检测人声', asr:'转写语音'};
+const formatTime = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', month:'numeric', day:'numeric',
+  hour:'2-digit', minute:'2-digit', hourCycle:'h23'});
+const refreshTime = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai',
+  hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'});
+let enabled = {}, jobs = [], connected = false, sending = false, transcriptEnabled = false;
+let selected = new URL(location.href).searchParams.get('job'), pending, pollId=0;
+let listSignature='', reportSignature='';
+const transcriptModes = new Set(['ocr', 'audio', 'ocr_audio']);
+let previewTask = null, lastChecked;
+
+function node(tag, text = '') {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  return element;
+}
+async function api(args = {}, method = 'GET', body) {
+  let request;
+  try {
+    request = await fetch(apiPath + '?' + new URLSearchParams(args), {
+      method, cache:'no-store', headers:body ? {'Content-Type':'application/json'} : {}, body:body && JSON.stringify(body),
+      ...(method === 'GET' && !args.report ? {signal:AbortSignal.timeout(10000)} : {})
+    });
+  } catch (error) {
+    if (error.name === 'TimeoutError') throw Error('读取任务超时，稍后会自动重试。');
+    throw error;
+  }
+  if (request.status === 401) throw Error('请从 FishHome 控制台重新打开 DSH，恢复主人工作台的登录。');
+  const data = await request.json().catch(() => null);
+  if (!request.ok || !data) throw Error(data?.error || '暂时无法打开任务。');
+  return data;
+}
+function formState() {
+  const kind = $('kind').value, spec = specs[kind], video = kind === 'video';
+  $('brief-label').textContent = spec.label;
+  $('brief').maxLength = spec.limit;
+  $('reference-label').hidden = !video;
+  $('video-mode-label').hidden = !video;
+  const transcript = video && transcriptModes.has($('video-mode').value) && transcriptEnabled;
+  $('video-transcript-options').hidden = !transcript;
+  $('reference').required = video;
+  $('submit').disabled = sending || !connected || !(enabled[kind] || transcript);
+  if (connected) $('kind-state').textContent = enabled[kind] ? (kind === 'desktop' ? '使用已配对的专用桌面和已登记的软件。' : '')
+    : '该工具当前不可用。可在 ThinkBook 控制台检查开关和连接设置。';
+}
+function select(id) {
+  selected = id;
+  history.replaceState(null, '', location.pathname + '?job=' + id);
+  $('cancel').hidden = true;
+  $('pause-video').hidden = true;
+  $('transcript-downloads').hidden = true;
+  $('job-status').textContent = '正在读取任务';
+  $('report').replaceChildren();
+  $('preview-result').hidden = true;
+  $('report-archive').hidden = true;
+  $('report-archive').open = false;
+  $('full-report').replaceChildren();
+  loadedReport = null;
+  $('sources').hidden = $('receipts').hidden = true;
+  reportSignature='';
+  void refresh();
+}
+function renderList() {
+  const signature = JSON.stringify([selected,jobs]);
+  if (listSignature === signature) return;
+  listSignature = signature;
+  const rows = jobs.map(item => {
+    const task = item.task;
+    const text = task.reference || task.query || task.instruction;
+    const button = node('button');
+    button.type = 'button';
+    button.setAttribute('aria-current', String(item.id === selected));
+    button.append(node('strong', text.slice(0, 110)),node('span',[specs[task.kind].name,
+      states[item.state] || item.state, item.state === 'running' ? phases[item.phase] : '',
+      item.created ? formatTime.format(item.created * 1000) : ''].filter(Boolean).join(' · ')));
+    button.onclick = () => select(item.id);
+    return button;
+  });
+  $('jobs').replaceChildren(...(rows.length ? rows : [node('p','还没有任务。')]));
+}
+function external(url) {
+  try {
+    const value = new URL(url);
+    if (['https:', 'http:'].includes(value.protocol) && !value.username && !value.password) return value.href;
+  } catch {}
+  return null;
+}
+function renderResult(item) {
+  const signature = JSON.stringify(item);
+  if (reportSignature === signature) return;
+  reportSignature = signature;
+  const kind = jobs.find(row => row.id === item.id)?.task.kind;
+  const videoMode = jobs.find(row => row.id === item.id)?.task.asr_mode;
+  const preview = item.report?.preview;
+  const completion = item.report?.completion;
+  $('job-status').textContent = [preview ? '试看完成，等待选择' : ({partial:'部分完成', needs_review:'待核实'})[completion]
+    || states[item.state] || item.state,
+    item.state === 'running' ? phases[item.phase] : '', item.id.slice(0,12)].filter(Boolean).join(' · ');
+  const canCancel = ['queued','running','go_wait','paused'].includes(item.state)
+    && !(kind === 'desktop' && item.state === 'running' && ['submitting_prompt','waiting_for_result'].includes(item.phase));
+  $('cancel').hidden = !canCancel;
+  const pause = $('pause-video');
+  const resume = item.state === 'paused';
+  pause.hidden = !transcriptEnabled || !transcriptModes.has(videoMode) || !['queued','running','paused'].includes(item.state);
+  pause.disabled = !!item.pause_requested && !resume;
+  pause.textContent = resume ? '续做' : item.pause_requested ? '等待本段结束' : '暂停';
+  pause.dataset.action = resume ? 'resume' : 'pause';
+  $('report').textContent = item.report?.summary || item.failure?.detail || '';
+  const downloadNames = {'captions.txt':'画面字幕 TXT','captions.srt':'画面字幕 SRT',
+    'speech.txt':'原音转写 TXT','speech.srt':'原音转写 SRT'};
+  const downloads = Object.entries(item.report?.artifacts || {}).map(([key, artifact]) => {
+    const anchor = node('a', downloadNames[key] || key);
+    anchor.href = apiPath + '?' + new URLSearchParams({artifact});
+    return anchor;
+  });
+  $('transcript-downloads').hidden = !downloads.length;
+  $('transcript-downloads').replaceChildren(...downloads.flatMap(anchor => [anchor, document.createTextNode('  ')]));
+  $('preview-result').hidden = !preview;
+  if (preview) {
+    const tracks = {available:'已获取外挂字幕轨', not_listed:'接口未列出外挂字幕轨', unknown:'外挂字幕轨待核实'};
+    const burned = {visible:'抽帧看到了内嵌字幕', not_seen:'抽取的画面暂未看到内嵌字幕', unknown:'内嵌字幕待核实'};
+    $('preview-evidence').textContent = [
+      `试看 ${preview.range.start}–${preview.range.end} 秒`,
+      `${tracks[preview.subtitle_track]}（片段内 ${preview.subtitle_count} 条）`,
+      burned[preview.burned_subtitles], '未调用 ASR'
+    ].join(' · ');
+  }
+  $('report-archive').hidden = !item.report?.has_full_report;
+  if (item.report?.has_full_report) {
+    $('download-report').href = apiPath + '?' + new URLSearchParams({id:item.id, report:'download'});
+  }
+  const evidence = item.report?.evidence || item.failure?.evidence || [];
+  const links = [];
+  for (const entry of evidence) {
+    const url = external(entry.url || entry.source);
+    if (!url) continue;
+    const row = node('li');
+    const link = node('a',entry.title || url);
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    row.append(link);
+    if (entry.kind === 'search_excerpt') row.append(' · 搜索摘要');
+    if (entry.kind === 'page_text') row.append(' · 已读正文');
+    if (entry.artifact && /^web-sources\/[0-9a-f]{32}\.md$/.test(entry.artifact)) {
+      const download = node('a','下载正文');
+      download.href = apiPath + '?' + new URLSearchParams({artifact:entry.artifact});
+      row.append(' · ', download);
+    }
+    links.push(row);
+  }
+  $('sources').hidden = !links.length;
+  $('evidence-links').replaceChildren(...links);
+  const billing = item.report?.billing || [];
+  $('receipts').hidden = !evidence.length && !billing.length;
+  $('raw-receipts').textContent = JSON.stringify({evidence,billing}, null, 2);
+}
+let loadedReport = null;
+$('report-archive').ontoggle = async () => {
+  if (!$('report-archive').open || $('report-archive').hidden || loadedReport === selected) return;
+  const id = selected;
+  $('full-report').textContent = '正在读取完整报告';
+  try {
+    const result = await api({id, report:'view'});
+    if (selected !== id) return;
+    $('full-report').textContent = result.text;
+    loadedReport = id;
+  } catch (error) {
+    if (selected === id) $('full-report').textContent = error.message;
+  }
+};
+function showRefresh(stale = false) {
+  if (!stale) lastChecked = new Date();
+  const label = $('jobs-updated');
+  label.toggleAttribute('data-stale', stale);
+  label.textContent = lastChecked ? (stale ? '读取中断 · 上次更新 ' : '自动更新 · 最近读取 ') + refreshTime.format(lastChecked)
+    : '暂时无法读取任务';
+  if (lastChecked) label.dateTime = lastChecked.toISOString();
+}
+async function refresh() {
+  const id = ++pollId;
+  try {
+    const listing = await api();
+    if (id !== pollId) return;
+    jobs = listing.jobs;
+    enabled = listing.enabled;
+    transcriptEnabled = listing.transcript_enabled === true;
+    connected = true;
+    renderList();
+    formState();
+  } catch (error) {
+    if (id !== pollId) return;
+    connected = false;
+    $('kind-state').textContent = error.message;
+    $('cancel').hidden = $('pause-video').hidden = true;
+    reportSignature='';
+    showRefresh(true);
+    formState();
+    return;
+  }
+  if (selected) {
+    try {
+      const item = await api({id:selected});
+      if (id !== pollId) return;
+      renderResult(item);
+    } catch (error) {
+      if (id !== pollId) return;
+      $('job-status').textContent = error.message;
+      $('cancel').hidden = $('pause-video').hidden = true;
+      reportSignature='';
+      showRefresh(true);
+      return;
+    }
+  }
+  showRefresh();
+}
+$('refresh-jobs').onclick = () => void refresh();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
+window.addEventListener('online', () => void refresh());
+window.addEventListener('offline', () => showRefresh(true));
+$('kind').onchange = formState;
+$('video-mode').onchange = formState;
+for (const button of $('preview-result').querySelectorAll('[data-video-mode]')) button.onclick = () => {
+  const job = jobs.find(row => row.id === selected)?.task;
+  const link = $('evidence-links').querySelector('a');
+  if (!job || !connected || sending) return;
+  $('kind').value = 'video';
+  $('reference').value = link?.href || job.reference;
+  $('brief').value = job.question;
+  $('video-mode').value = button.dataset.videoMode;
+  previewTask = {id:selected, reference:$('reference').value};
+  formState();
+  if (transcriptEnabled && transcriptModes.has(button.dataset.videoMode)) $('video-start').focus();
+  else $('task').requestSubmit();
+};
+$('task').onsubmit = async event => {
+  event.preventDefault();
+  if ($('submit').disabled) return;
+  const kind = $('kind').value, text = $('brief').value.trim();
+  const body = kind === 'video' ? {kind,reference:$('reference').value.trim(),question:text,asr_mode:$('video-mode').value}
+    : kind === 'desktop' ? {kind,instruction:text} : {kind,query:text};
+  if (kind === 'video' && transcriptEnabled) {
+    if (body.asr_mode !== 'preview' && previewTask?.reference === body.reference) body.preview_id = previewTask.id;
+    if (transcriptModes.has(body.asr_mode)) {
+      if ($('video-start').value !== '') body.start = $('video-start').valueAsNumber;
+      if ($('video-end').value !== '') body.end = $('video-end').valueAsNumber;
+      body.ocr_language = $('ocr-language').value;
+      if ($('asr-language').value.trim()) body.asr_language = $('asr-language').value.trim();
+    }
+  }
+  const signature = JSON.stringify(body);
+  if (pending?.signature !== signature) pending = {id:crypto.randomUUID().replaceAll('-',''), signature};
+  sending = true;
+  formState();
+  try {
+    const accepted = await api({id:pending.id}, 'PUT', body);
+    $('submit-status').textContent = '已受理';
+    pending = null;
+    previewTask = null;
+    $('brief').value = '';
+    $('video-mode').value = 'preview';
+    select(accepted.id);
+  } catch (error) {
+    $('submit-status').textContent = error.message;
+  } finally {
+    sending = false;
+    formState();
+  }
+};
+$('pause-video').onclick = async () => {
+  try {
+    await api({id:selected}, 'PUT', {control:$('pause-video').dataset.action});
+    await refresh();
+  } catch (error) {
+    $('job-status').textContent = error.message;
+  }
+};
+$('cancel').onclick = async () => {
+  const id = selected;
+  $('cancel').disabled = true;
+  try {
+    await api({id}, 'DELETE');
+    await refresh();
+  } catch (error) {
+    $('submit-status').textContent = error.message;
+  } finally {
+    $('cancel').disabled = false;
+  }
+};
+formState();
+(async function update() {
+  if (!document.hidden) await refresh();
+  setTimeout(update, 2400);
+})();
+</script>
+</body>
+</html>

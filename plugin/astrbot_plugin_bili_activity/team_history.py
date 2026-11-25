@@ -2,6 +2,7 @@
 import json
 import re
 
+from .dsh_roster import OWNER_CHAT_PREFIX
 from .team_mode import store_mode, visible
 
 _PREFIXES = {"chat": "dsh-chat:v1:", "meeting": "dsh-meeting:v1:",
@@ -20,11 +21,20 @@ class TeamHistory:
     already truncated by their producer; the source record retains the report path.
     """
 
-    def __init__(self, store, scope):
+    def __init__(self, store, scope, *, owner_web=False):
         self.store, self.scope = store, scope
+        self.owner_web = owner_web
 
     def _records(self, *, all_modes=False):
         mode = None if all_modes else store_mode(self.store)
+        if self.owner_web:
+            prefix = OWNER_CHAT_PREFIX + self.scope + ":"
+            for key, value in self.store.db.execute(
+                    "SELECT key,value FROM settings WHERE substr(key,1,?)=?", (len(prefix), prefix)):
+                ident = key[len(prefix):]
+                if re.fullmatch(_ID["chat"], ident):
+                    yield "chat", "owner-chat:" + ident, json.loads(value)
+            return
         for kind in ("chat", "meeting", "agent", "task"):
             prefix = _PREFIXES[kind] + self.scope + ":"
             for key, value in self.store.db.execute(
@@ -92,6 +102,7 @@ class TeamHistory:
         return {"ref": ref, "kind": kind, "status": status, "at": at,
                 "agent_ids": sorted(TeamHistory._participants(kind, row)),
                 "summary": snippet[:240], "summary_is_excerpt": True,
+                **({"sender": "owner"} if row.get("sender") == "owner" else {}),
                 **({"archive_import": row["archive_import"]} if row.get("archive_import") else {})}
 
     def list(self, query="", agent_id="", kind="", limit=10):
@@ -177,10 +188,12 @@ class TeamHistory:
                 source = {"status": "completed", "result": turn["result"], "request_id": request,
                           "message": source.get("message"), "archive_import": source["archive_import"]}
             return {"ref": ref, "kind": entry["kind"], "source": source, "imported_archive": True}
-        match = re.fullmatch(r"chat:([0-9a-f]{16}):turn:([0-9a-f]{32})", ref)
+        route = "owner-chat" if self.owner_web else "chat"
+        match = re.fullmatch(route + r":([0-9a-f]{16}):turn:([0-9a-f]{32})", ref)
         if match:
             job_id, request_id = match.groups()
-            row = self.store.get_setting(_PREFIXES['chat'] + self.scope + ':' + job_id)
+            prefix = OWNER_CHAT_PREFIX if self.owner_web else _PREFIXES["chat"]
+            row = self.store.get_setting(prefix + self.scope + ':' + job_id)
             turn = (row or {}).get('verified_memory_turns', {}).get(request_id)
             if (row and turn and turn.get('go_receipt_count', 0) > 0
                     and (not agent_id or row.get('agent_id') == agent_id)):
@@ -190,6 +203,7 @@ class TeamHistory:
                     'result': turn['result'], 'request_id': request_id,
                     'session_id': row.get('turn', {}).get('session_id') or row.get('session_id'),
                     'persona_version': turn.get('persona_version'),
+                    **({'sender': 'owner'} if self.owner_web else {}),
                     'go_receipt_count': turn['go_receipt_count'], 'verified_turn': True}}
             raise ValueError("找不到这条已验证的原生聊天回合")
         for kind, current_ref, row in self._records():

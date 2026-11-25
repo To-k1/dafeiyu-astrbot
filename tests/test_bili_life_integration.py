@@ -170,7 +170,7 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["report"]["summary"], "完整报告")
         worker.assert_awaited_once_with("GET", job_id)
 
-    async def test_web_search_delegates_by_default_and_preserves_personal_choice(self):
+    async def test_web_search_allows_foreground_delegation_and_personal_choice(self):
         evidence = [{"title": "Primary source", "url": "https://example.org/source"}]
         fetch = AsyncMock(side_effect=[
             {"kind": "dsh_web_search", "task_id": "search1", "summary": "Found evidence", "evidence": evidence, "billing": []},
@@ -179,7 +179,7 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.plugin.context = types.SimpleNamespace(fishhome_dsh_web_search_client=lambda scope: fetch if scope == SCOPE else None)
         event = FakeEvent()
-        result = json.loads(await self.plugin.web_search(event, "project primary source"))
+        result = json.loads(await self.plugin.web_search(event, "project primary source", background=False))
         fetch.assert_awaited_once_with("project primary source", "default")
         self.assertEqual(result["summary"], "Found evidence")
         self.assertEqual(self.plugin.store.life.episodes(SCOPE, kind="dsh_web_search")[0]["subject_kind"], "system")
@@ -189,6 +189,51 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = json.loads(await self.plugin.web_search(event, evidence[0]["url"], mode="page"))
         fetch.assert_awaited_with(evidence[0]["url"], "page")
         self.assertEqual(result["text"], "original text")
+
+    async def test_qq_conversation_command_is_consumed_only_for_the_owner(self):
+        self.plugin.context = types.SimpleNamespace(conversation_manager=Mock())
+        owner = FakeEvent(text="/对话 切换 aaaa2222")
+        owner.message_obj.raw_message = {}
+        other = FakeEvent(scope=OTHER_SCOPE, text="/对话")
+        with patch.object(self.plugin, "owner_qq_event", return_value=True), \
+                patch.object(main, "store_mode", return_value="formal"), \
+                patch.object(main, "conversation_command", AsyncMock(return_value="已切换")) as command:
+            await self.plugin.incoming(owner)
+            await self.plugin.incoming(other)
+        command.assert_awaited_once_with(self.plugin.context.conversation_manager, SCOPE, "formal",
+                                         "/对话 切换 aaaa2222")
+        self.assertTrue(owner.is_stopped())
+        owner.send.assert_awaited_once_with("已切换")
+        other.send.assert_not_awaited()
+
+    async def test_owner_web_chat_returns_directly_without_waking_fish_or_qq(self):
+        from test_dsh_chats import Runner
+
+        chats = main.DshChats(self.plugin.store, SCOPE, owner_web=True)
+        agent = main.DshRoster(self.plugin.store, SCOPE).create("主人直聊测试伙伴", "保持角色身份")["id"]
+        session = chats.roster().new_session(agent)["id"]
+        row = chats.enqueue("来自网页的主人原话", agent, "owner-web", session_id=session)
+        runner = Runner()
+        self.plugin.context = types.SimpleNamespace(**{
+            main.COMMISSION_BRIDGE: lambda _scope, standalone=False: "workspace" if standalone else runner})
+        self.plugin.wake_dsh_chat = AsyncMock()
+        self.plugin.sender = Mock(side_effect=AssertionError("owner web chat must not call QQ"))
+        self.plugin.dsh_chat_lock = lambda *_: asyncio.Lock()
+        memory = types.SimpleNamespace(prepare=AsyncMock(return_value="主人记忆协议"),
+            decode=lambda text: {"text":text, "present":True, "query":"", "memories":[]})
+        self.plugin.team_memory = lambda: memory
+
+        async def complete(client, turn):
+            client.done.add(turn["request_id"])
+            return "这个回复只进入网页。"
+
+        with patch(main.__package__ + ".dsh_chats._wait_for_turn", side_effect=complete):
+            await self.plugin.dispatch_dsh_chats(SCOPE, "12345", owner_web=True)
+        done = chats.get(row["id"])
+        self.assertEqual((done["status"], done["result"], done["notification"]["delivery"]),
+                         ("completed", "这个回复只进入网页。", "web"))
+        self.plugin.wake_dsh_chat.assert_not_awaited()
+        self.plugin.sender.assert_not_called()
 
     async def test_personal_deepseek_search_uses_the_interaction_bucket(self):
         from plugin.astrbot_plugin_bili_activity.model_route import OFFICIAL_INTERACTION_BASE
@@ -235,7 +280,7 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         send = AsyncMock(return_value={"message_id": "99"})
         self.plugin.sender = lambda: types.SimpleNamespace(send=send, ready=lambda _: True)
         event = FakeEvent(event_id="one-background-message")
-        accepted = json.loads(await self.plugin.web_search(event, "project primary source", background=True))
+        accepted = json.loads(await self.plugin.web_search(event, "project primary source"))
         repeated = json.loads(await self.plugin.web_search(event, "project primary source", background=True))
         self.assertEqual((accepted["status"], repeated["id"]), ("prepared", accepted["id"]))
         self.assertEqual(calls, [])
@@ -275,6 +320,47 @@ class LifeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry.args[0] for entry in call.await_args_list], ["PUT", "DELETE"])
         self.plugin.wake_commission.assert_not_awaited()
         send.assert_not_awaited()
+
+    async def test_video_preview_and_full_report_are_separate_actions(self):
+        video = "BV1g8Wq6DEXj"
+        archive_id = "9" * 32
+        full = "正文。" * 3000 + "最后一行"
+        report = {"kind": "dsh_video", "task_id": archive_id, "summary": "发现画面内嵌字幕",
+                  "evidence": [{"cid": 1, "frame_times": [0, 4], "subtitle_count": 0}], "billing": [{"source": "go"}],
+                  "preview": {"burned_subtitles": "visible", "subtitle_track": "not_listed",
+                              "source": f"https://www.bilibili.com/video/{video}?p=1"}, "has_full_report": True}
+        worker = AsyncMock(return_value=report)
+        jobs = AsyncMock(return_value={"id": archive_id, "state": "completed",
+                                       "report": {**report, "full_report": full}})
+        self.plugin.context = types.SimpleNamespace(fishhome_dsh_video_client=lambda _: worker,
+                                                     fishhome_dsh_public_jobs_client=lambda _: jobs)
+        event = FakeEvent()
+        brief = json.loads(await self.plugin.delegate_video(event, video, "先试看字幕", asr_mode="preview"))
+        worker.assert_awaited_once_with(video, "先试看字幕", asr_mode="preview")
+        jobs.assert_not_awaited()
+        self.assertEqual(brief["evidence"]["preview"]["burned_subtitles"], "visible")
+        self.assertNotIn("full_report", brief)
+        ident = brief["episode_id"]
+        page = json.loads(await self.plugin.dsh_public_job(event, "read_video_report", ident))
+        tail = json.loads(await self.plugin.dsh_public_job(event, "read_video_report", ident, offset=page["next_offset"]))
+        self.assertEqual(page["full_report"] + tail["full_report"], full)
+        jobs.assert_awaited_with("GET", archive_id, full_report=True)
+        self.assertEqual(worker.await_count, 1)
+        with self.assertRaises(ValueError):
+            await self.plugin.dsh_public_job(event, "read_video_report", "f" * 32)
+        self.plugin.start_public_jobs_worker = Mock()
+        with self.assertRaisesRegex(ValueError, "视频不同"):
+            await self.plugin.delegate_video(event, f"https://www.bilibili.com/video/{video}?p=2",
+                                             "请提取字幕", asr_mode="ocr", preview_id=ident)
+        for mode, options in (("off", {}), ("ocr", {"start": 10, "end": 14})):
+            followup = json.loads(await self.plugin.delegate_video(
+                event, video, "请沿用试看素材", asr_mode=mode, preview_id=ident, **options))
+            saved = main.CommissionedFiles(self.plugin.store).list(
+                SCOPE, event.get_sender_id(), ident=followup["id"], job_kind="video")[0]["spec"]
+            self.assertEqual(saved["preview_id"], archive_id)
+            self.assertEqual(saved["reference"], report["preview"]["source"])
+            self.assertEqual(saved["asr_mode"], mode)
+            self.assertEqual(saved.get("end"), options.get("end"))
 
     async def test_dsh_file_tool_accepts_a_normal_request_and_limits_input_to_registered_files(self):
         cwd = r"C:\Runner\files"

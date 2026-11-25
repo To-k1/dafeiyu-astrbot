@@ -22,6 +22,7 @@ from deploy.dsh_bridge.go_profile import KEY_ENV, PROVIDER, render_go_patch
 from deploy.dsh_bridge.desktop_tools import desktop_call, desktop_server, render_desktop_preset
 from deploy.dsh_bridge.go_relay import GoRelay, GoSubscriptionWaiting
 from deploy.dsh_bridge.go_video_task import GoReportError, run_desktop_task, run_search_task, run_video_task
+from deploy.dsh_bridge.media_asr import MODEL as ASR_MODEL
 from deploy.dsh_bridge.public_search import render_search_preset, search_server, validate_task_query
 from deploy.dsh_bridge.public_video import build_server, render_preset, video_reference
 from deploy.bili_activity.resource_capacity import MAX_WAIT_SECONDS, wait_for_memory
@@ -129,8 +130,9 @@ class VideoWorker:
         self.desktop_lock = asyncio.Lock()
         self.cold_starts = asyncio.Semaphore(3)
 
-    async def run(self, password, key, reference, question, *, upstream=None, asr_key="", background_started=None,
-                  agent=None, language=""):
+    async def run(self, password, key, reference, question, *, upstream=None, asr_key="", asr_model=ASR_MODEL,
+                  background_started=None, agent=None, language="", asr_mode="auto", media_cache=None,
+                  asr_workspace="", asr_language="", keep_dialect=False):
         if not isinstance(reference, str) or len(reference) > 500:
             raise ValueError("请提供完整的公开 B 站链接或 BV")
         requested = video_reference(reference, None)
@@ -141,16 +143,19 @@ class VideoWorker:
             timeout = BACKGROUND_TIMEOUT
         with tempfile.TemporaryDirectory(prefix="video-evidence-", dir=self.state) as evidence_dir:
             evidence = Path(evidence_dir) / "samples.jsonl"
-            return await self._run(password, key, build_server(requested=requested, evidence_file=evidence, asr_key=asr_key),
+            server = build_server(requested=requested, evidence_file=evidence, asr_key=asr_key, asr_model=asr_model,
+                                  asr_mode=asr_mode, media_cache=media_cache, asr_workspace=asr_workspace,
+                                  asr_language=asr_language, keep_dialect=keep_dialect)
+            return await self._run(password, key, server,
                 lambda url, token: render_preset(http_media=(url, token)),
                 lambda client, work, relay: run_video_task(
                     client, work, reference, question, evidence, relay, timeout=timeout, agent=agent, language=language,
-                    progress=background_started),
+                    progress=background_started, asr_mode=asr_mode),
                 upstream, progress=background_started,
                 startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started is not None else 30)
 
     async def search(self, password, key, query, *, search, upstream=None, background_started=None, agent=None,
-                     archive_page=None, language=""):
+                     archive_page=None, language="", owner_report=False):
         query = validate_task_query(query)
         timeout = 72
         if background_started is not None:
@@ -161,19 +166,26 @@ class VideoWorker:
             return await self._run(password, key, search_server(evidence, archive_page, search=search), render_search_preset,
                 lambda client, work, relay: run_search_task(
                     client, work, query, evidence, relay, timeout=timeout, agent=agent, language=language,
-                    progress=background_started), upstream, progress=background_started,
+                    progress=background_started, owner_report=owner_report), upstream, progress=background_started,
                 startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started is not None else 30)
 
-    async def desktop(self, password, key, desktop_token, instruction, *, agent=None, language=""):
+    async def desktop(self, password, key, desktop_token, instruction, *, agent=None, language="",
+                      background_started=None, owner_report=False):
         if not isinstance(instruction, str) or not 1 <= len(instruction.strip()) <= 1000:
             raise ValueError("请提供不超过 1000 字的桌面任务")
+        if background_started:
+            background_started("waiting_for_desktop")
         async with self.desktop_lock:
             await desktop_call(desktop_token, "list")
             with tempfile.TemporaryDirectory(prefix="desktop-evidence-", dir=self.state) as folder:
                 evidence = Path(folder) / "desktop.jsonl"
+                timeout = BACKGROUND_TIMEOUT if background_started else 110
                 return await self._run(password, key, desktop_server(evidence, desktop_token),
                     render_desktop_preset, lambda client, work, relay:
-                    run_desktop_task(client, work, instruction.strip(), evidence, relay, agent=agent, language=language), None)
+                    run_desktop_task(client, work, instruction.strip(), evidence, relay, agent=agent, language=language,
+                                     timeout=timeout, progress=background_started, owner_report=owner_report),
+                    None, progress=background_started,
+                    startup_timeout=BACKGROUND_STARTUP_TIMEOUT if background_started else 30)
 
     async def _run(self, password, key, server, tool_patch, execute, upstream, *, progress=None, startup_timeout=30):
         account = self.account

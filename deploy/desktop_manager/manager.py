@@ -39,14 +39,16 @@ from plugin.astrbot_plugin_bili_activity import shared_language
 from scripts.m6_data import export_memory
 from .backup_sync import archive_now, daily_backup, rotate as rotate_backups, sync as sync_backups
 
-from .windows import Credentials, impersonate, run_as, write_json
+from .windows import Credentials, atomic_write, impersonate, run_as, write_json
 from . import compute
-from . import dashboard, desktop_session, meeting_web, persona_mode, provider_mode, workspace_web
-from .public_jobs import PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable, validate_agent
+from . import dashboard, desktop_session, host_resources, meeting_web, model_settings, owner_chat, owner_work, persona_mode, provider_mode, workspace_web
+from .public_jobs import (PUBLIC_JOBS_PATH, WORKER_BODY_LIMIT, PublicJobs, PublicJobUnavailable,
+                          report_excerpt, validate_agent, validate_public_job)
 from .recovery import capture_and_pull
 from .settings_sync import PEER_PATH, SettingsSync, SharedSettings, ThinkBookPeer
 from .thinkbook import export_from_thinkbook, production_qq_marker, sync_room_from_thinkbook
 from .video_worker import VideoWorker
+from .video_transcript import TRANSCRIPT_MODES, media_folder, remove_media, run_transcript
 
 
 PORT = 6196
@@ -163,7 +165,11 @@ class Manager:
         self._go_usage_lock = asyncio.Lock()
         self._go_usage_cache = None
         self.public_jobs = PublicJobs(state / "dsh-public-jobs", self.run_public_job,
-                                      quota_available=self.public_go_available)
+                                     quota_available=self.public_go_available, transcript=self.run_transcript_job)
+        self.owner_work = state / "owner-work"
+        self.owner_jobs = PublicJobs(self.owner_work / "jobs", self.run_owner_job,
+                                     quota_available=self.public_go_available, validate=owner_work.validate_job,
+                                     transcript=self.run_transcript_job)
 
     def sync_video_worker(self):
         key = self.creds.values.get("opencode_key")
@@ -187,6 +193,13 @@ class Manager:
     def public_job_enabled(self, kind):
         switch = {"video": "dsh_video_enabled", "web": "dsh_web_search_enabled"}.get(kind)
         return bool(switch and self.options.get(switch) is True and self.sync_video_worker())
+
+    def owner_job_enabled(self, kind):
+        switch = {"video": "dsh_video_enabled", "web": "dsh_web_search_enabled", "desktop": "dsh_desktop_enabled"}.get(kind)
+        return bool(self.room_snapshot is None and switch and self.options.get(switch) is True
+                    and self.creds.values.get("opencode_key") and self.runner_password()
+                    and (self.video_worker.dsh / "Start-DSH-Video.cmd").is_file()
+                    and (kind != "desktop" or self.creds.values.get("desktop_token")))
 
     async def go_subscription_usage(self):
         async with self._go_usage_lock:
@@ -215,20 +228,56 @@ class Manager:
         return await search_deepseek(query, endpoint=f"http://127.0.0.1:6197/tools/{bucket}/search",
                                      token=self.creds.values[bucket])
 
-    async def run_public_job(self, body, started):
+    async def run_public_job(self, body, started, *, owner=False):
         kind = body["kind"]
-        if not self.public_job_enabled(kind):
+        enabled = self.owner_job_enabled if owner else self.public_job_enabled
+        if not enabled(kind):
             raise PublicJobUnavailable("DSH 公开资料工作进程不可用")
         password, go_key = self.runner_password(), self.creds.values["opencode_key"]
         language = shared_language.prompt(self.activity) if body.get("agent") else ""
         if kind == "web":
+            archive = self.archive_web_page
+            if owner:
+                archive = lambda page: owner_work.archive_page(self.owner_work, page)
             return await self.video_worker.search(password, go_key, body["query"],
                                                   background_started=started, agent=body.get("agent"),
-                                                  archive_page=self.archive_web_page, language=language,
-                                                  search=self.search_web)
-        return await self.video_worker.run(password, go_key, body["reference"], body["question"],
-                                           asr_key=self.dsh_asr_key(), background_started=started,
-                                           agent=body.get("agent"), language=language)
+                                                  archive_page=archive, language=language, search=self.search_web,
+                                                  owner_report=owner)
+        mode = body.get("asr_mode", "auto")
+        queue = self.owner_jobs.directory if owner else self.public_jobs.directory
+        lease = body.get("preview_id") or getattr(started, "job_id", None)
+        try:
+            return await self.video_worker.run(password, go_key, body["reference"], body["question"],
+                                               **self.video_audio_options(mode), background_started=started,
+                                               agent=body.get("agent"), language=language,
+                                               **({"media_cache": media_folder(queue, lease)} if lease else {}))
+        finally:
+            if lease and mode != "preview":
+                remove_media(queue, lease)
+
+    async def run_transcript_job(self, body, started, ident, should_pause, directory):
+        mode = body["asr_mode"]
+        audio = {}
+        if mode != "ocr":
+            options = self.video_audio_options(mode)
+            audio = {"key": options["asr_key"], "model": options["asr_model"],
+                     "workspace": options.get("asr_workspace", ""),
+                     "language": body.get("asr_language", options.get("asr_language", "")),
+                     "keep_dialect": options.get("keep_dialect", False)}
+            model_settings.asr_endpoint(audio["model"], audio["workspace"])
+        return await run_transcript(body, queue=directory, ident=ident, lease_id=body.get("preview_id") or ident,
+                                    runtime=self.state / "media-runtime", audio_options=audio,
+                                    progress=started, should_pause=should_pause)
+
+    async def run_owner_job(self, body, started):
+        if body["kind"] != "desktop":
+            return await self.run_public_job(body, started, owner=True)
+        if not self.owner_job_enabled("desktop"):
+            raise PublicJobUnavailable("专用 Windows 桌面尚未启用或配对")
+        pairing = self.creds.values["desktop_token"]
+        return await self.video_worker.desktop(self.runner_password(), self.creds.values["opencode_key"],
+                                               pairing, body["instruction"], background_started=started,
+                                               owner_report=True)
 
     @property
     def compute_directory(self):
@@ -338,20 +387,23 @@ class Manager:
     def runner_password(self):
         return self.creds.values.get("runner_password")
 
-    def dsh_asr_key(self):
+    def dsh_asr_options(self):
         if self.options.get("dsh_asr_free_only_confirmed") is not True:
-            return ""
-        face = self.astro / "data/plugins/astrbot_plugin_face_convert/config.json"
-        settings = read_settings(face)
-        key = settings.get("asr_api_key")
-        if not key:
-            for provider in read_settings(self.astrbot_settings).get("provider", []):
-                if provider.get("type") in {"dashscope", "dashscope_tts"} and provider.get("api_key"):
-                    key = provider["api_key"]
-                    break
-        if isinstance(key, list):
-            key = next((value for value in key if isinstance(value, str) and value), None)
-        return key if isinstance(key, str) else ""
+            return {}
+        face = read_settings(self.astro / model_settings.FACE_PATH)
+        key = model_settings.asr_key(face, read_settings(self.astrbot_settings))
+        return {"asr_key": key, "asr_model": face.get("dsh_asr_model") or model_settings.ASR_MODEL,
+                **({"asr_workspace": face["asr_workspace"]} if face.get("asr_workspace") else {}),
+                **({"asr_language": face["dsh_asr_language"]} if face.get("dsh_asr_language") else {}),
+                **({"keep_dialect": True} if face.get("asr_keep_dialect") is True else {})} if key else {}
+
+    def video_audio_options(self, mode):
+        options = {} if mode in ("off", "preview") else self.dsh_asr_options()
+        if mode in ("audio", "both", "ocr_audio") and not options.get("asr_key"):
+            raise PublicJobUnavailable("DSH 原音听写未启用或缺少百炼 Key，请先检查语音设置。")
+        if mode != "auto":
+            options["asr_mode"] = mode
+        return options
 
     def configuration(self):
         specs = self.specs()
@@ -1107,9 +1159,10 @@ def create_app(manager, token):
                     or not hmac.compare_digest(request.headers.get("Authorization", "").encode(),
                                                f"Bearer {worker_token}".encode())):
                 return web.json_response({"error": "DSH 公开资料工作进程不可用"}, status=401)
-        elif request.path not in {"/", "/classic", "/icon.png", meeting_web.PAGE} and not (
+        elif request.path not in {"/", "/classic", "/icon.png", meeting_web.PAGE, owner_work.PAGE, owner_work.CHAT_PAGE} and not (
             hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode())
             or meeting_web.authorize(request, token, PORT)
+            or owner_work.authorize(request, token, PORT)
         ):
             return web.json_response({"error": "请从系统托盘打开 WebUI"}, status=401)
         try:
@@ -1149,10 +1202,20 @@ def create_app(manager, token):
 
     async def public_job_worker(_app):
         manager.public_jobs.start()
+        owner_jobs = getattr(manager, "owner_jobs", None)
+        if owner_jobs is not None:
+            owner_jobs.start()
+        maintenance = [asyncio.create_task(jobs.maintain_media()) for jobs in
+                       (manager.public_jobs, owner_jobs) if jobs is not None]
         try:
             yield
         finally:
+            for task in maintenance:
+                task.cancel()
+            await asyncio.gather(*maintenance, return_exceptions=True)
             await manager.public_jobs.close()
+            if owner_jobs is not None:
+                await owner_jobs.close()
 
     app.cleanup_ctx.append(public_job_worker)
 
@@ -1164,21 +1227,48 @@ def create_app(manager, token):
             status = manager.public_jobs.cancel(ident)
         else:
             body = await request.clone(client_max_size=WORKER_BODY_LIMIT).json()
-            status = manager.public_jobs.submit(ident, body, enabled=manager.public_job_enabled)
+            if isinstance(body, dict) and body.get("control") in ("pause", "resume") and body.keys() == {"control"}:
+                status = manager.public_jobs.control(ident, body["control"])
+            else:
+                local_video = isinstance(body, dict) and body.get("asr_mode") in TRANSCRIPT_MODES
+                status = manager.public_jobs.submit(ident, body, enabled=lambda kind: (
+                    local_video and kind == "video" or manager.public_job_enabled(kind)))
+        if report := status.get("report"):
+            if request.method == "GET" and request.query.get("report") == "full":
+                if full := manager.public_jobs.full_report(ident, report):
+                    status["report"] = {**report, "full_report": full}
+            else:
+                status["report"] = report_excerpt(report)
         return web.json_response(status, headers={"Cache-Control": "no-store"})
 
     async def delegate_video(request):
         body = await request.json()
-        if not isinstance(body, dict) or body.keys() != {"reference", "question"}:
+        if not isinstance(body, dict) or body.keys() - {"asr_mode", "report_detail"} != {"reference", "question"}:
             raise ValueError("代看只接受公开视频链接和问题")
+        detail = body.pop("report_detail", "brief")
+        if detail not in ("brief", "full"):
+            raise ValueError("请选择简报或完整报告")
+        spec = validate_public_job({**body, "kind": "video"})
+        mode = spec.get("asr_mode", "auto")
+        lease = uuid4().hex
+        queue = manager.public_jobs.directory
         try:
-            asr_key = manager.dsh_asr_key()
             report = await manager.video_worker.run(manager.runner_password(), manager.creds.values["opencode_key"],
                                                     body["reference"], body["question"],
-                                                    **({"asr_key": asr_key} if asr_key else {}))
+                                                    **manager.video_audio_options(mode),
+                                                    media_cache=media_folder(queue, lease))
         except (ClientError, TimeoutError, KeyError, TypeError):
             raise RuntimeError("DSH 未返回可核实的代看结果") from None
-        return web.json_response(report, headers={"Cache-Control": "no-store"})
+        finally:
+            if mode != "preview":
+                remove_media(queue, lease)
+        if mode == "preview" and report.get("preview"):
+            report = {**report, "task_id": lease}
+        if report.get("full_report"):
+            manager.public_jobs.archive_video(report["task_id"], spec, report)
+            report = {**report, "has_full_report": True}
+        return web.json_response(report if detail == "full" else report_excerpt(report),
+                                 headers={"Cache-Control": "no-store"})
 
     async def delegate_search(request):
         body = await request.json()
@@ -1286,9 +1376,47 @@ def create_app(manager, token):
         target = "台式机本机" if manager.dev.parent == DESKTOP_HOME else "ThinkBook 正式机"
         return meeting_web.page((59934, 59935), target)
 
+    async def owner_work_page(_request):
+        target = "台式机本机" if manager.dev.parent == DESKTOP_HOME else "ThinkBook 正式机"
+        return owner_work.page((59934, 59935), target)
+
+    async def owner_chat_page(_request):
+        target = "台式机本机" if manager.dev.parent == DESKTOP_HOME else "ThinkBook 正式机"
+        return owner_work.page((59934, 59935), target, chat=True)
+
+    async def owner_work_api(request):
+        if manager.room_snapshot is not None:
+            raise ValueError("请从 ThinkBook 控制台打开主人工作台")
+        return await owner_work.handle(request, manager.owner_jobs, manager.owner_work, manager.owner_job_enabled)
+
+    async def owner_chat_api(request):
+        bridge = read_settings(manager.bridge_settings)
+        scope = bridge.get("owner_scope")
+        if manager.room_snapshot is not None or not scope or not manager.ledger.is_file():
+            raise ValueError("请从已配置主人身份的 ThinkBook 控制台打开伙伴直聊")
+
+        def access(body=None):
+            persona_mode.read_owner_binding(manager.astro, scope)
+            ready = all(bridge.get(key) for key in ("commission_cookie", "commission_workspace", "commission_go_file_token"))
+            return owner_chat.access(manager.activity, scope, query=request.query, body=body, ready=ready)
+
+        if request.method == "POST":
+            body = await request.clone(client_max_size=16 * 1024).json()
+            if not isinstance(body, dict):
+                raise ValueError("需要主人直聊请求")
+            async with manager.lock:
+                data = await asyncio.to_thread(access, body)
+        else:
+            data = await asyncio.to_thread(access)
+        return web.json_response(data, headers={"Cache-Control": "no-store"})
+
     async def status(_request):
         return web.json_response({"services": manager.statuses(), "official_key": bool(manager.creds.values.get("upstream_key")),
                                   "runner_password": bool(manager.runner_password())})
+
+    async def resources(_request):
+        snapshot = await asyncio.to_thread(host_resources.snapshot, manager.dev.parent)
+        return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
 
     async def role_card(request):
         scope = read_settings(manager.bridge_settings).get("owner_scope")
@@ -1612,6 +1740,65 @@ def create_app(manager, token):
     async def configuration(_request):
         return web.json_response(manager.configuration(), headers={"Cache-Control": "no-store"})
 
+    async def media_models(request):
+        headers = {"Cache-Control": "no-store"}
+        face_path = manager.astro / model_settings.FACE_PATH
+
+        def snapshot():
+            return model_settings.status(read_settings(manager.astrbot_settings), read_settings(face_path),
+                                         manager.creds.values, manager.options.get("dsh_asr_free_only_confirmed") is True)
+
+        if request.method == "GET":
+            return web.json_response(snapshot(), headers=headers)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("需要模型设置对象")
+        action = body.pop("action", None)
+        if action == "catalog" and not body:
+            models = await model_settings.go_models(manager.creds.values.get("opencode_key"))
+            return web.json_response({"models": models}, headers=headers)
+        if action == "probe" and body.keys() == {"provider"} and body["provider"] in (
+                "tts", "asr", "dsh_asr", "deepseek", "go"):
+            message = await model_settings.probe(manager, body["provider"], read_settings(manager.astrbot_settings),
+                                                 read_settings(face_path))
+            return web.json_response({"message": message}, headers=headers)
+        if action == "save-go" and body.keys() == {"model"}:
+            async with manager.lock:
+                cfg = read_settings(manager.astrbot_settings)
+                provider = next((p for p in cfg.get("provider", []) if p.get("id") == provider_mode.GO_PROVIDER), None)
+                if not provider or not provider.get("enable"):
+                    raise ValueError("请先在 AstrBot 启用现有 OpenCode Go 提供商")
+                if body["model"] != provider.get("model"):
+                    models = await model_settings.go_models(manager.creds.values.get("opencode_key"))
+                    if body["model"] not in models:
+                        raise ValueError("请选择 Go 模型目录中兼容的模型")
+                    provider["model"] = body["model"]
+                    write_json(manager.astrbot_settings, cfg)
+            return web.json_response({**snapshot(), "message": "已保存。重启 AstrBot 后使用新模型。"}, headers=headers)
+        if action != "save-speech":
+            raise ValueError("未知的模型设置操作")
+        async with manager.lock:
+            cfg, face = read_settings(manager.astrbot_settings), read_settings(face_path)
+            previous_face = face.copy()
+            tts = model_settings.tts_config(cfg)
+            previous_tts = tts.copy() if tts is not None else None
+            model_settings.validate_speech(body, cfg, face)
+            if previous_face != face and not (face_path.parent / "main.py").is_file():
+                raise ValueError("当前主机未安装 QQ 听写插件")
+            original = None
+            if previous_tts != tts:
+                original = manager.astrbot_settings.read_bytes()
+                write_json(manager.astrbot_settings, cfg)
+            try:
+                if previous_face != face:
+                    write_json(face_path, face)
+            except OSError:
+                if original is not None:
+                    atomic_write(manager.astrbot_settings, original)
+                raise
+        return web.json_response({**snapshot(), "message": "已保存。QQ 语音在重启 AstrBot 后生效。"},
+                                 headers=headers)
+
     async def dsh_team(_request):
         view = _request.query.get("view", "current")
         if view not in {"current", "test", "formal"}:
@@ -1811,6 +1998,7 @@ def create_app(manager, token):
         response = web.json_response({"url": "http://127.0.0.1:59934/?" + urlencode({"token": ticket})},
                                      headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         meeting_web.grant(response, token, PORT)
+        owner_work.grant(response, token, PORT)
         return response
 
     async def archive_history(_request):
@@ -1863,6 +2051,7 @@ def create_app(manager, token):
     app.router.add_get("/icon.png", icon)
     app.router.add_get("/api/ping", ping)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/host-resources", resources)
     app.router.add_get("/api/dashboard", overview)
     app.router.add_post("/api/services/{name}/{mode}", action)
     app.router.add_post("/api/config", configure)
@@ -1883,6 +2072,13 @@ def create_app(manager, token):
     app.router.add_get("/api/config", configuration)
     app.router.add_get("/api/dsh-team", dsh_team)
     app.router.add_get(meeting_web.PAGE, meeting_page)
+    app.router.add_get(owner_work.PAGE, owner_work_page)
+    app.router.add_get(owner_work.CHAT_PAGE, owner_chat_page)
+    app.router.add_get(owner_work.API, owner_work_api)
+    app.router.add_put(owner_work.API, owner_work_api)
+    app.router.add_delete(owner_work.API, owner_work_api)
+    app.router.add_get(owner_work.CHAT_API, owner_chat_api)
+    app.router.add_post(owner_work.CHAT_API, owner_chat_api)
     app.router.add_get(meeting_web.API, dsh_meeting_live)
     app.router.add_post(meeting_web.API, dsh_meeting_live)
     app.router.add_get("/api/dsh-team/role-card", role_card)
@@ -1903,6 +2099,8 @@ def create_app(manager, token):
     app.router.add_post("/api/budgets", budgets)
     app.router.add_post("/api/exit", exit_console)
     app.router.add_get("/api/provider-keys", setup_info)
+    app.router.add_get("/api/media-models", media_models)
+    app.router.add_post("/api/media-models", media_models)
     return app
 
 

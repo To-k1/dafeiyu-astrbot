@@ -379,7 +379,7 @@ class BiliAPI:
                 selected = next((x for x in tracks if str(x.get("lan", "")).startswith("zh")), tracks[0])
                 raw = await self.get_bytes(selected["subtitle_url"], 2 * 1024 * 1024)
                 body = json.loads(raw).get("body", [])
-                return {**result, "language": selected.get("lan"), "subtitles": [
+                return {**result, "track_available": True, "language": selected.get("lan"), "subtitles": [
                     {"from": x["from"], "to": x["to"], "content": x["content"]} for x in body]}
             if operation == "danmaku":
                 raw = await self.get_bytes(f"https://comment.bilibili.com/{identity['cid']}.xml", 8 * 1024 * 1024)

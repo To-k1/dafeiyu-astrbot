@@ -45,7 +45,11 @@ DEFAULT_CONFIG = {
     # 听写/看图凭证与模型独立于 TTS provider：换音源、改 provider id 时
     # 不会连带把 ASR / 视频理解弄哑。留空则回退到旧版 dashscope_tts 凭证。
     "asr_api_key": "",
+    "asr_key_mode": "auto",
     "asr_model": "qwen3-asr-flash",
+    "asr_workspace": "",
+    "asr_language": "",
+    "asr_keep_dialect": False,
     "vl_model": "qwen3-vl-plus",
     "face_cooldown_minutes": 10,
     "max_media_mb": 80,
@@ -223,10 +227,12 @@ class FaceConvertPlugin(Star):
         self.admins: list[str] = []
         key_source = "未配置"
         try:
-            self.asr_key = str(self.cfg.get("asr_api_key") or "").strip()
+            key_mode = self.cfg.get("asr_key_mode")
+            if key_mode != "shared":
+                self.asr_key = str(self.cfg.get("asr_api_key") or "").strip()
             if self.asr_key:
                 key_source = "config.json:asr_api_key"
-            if not self.asr_key:
+            if not self.asr_key and key_mode not in ("shared", "separate"):
                 self.asr_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
                 if self.asr_key:
                     key_source = "环境变量 DASHSCOPE_API_KEY"
@@ -236,7 +242,14 @@ class FaceConvertPlugin(Star):
             )
             with open(cfg_path, encoding="utf-8-sig") as f:
                 cfg = json.load(f)
-            if not self.asr_key:
+            if key_mode == "shared":
+                providers = [p for p in cfg.get("provider", []) if p.get("type") == "dashscope_tts"]
+                preferred = (cfg.get("provider_tts_settings") or {}).get("provider_id")
+                enabled = [p for p in providers if p.get("enable")]
+                tts = next((p for p in enabled if p.get("id") == preferred), (enabled or providers or [{}])[0])
+                self.asr_key = tts.get("api_key") or ""
+                key_source = "与百炼 TTS 共用凭据"
+            elif not self.asr_key and key_mode != "separate":
                 # 兼容旧部署：只按 provider 类型找 DashScope，不再写死 id。
                 for prov in cfg.get("provider", []):
                     if (
@@ -251,6 +264,8 @@ class FaceConvertPlugin(Star):
                             "DASHSCOPE_API_KEY 以彻底解耦。"
                         )
                         break
+            if isinstance(self.asr_key, list):
+                self.asr_key = next((key.strip() for key in self.asr_key if isinstance(key, str) and key.strip()), "")
             self.admins = [str(a).strip() for a in (cfg.get("admins_id") or [])]
         except Exception as e:
             logger.warning(f"[face_convert] 读取 ASR 凭证失败: {e}")
@@ -423,11 +438,23 @@ class FaceConvertPlugin(Star):
 
     async def _asr_file(self, path: str) -> str | None:
         """本地音频文件 -> 文字（qwen3-asr-flash）。"""
+        mime = "audio/wav" if path.lower().endswith(".wav") else "audio/mpeg"
+        if self.asr_model.startswith("qwen-audio-") or self.cfg.get("asr_language"):
+            from .speech_asr import recognize
+
+            result = await recognize(self._media_data_url(path, mime), self.asr_key, model=self.asr_model,
+                                     workspace=self.cfg.get("asr_workspace", ""),
+                                     language=self.cfg.get("asr_language", ""),
+                                     keep_dialect=self.cfg.get("asr_keep_dialect") is True,
+                                     timeout=self.cfg["asr_timeout_s"])
+            if result["status"] == "transcribed":
+                return result["text"]
+            if result["status"] == "empty":
+                return None
+            raise ValueError("百炼未能确认音频转写：" + result["status"])
         return await self._mm_call(
             self.asr_model,
-            [{"audio": self._media_data_url(
-                path, "audio/wav" if path.lower().endswith(".wav") else "audio/mpeg"
-            )}],
+            [{"audio": self._media_data_url(path, mime)}],
             timeout=self.cfg["asr_timeout_s"],
         )
 

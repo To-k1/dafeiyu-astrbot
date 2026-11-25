@@ -103,6 +103,29 @@ class ThinkBookConsoleTests(unittest.IsolatedAsyncioTestCase):
                     response = await browser.post("/api/config", headers=headers, json={"contact_daily_limit": 5})
                     self.assertEqual(await response.json(), {"message": "已保存"})
 
+    async def test_host_resources_is_read_from_thinkbook_through_authenticated_relay(self):
+        route = "/api/host-resources"
+        sample = {"observed_at": 123.0, "cpu_percent": 37, "memory": {"total": 16, "available": 6},
+                  "disks": [{"volume": "D:"}], "processes": []}
+
+        async def manager(request):
+            self.assertEqual(request.headers["Authorization"], "Bearer remote-manager")
+            return web.json_response(sample)
+
+        upstream = web.Application()
+        upstream.router.add_get(route, manager)
+        async with TestServer(upstream) as target, ClientSession() as upstream_client:
+            with patch.object(thinkbook, "MANAGER_FORWARD", target.port):
+                async with TestClient(TestServer(thinkbook.create_relay(upstream_client, "browser", "remote-manager"))) as browser:
+                    host = {"Host": "127.0.0.1:16196"}
+                    self.assertEqual((await browser.get(route, headers=host)).status, 401)
+                    auth = {**host, "Authorization": "Bearer browser"}
+                    response = await browser.get(route, headers=auth)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(await response.json(), sample)
+                    self.assertEqual((await browser.post(route, headers=auth)).status, 404)
+
     async def test_console_recovers_manager_token_after_reboot(self):
         async def manager(request):
             if request.headers["Authorization"] != "Bearer refreshed":

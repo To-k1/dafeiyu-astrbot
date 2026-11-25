@@ -68,6 +68,23 @@
 .fw-record .button{white-space:nowrap}
 .fw-grid[data-idle=true] .fw-column:last-child{grid-column:1;grid-row:1}
 .fw-grid[data-idle=true] .fw-column:first-child{grid-column:2;grid-row:1}
+.fw-resources{margin-top:26px;border-top:1px solid #526173}
+.fw-resources .fw-read-time{padding-bottom:0}
+.fw-resource-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:10px 22px}
+.fw-resource-metric{min-width:0;margin:0;padding:10px 0;display:grid;align-content:start;gap:5px}
+.fw-resource-metric dt{font-size:13px;color:var(--muted);display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.fw-resource-metric dd{margin:0;font-size:12px;color:var(--muted)}
+.fw-resource-metric strong,.fw-resources td:nth-child(n+2){font-variant-numeric:tabular-nums}
+.fw-resource-metric strong{color:var(--ink);font-size:15px}
+.fw-resource-metric meter{display:block;width:100%;height:6px;appearance:none}
+.fw-resource-metric meter::-webkit-meter-bar{background:var(--wash);border:0;border-radius:0}
+.fw-resource-metric meter::-webkit-meter-optimum-value{background:var(--muted)}
+.fw-resource-metric meter[data-high]::-webkit-meter-optimum-value{background:var(--accent)}
+#fish-workspace .fw-resources details{margin:4px 0 0;padding:8px 0;border:0;background:transparent}
+.fw-resources table{width:100%;border-collapse:collapse;text-align:left;margin-top:8px;table-layout:fixed}
+.fw-resources :is(th,td){padding:7px 9px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.fw-resources th:first-child{width:55%}
+.fw-resources :is(th,td):nth-child(n+2){text-align:right}
 #fw-team-live:not(:empty){margin-bottom:14px}
 #fw-service-links{margin:10px 0}
 #fw-stop-dialog{max-width:min(430px,93vw);background:var(--panel);color:var(--ink);border:1px solid var(--line);padding:22px}

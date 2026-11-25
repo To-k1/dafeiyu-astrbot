@@ -164,12 +164,82 @@ def _subtitle_rows(payload, start, end):
     return output
 
 
-async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float = 300, *, include_audio=True, force_audio=False):
+async def prepare_video(api, bvid: str, cid: int, start: float = 0, end: float = 300, *,
+                        include_audio=True, force_audio=False, include_video=True, media_cache=None):
     async with media_slot():
-        return await _prepare_video(api, bvid, cid, start, end, include_audio=include_audio, force_audio=force_audio)
+        return await _prepare_video(api, bvid, cid, start, end, include_audio=include_audio, force_audio=force_audio,
+                                    include_video=include_video, media_cache=media_cache)
 
 
-async def _prepare_video(api, bvid: str, cid: int, start: float, end: float, *, include_audio, force_audio):
+def find_ffmpeg():
+    if executable := shutil.which("ffmpeg"):
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        return None
+
+
+async def download_assets(api, bvid, cid, folder, kinds, result, *, quality=16, reusable=False):
+    """Fetch each requested stream once into a caller-owned directory."""
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    missing = []
+    for kind in kinds:
+        path = folder / f"{bvid}-{int(cid)}-{quality}-{kind}.m4s"
+        if reusable and path.is_file() and path.stat().st_size:
+            paths[kind] = path
+        else:
+            missing.append((kind, path))
+    if not missing:
+        return paths
+    try:
+        playback = await api.request("/x/player/playurl", params={
+            "bvid": bvid, "cid": str(cid), "qn": str(quality), "fnval": "16", "fourk": "0",
+        })
+    except Exception as exc:
+        result["notes"].append(f"playback source unavailable ({type(exc).__name__}); subtitles retained")
+        return paths
+    dash = playback.get("dash") or {}
+    for kind, path in missing:
+        candidates = dash.get(kind) or []
+        if kind == "video" and quality > 16:
+            eligible = [s for s in candidates if isinstance(s, dict) and 0 < int(s.get("id") or 0) <= quality]
+            if eligible:
+                best = max(int(s["id"]) for s in eligible)
+                candidates = [s for s in eligible if int(s["id"]) == best]
+        stream = _choose_stream(candidates, video=kind == "video")
+        if stream is None:
+            result["notes"].append(f"{kind} stream unavailable")
+            continue
+        part = path.with_suffix(".part")
+        try:
+            remaining = MAX_DOWNLOAD_BYTES - result["downloaded_bytes"]
+            for url in list(_cdn_urls(stream))[:3]:
+                try:
+                    if remaining <= 0:
+                        raise ValueError("download budget exhausted")
+                    await api.download(url, part, limit=remaining)
+                    size = part.stat().st_size
+                    if not 0 < size <= remaining:
+                        raise ValueError("download size outside allowed budget")
+                    part.replace(path)
+                    result["downloaded_bytes"] += size
+                    paths[kind] = path
+                    break
+                except (OSError, ValueError, RuntimeError):
+                    part.unlink(missing_ok=True)
+            else:
+                result["notes"].append(f"{kind} download failed; other results retained")
+        finally:
+            part.unlink(missing_ok=True)
+    return paths
+
+
+async def _prepare_video(api, bvid: str, cid: int, start: float, end: float, *,
+                         include_audio, force_audio, include_video, media_cache=None):
     """Return frames, subtitles, or audio with actual times and partial failures.
 
     The caller must run this on the local companion, not on the 2 Mbit/s cloud
@@ -189,13 +259,18 @@ async def _prepare_video(api, bvid: str, cid: int, start: float, end: float, *, 
         "identity": identity,
         "requested_range": {"start": start, "end": requested_end},
         "covered_range": {"start": start, "end": end},
-        "frames": [], "audio": [], "subtitles": [], "notes": [],
+        "frames": [], "audio": [], "subtitles": [], "notes": [], "subtitle_track": "unknown",
         "downloaded_bytes": 0,
     }
     if end < requested_end:
         result["notes"].append("range limited to video duration and 300 seconds")
     try:
         payload = await api.read("subtitles", {"bvid": bvid, "cid": int(cid)})
+        if isinstance(payload, dict):
+            if payload.get("track_available") is True or payload.get("subtitles"):
+                result["subtitle_track"] = "available"
+            elif payload.get("tracks") == []:
+                result["subtitle_track"] = "not_listed"
         rows = _subtitle_rows(payload, start, end)
         # A subtitle explosion must not consume the compact media budget.
         total = 0
@@ -208,61 +283,19 @@ async def _prepare_video(api, bvid: str, cid: int, start: float, end: float, *, 
     except Exception as exc:
         result["notes"].append(f"subtitles unavailable ({type(exc).__name__})" + ("; audio fallback" if include_audio else ""))
 
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        try:
-            import imageio_ffmpeg
-
-            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        except (ImportError, RuntimeError):
-            pass
+    ffmpeg = find_ffmpeg()
     if not ffmpeg:
         result["notes"].append("local ffmpeg unavailable; subtitles retained")
         return result
-    try:
-        playback = await api.request(
-            "/x/player/playurl",
-            params={"bvid": bvid, "cid": str(cid), "qn": "16", "fnval": "16", "fourk": "0"},
-        )
-        dash = playback.get("dash") or {}
-        video = _choose_stream(dash.get("video") or [], video=True)
-        audio = _choose_stream(dash.get("audio") or []) if include_audio and (force_audio or not result["subtitles"]) else None
-    except Exception as exc:
-        result["notes"].append(f"playback source unavailable ({type(exc).__name__}); subtitles retained")
-        return result
-
     with tempfile.TemporaryDirectory(prefix="dafeiyu-bili-media-") as temporary:
         folder = Path(temporary)
-        paths = {}
-        for kind, stream in (("video", video), ("audio", audio)):
-            if stream is None:
-                if kind == "video" or (include_audio and (force_audio or not result["subtitles"])):
-                    result["notes"].append(f"{kind} stream unavailable")
-                continue
-            path = folder / (kind + ".m4s")
-            try:
-                remaining = MAX_DOWNLOAD_BYTES - result["downloaded_bytes"]
-                if remaining <= 0:
-                    raise ValueError("download budget exhausted")
-                urls = list(_cdn_urls(stream))
-                if not urls:
-                    raise ValueError("no trusted CDN supplied")
-                for url in urls[:3]:
-                    try:
-                        await api.download(url, path, limit=remaining)
-                        break
-                    except Exception:
-                        path.unlink(missing_ok=True)
-                else:
-                    raise ValueError("trusted media mirrors unavailable")
-                size = path.stat().st_size
-                if size <= 0 or size > remaining:
-                    raise ValueError("download size outside allowed budget")
-                result["downloaded_bytes"] += size
-                paths[kind] = path
-            except Exception as exc:
-                path.unlink(missing_ok=True)
-                result["notes"].append(f"{kind} download failed ({type(exc).__name__}); other results retained")
+        kinds = []
+        if include_video:
+            kinds.append("video")
+        if include_audio and (force_audio or not result["subtitles"]):
+            kinds.append("audio")
+        paths = await download_assets(api, bvid, cid, media_cache or folder, kinds, result,
+                                      quality=32 if media_cache else 16, reusable=media_cache is not None)
 
         video_path = paths.get("video")
         if video_path:

@@ -166,14 +166,18 @@ def create_server(state_dir, *, host="127.0.0.1", port=8011, adb_path=None,
         return await safe(preview())
 
     @mcp.tool()
-    async def bili_prepare_video(bvid: str, cid: int, start: float = 0, end: float = 300) -> dict:
+    async def bili_prepare_video(bvid: str, cid: int, start: float = 0, end: float = 300, asr_mode: str = "auto") -> dict:
         """Download/extract locally, return <=3 MiB of timestamped frames/subtitles/audio.
 
         cid must belong to bvid. Missing subtitles use bounded MP3 segments. Large
         originals and temporary files stay local and are removed after extraction.
         """
         async def prepare():
-            result = await prepare_video(api, bvid, cid, start, end)
+            if asr_mode not in ("auto", "preview", "off", "audio", "both"):
+                raise ValueError("无效的视频处理方式")
+            result = await prepare_video(api, bvid, cid, start, min(end, start + 12) if asr_mode == "preview" else end,
+                                         include_audio=asr_mode not in ("preview", "off"),
+                                         force_audio=asr_mode in ("audio", "both"), include_video=asr_mode != "audio")
             covered = result.get("covered_range", {})
             result["range"] = [covered.get("start"), covered.get("end")]
             result["audios"] = result.pop("audio", [])

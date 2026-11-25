@@ -12,6 +12,8 @@ from .team_mode import GROUP_SQL, store_mode, visible
 PREFIX = "dsh-roster:v1:"
 AGENT_ID = re.compile(r"[0-9a-f]{16}")
 COPY_MEMORY_PREFIX = "dsh-copy-memory:v1:"
+OWNER_SESSIONS_PREFIX = "dsh-owner-sessions:v1:"
+OWNER_CHAT_PREFIX = "dsh-owner-chat:v1:"
 
 
 def copy_memory_key(scope, agent_id):
@@ -270,6 +272,25 @@ class DshRoster:
         return {"agent_id": ident, "session_id": session, "request_id": request["request_id"],
                 "persona_version": request["version"], "result": reply, "go_receipt_count": count,
                 "recovered_previous_turn": bool(prior)}
+
+
+class OwnerChatRoster(DshRoster):
+    """Reuse the active identity while persisting a separate set of chat fields."""
+
+    CHAT_FIELDS = {"chat_sessions", "current_chat_session", "chat_session", "pending_chat", "last_chat",
+                   "legacy_chat_session_id"}
+
+    def _chat_key(self, ident):
+        return f"{OWNER_SESSIONS_PREFIX}{self.scope}:{ident}"
+
+    def get(self, ident):
+        profile = super().get(ident)
+        chat = self.store.get_setting(self._chat_key(ident), {})
+        return {**{key: value for key, value in profile.items() if key not in self.CHAT_FIELDS},
+                "chat_sessions": [], **{key: value for key, value in chat.items() if key in self.CHAT_FIELDS}}
+
+    def save(self, row):
+        self.store.setting(self._chat_key(row["id"]), {key: row[key] for key in self.CHAT_FIELDS if key in row})
 
 
 class DshGuides:

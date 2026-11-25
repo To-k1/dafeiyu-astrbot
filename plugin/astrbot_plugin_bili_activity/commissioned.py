@@ -17,7 +17,7 @@ from .team_mode import GROUP_SQL, store_mode, visible
 BRIDGE = "fishhome_dsh_commission_client"
 PREFIX = "commissioned-file:v1:"
 PUBLIC_KINDS = {"video", "web"}
-PUBLIC_PENDING = {"prepared", "dispatching", "queued", "running", "cancelling", "go_wait"}
+PUBLIC_PENDING = {"prepared", "dispatching", "queued", "running", "cancelling", "go_wait", "paused"}
 logger = logging.getLogger(__name__)
 
 
@@ -170,7 +170,7 @@ class CommissionedFiles:
             "AND (?=0 OR coalesce(json_extract(value,'$.via_agent'),0)=0) "
             "AND (?='all' OR (?='public' AND json_extract(value,'$.job_kind') IN ('video','web')) "
             "OR coalesce(json_extract(value,'$.job_kind'),'file')=?) "
-            "AND (?!='running' OR json_extract(value,'$.state') IN ('prepared','dispatching','queued','running','cancelling','go_wait')) "
+            "AND (?!='running' OR json_extract(value,'$.state') IN ('prepared','dispatching','queued','running','cancelling','go_wait','paused')) "
             "AND (?!='finished' OR (json_extract(value,'$.state') IN ('completed','failed','needs_review') "
             "AND coalesce(json_extract(value,'$.wake_retry_at'),0)<=?)) "
             "AND (?=0 OR json_extract(value,'$.agent_reply') IS NULL) "
@@ -224,6 +224,7 @@ class CommissionedFiles:
                 "delivery": task["delivery"], "cancellation_requested": bool(task.get("cancel_requested")),
                 "summary": task.get("result"), "phase": task.get("worker_phase"),
                 "evidence": task.get("media_evidence"), "failure": task.get("failure"),
+                **({"asr_mode": task["spec"]["asr_mode"]} if "asr_mode" in task["spec"] else {}),
                 **({"agent": agent_receipt(task["spec"]["agent"])} if task["spec"].get("agent") else {})}
 
     def cancel_public(self, scope, owner, ident):
@@ -266,7 +267,7 @@ class CommissionedFiles:
                 result["failure"] = {"code": "report_invalid", "detail": "任务没有返回可核查的来源。"}
             else:
                 task.update(result=summary, media_evidence=evidence)
-        if state not in {"queued", "running", "cancelling", "go_wait", "cancelled", "completed", "failed", "needs_review"}:
+        if state not in PUBLIC_PENDING | {"cancelled", "completed", "failed", "needs_review"}:
             return
         task["state"] = state
         if isinstance(result.get("phase"), str):

@@ -39,6 +39,20 @@
             </section>
           </div>
         </div>
+        <section class="fw-resources" aria-labelledby="fw-resources-title">
+          <div class="fw-heading fw-panel-title">
+            <h2 id="fw-resources-title">主机资源</h2>
+            <time class="fw-read-time" id="fw-resources-time">正在读取</time>
+          </div>
+          <div id="fw-resource-metrics" class="fw-resource-metrics"></div>
+          <details id="fw-resource-processes" hidden>
+            <summary>内存占用最高的进程</summary>
+            <table aria-label="按内存占用排序的进程">
+              <thead><tr><th scope="col">进程</th><th scope="col">PID</th><th scope="col">内存</th></tr></thead>
+              <tbody id="fw-resource-rows"></tbody>
+            </table>
+          </details>
+        </section>
       </section>
       <section data-page="team" hidden><div class="fw-heading"><h1>会场与小队</h1><div id="fw-meeting-links" class="fw-actions"></div></div><div id="fw-team-live"></div><div id="fw-team"></div></section>
       <section data-page="services" hidden>

@@ -113,6 +113,7 @@ class GoVideoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_only_returns_cited_provider_results_without_snippets(self):
         summary = "结论。" * 410 + "\n来源：https://example.org/primary"
+        call_text = summary
 
         async def call(method, request):
             if method == "session.create":
@@ -125,7 +126,7 @@ class GoVideoTests(unittest.IsolatedAsyncioTestCase):
             if method == "session.history":
                 return {"events": [
                     {"type": "user/message", "data": {"source": {"kind": "user", "rpcId": call.request["requestId"]}}},
-                    {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": summary}]}}},
+                    {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": call_text}]}}},
                     {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
                 ]}
             raise AssertionError(method)
@@ -142,6 +143,21 @@ class GoVideoTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("long excerpt", call.request["content"][0]["text"])
             self.assertEqual(result["summary"], summary)
             self.assertEqual(result["evidence"], [{"url": "https://example.org/primary", "title": "Primary"}])
+            self.assertIn("不超过 700 字", call.request["content"][0]["text"])
+            for inline_summary in ("一句简报", None):
+                with self.subTest(inline_summary=inline_summary):
+                    call_text = f"## 简报\n{inline_summary}\n\n## 完整报告\n{summary}" if inline_summary else summary
+                    result = await run_search_task(SimpleNamespace(call=call), directory, "public information",
+                                                   evidence, relay, owner_report=True)
+                    prompt = call.request["content"][0]["text"]
+                    self.assertIn("## 完整报告", prompt)
+                    self.assertNotIn("不超过 700 字", prompt)
+                    self.assertEqual(result["full_report"], summary)
+                    if inline_summary:
+                        self.assertEqual(result["summary"], inline_summary)
+                    else:
+                        self.assertIn("查看完整报告", result["summary"])
+                    self.assertEqual(result["evidence"], [{"url": "https://example.org/primary", "title": "Primary"}])
 
     async def test_relay_requires_go_receipts_and_keeps_real_key_out_of_worker(self):
         calls = []

@@ -1,8 +1,10 @@
 # 给 Codex 的第一轮完整执行指令：只执行 M0
 
+> 历史记录。现行开发规则见 [AGENTS.md](../../AGENTS.md)，正式运行与验收见[项目维护手册](../FISHHOME_HANDBOOK.md)。
+
 你正在 Windows 台式机上工作。已定根路径 `%FISH_HOME%`（用户设置值为 `D:\Share\code\FishHome`），**Codex 项目工作区必须是 `%FISH_HOME%\repo`**，不要将 backups/exports/私人目录纳入 Git，也不要假设 Linux `fishvm` 是必经服务器。
 
-先读 `AGENTS.md`、`docs/DECISIONS.md`、`docs/PRD_FISH_HOME_v0.9.md`、`docs/UPSTREAM_REUSE.md`、`docs/GITHUB_FORK_BOOTSTRAP.md`、`docs/ROOM_AND_REMOTE_VIEW.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`。
+首轮阅读清单包括 `AGENTS.md`、`docs/DECISIONS.md`、`docs/PRD_FISH_HOME_v0.9.md`、`docs/UPSTREAM_REUSE.md`、[Fork 初始化指南](GITHUB_FORK_BOOTSTRAP.md)、`docs/ROOM_AND_REMOTE_VIEW.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`。
 
 **用户明确授权用已登录的 GitHub CLI 自行完成公开 Fork、clone、分支、正常 commit 和 push。** 请执行但先审查磁盘已有资料，避免覆盖、强推和删除。目标上游为 `https://github.com/whyever77/dafeiyu-astrbot`；`origin` 必须是实际认证账号下的 Fork，不能猜账号或仓库 URL。`main` 跟随上游，`fish-home` 承载定制，后续 `feature/*` 开发。若本地 `repo` 非空或已有旧文档先保护、备份、逐文件比较后再合并，不可清空。
 

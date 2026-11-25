@@ -23,6 +23,12 @@ git push origin fish-home
 
 有未提交改动或分叉时先处理本机差异，不强制覆盖。检查原作者更新用 `git log HEAD..upstream/main --oneline`；有更新时 `git merge upstream/main`，审查冲突、测试通过后推送。2026-11-18 核对时公开分支已经包含 upstream/main `6427435`。
 
+### 提交文件大小检查
+
+版本化的 `.githooks/pre-commit` 检查 Git 暂存版本，单个源码或文档超过 20,000 字节（约 5,000 token）就拒绝提交。它跳过锁文件、指定生成文件、第三方依赖和构建产物。报错后应按职责拆分，再重新暂存。
+
+当前在临时仓库验证钩子，开发和公开工作树的默认配置尚未启用严格拦截。需要对一次提交使用规则时，可从包含钩子的工作树执行 `git -c core.hooksPath=.githooks commit`。两个关联工作树默认共享仓库级 Git 配置，长期开启前先核对各自的目标范围。
+
 ## 把已提交代码安装到 ThinkBook
 
 ThinkBook 当前从安装包解压部署，没有可直接拉取的 Git 工作树；AstrBot 实际加载的是 `dev\astrbot-4.29.4\data\plugins` 中的代码。只替换 `repo` 尚未完成插件更新。
@@ -52,6 +58,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$sourceRoot\deploy\desk
 此安装步骤编译托盘、更新活动/心境/Bridge 插件及 DSH 启动文件，保留运行端配置、记忆和账户凭据。安装器针对已支持的 AstrBot 4.29.4；失败时先查看报错，不启动半更新的服务。以后依赖版本或 AstrBot 内核补丁变化须按对应版本说明执行，以上操作不会自动更新全部第三方软件。
 
 如果本次安装包含共用组会会场，停止控制台和两路 DSH 后，给 `install.ps1` 加 `-InstallMeetingPanel`。此开关把浏览器插件及启动脚本装入 DSH 0.2.2-rc.1 的安装目录。更新后从 FishHome 控制台打开「DSH 会场」，它会选中 DSH 的原生会场面板。台式机远程控制台需重新打开以加载新版页面及路由。插件回退时恢复原 DSH 启动脚本，移走此次安装的 `fishhome-meetings` 文件夹，重启两路 DSH。
+
+「主人工作台」复用同一份 DSH 浏览器插件。更新已有安装时，保留原来的 `fishhome-meetings/client.js`，替换该文件与对应控制台源码，重开两路 DSH 和控制台。回退时恢复原文件并重开相关组件。已产生的主人任务和网页存档留在控制台状态目录的 `owner-work`。
 
 桌面 broker 的代码受管理员 ACL 保护。若本次也更新它，在 ThinkBook 管理员 PowerShell 另运行：
 

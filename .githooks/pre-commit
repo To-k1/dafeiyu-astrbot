@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+max_bytes=20000
+
+git diff --cached --name-only --diff-filter=ACMRT --no-renames -z -- |
+(
+    blocked=0
+    while IFS= read -r -d '' path; do
+        case "/$path" in
+            */node_modules/*|*/.venv/*|*/__pycache__/*|*/_vendor/*|*/dist/*|*/build/*|*/payload/*) continue ;;
+        esac
+        case "${path##*/}" in
+            *.lock|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|*.min.js|*.min.css|*.generated.*|*.g.cs) continue ;;
+        esac
+        case "$path" in
+            .githooks/*|*.py|*.pyi|*.js|*.mjs|*.cjs|*.ts|*.tsx|*.jsx|*.html|*.css|*.md|*.rst|*.txt|*.ps1|*.cmd|*.bat|*.sh|*.json|*.yaml|*.yml|*.toml|*.ini|*.cs) ;;
+            *) continue ;;
+        esac
+
+        if ! size=$(git cat-file -s ":$path"); then
+            printf '无法读取暂存文件 %s\n' "$path" >&2
+            exit 1
+        fi
+        if ((size > max_bytes)); then
+            printf '暂存文件 %s 有 %d 字节（约 %d token），超过 %d 字节。请按职责拆分后重新暂存。\n' \
+                "$path" "$size" "$(((size + 3) / 4))" "$max_bytes" >&2
+            blocked=1
+        fi
+    done
+    exit "$blocked"
+)

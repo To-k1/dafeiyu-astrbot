@@ -21,7 +21,7 @@ import psutil
 
 from scripts.m6_data import sync_room
 from scripts.mock_backup import checksum, staged_directory
-from . import meeting_web, workspace_web
+from . import meeting_web, owner_work, workspace_web
 
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +34,7 @@ THINKBOOK_OBSERVATORY = 8767
 MODULE_PORTS = {6185: 16185, 6099: 16099, 59934: 15934}
 ROUTES = {
     "/api/ping": {"GET"}, "/api/status": {"GET"}, "/api/dashboard": {"GET"}, "/api/config": {"GET", "POST"},
+    "/api/host-resources": {"GET"},
     "/api/diagnostics": {"GET"}, "/api/ui/dsh": {"POST"}, "/api/archives": {"GET"},
     "/api/archives/backup": {"POST"}, "/api/archives/export": {"POST"},
     "/api/budgets": {"GET", "POST"}, "/api/provider-keys": {"GET"},
@@ -46,6 +47,9 @@ ROUTES = {
     "/api/fish-model-route": {"GET", "POST"},
     "/api/shared-language": {"GET", "POST"},
     "/api/meme-dictionary": {"GET", "POST"},
+    "/api/media-models": {"GET", "POST"},
+    owner_work.API: {"GET", "PUT", "DELETE"},
+    owner_work.CHAT_API: {"GET", "POST"},
 }
 SERVICE_ACTION = re.compile(r"/api/services/(budget|ollama|emulator|phone|bili|compute|desktop|dsh|dsh_commission|astrbot|napcat|room|all)/(start|stop|restart)")
 
@@ -136,9 +140,13 @@ def create_relay(client, browser_token, manager_token, renew_token=None):
             return web.FileResponse(HERE / "fishhome.png")
         if request.path == meeting_web.PAGE and request.method == "GET":
             return meeting_web.page((MODULE_PORTS[59934],), "ThinkBook 正式机")
+        if request.path in {owner_work.PAGE, owner_work.CHAT_PAGE} and request.method == "GET":
+            return owner_work.page((MODULE_PORTS[59934],), "ThinkBook 正式机",
+                                   chat=request.path == owner_work.CHAT_PAGE)
         console_access = hmac.compare_digest(request.headers.get("Authorization", "").encode(),
                                               ("Bearer " + browser_token).encode())
-        if not console_access and not meeting_web.authorize(request, browser_token, DESKTOP_PORT):
+        if not (console_access or meeting_web.authorize(request, browser_token, DESKTOP_PORT)
+                or owner_work.authorize(request, browser_token, DESKTOP_PORT)):
             return web.json_response({"error": "请从 ThinkBook 控制入口打开页面。"}, status=401)
         action = SERVICE_ACTION.fullmatch(request.path) if request.method == "POST" else None
         if not action and request.method not in ROUTES.get(request.path, ()):
@@ -153,6 +161,8 @@ def create_relay(client, browser_token, manager_token, renew_token=None):
         team_library = request.path == "/api/dsh-team/library"
         if request.path == "/api/shared-language":
             incoming = request.clone(client_max_size=320 * 1024 + 1)
+        elif request.path in {owner_work.API, owner_work.CHAT_API}:
+            incoming = request.clone(client_max_size=32 * 1024 + 1)
         elif role_card or team_library:
             activity_copy = request.query.get("action") in {"preview-copy", "copy"}
             limit = (32 * 1024 if role_card and activity_copy else 256) * 1024
@@ -162,15 +172,15 @@ def create_relay(client, browser_token, manager_token, renew_token=None):
         try:
             async with client.request(request.method, f"http://127.0.0.1:{MANAGER_FORWARD}{request.path}",
                                       params=request.query if role_card or team_library or request.path in
-                                      {"/api/dsh-team", "/api/dsh-team/meeting"} else None,
+                                      {"/api/dsh-team", meeting_web.API, owner_work.API, owner_work.CHAT_API} else None,
                                       headers=headers, data=await incoming.read() if request.can_read_body else None,
                                        **({"timeout": ClientTimeout(total=150, sock_connect=3)}
                                           if request.path == "/api/meme-dictionary" and request.method == "POST" else {}),
                                       allow_redirects=False) as response:
-                if role_card and response.status == 200 and "Content-Disposition" in response.headers:
+                if (role_card or request.path == owner_work.API) and response.status == 200 and "Content-Disposition" in response.headers:
                     return web.Response(body=await response.read(), content_type=response.content_type,
                                         charset=response.charset,
-                                        headers={"Cache-Control": "no-store",
+                                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                                  "Content-Disposition": response.headers["Content-Disposition"]})
                 body = await response.text()
                 if response.status == 401:
@@ -182,13 +192,16 @@ def create_relay(client, browser_token, manager_token, renew_token=None):
                         except (OSError, RuntimeError, subprocess.SubprocessError):
                             pass
                     return web.json_response({"error": "ThinkBook 控制台正在重新连接。"}, status=502)
-                result = web.Response(text=body if team_library or request.path in {meeting_web.API, "/api/dashboard"}
+                result = web.Response(text=body if team_library or request.path in
+                                      {meeting_web.API, owner_work.API, owner_work.CHAT_API, "/api/dashboard"}
                                       else module_url(body),
                                       status=response.status, content_type=response.content_type,
                                       headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
                 if response.status == 200 and console_access and (request.path == "/api/ui/dsh" or
                         (request.path == meeting_web.API and request.method == "GET" and "id" not in request.query)):
                     meeting_web.grant(result, browser_token, DESKTOP_PORT)
+                if response.status == 200 and console_access and request.path == "/api/ui/dsh":
+                    owner_work.grant(result, browser_token, DESKTOP_PORT)
                 return result
         except (ClientError, OSError, asyncio.TimeoutError):
             return web.json_response({"error": "ThinkBook 控制台暂时不可达。"}, status=502)
