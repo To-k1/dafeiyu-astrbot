@@ -1,118 +1,336 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>主人工作台 · FishHome</title>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const t = q.get('theme');
+  const saved = (() => { try { return localStorage.getItem('fishhome-meeting-theme'); } catch { return ''; } })();
+  const dark = t === 'dark' || (t !== 'light' && (saved ? saved === 'dark' : matchMedia('(prefers-color-scheme:dark)').matches));
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  if (q.get('embed') === 'dsh' || window.self !== window.top) document.documentElement.dataset.embed = 'dsh';
+})();
+</script>
 <style>
-:root{color-scheme:dark;--bg:#0a111b;--panel:#131e2b;--line:#344252;--ink:#eaf0f7;--muted:#aabacb;--accent:#f5d66d;--error:#f7a3a0;font:15px/1.55 "Segoe UI","Microsoft YaHei",sans-serif}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}
-.shell{max-width:1220px;margin:auto;padding:24px}
-h1,h2,p{margin:0}h1{font-size:clamp(1.5rem,4vw,2.2rem);line-height:1.15}h2{font-size:1.1rem}
-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding:0 0 16px}
-header span,.muted{color:var(--muted)}a{color:var(--accent)}.error{color:var(--error)}
-nav{margin-top:12px;display:flex;gap:14px}nav [aria-current=page]{font-weight:700;color:var(--ink)}
-.layout{display:grid;grid-template-columns:minmax(270px,.85fr) minmax(0,1.45fr);gap:20px;margin-top:20px}
-.panel{border:1px solid var(--line);background:var(--panel);padding:16px;min-width:0}
-form{display:grid;gap:10px;margin-top:12px}
-label{display:grid;gap:5px}input,textarea,select,button{font:inherit;color:inherit}
-input,textarea,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:0;background:var(--bg)}
-textarea{min-height:100px;resize:vertical}
-button{width:fit-content;border:1px solid var(--line);padding:7px 12px;border-radius:0;background:var(--bg);cursor:pointer}
-button:disabled{cursor:default;opacity:.5}button:not(:disabled):hover{border-color:var(--accent)}
-button.primary{background:var(--accent);color:#161809;font-weight:700;border-color:var(--accent);clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px))}
-:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.history{margin-top:16px}#jobs{display:grid;margin-top:6px}
-#jobs-updated{display:block;margin-top:4px;font-size:.85rem;color:var(--muted);font-variant-numeric:tabular-nums}
-#jobs-updated[data-stale]{color:var(--accent)}
-#jobs button{width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);background:transparent;padding:8px 4px}
-#jobs button:hover,#jobs [aria-current=true]{background:var(--bg)}
-#jobs strong{display:block;overflow-wrap:anywhere;font-weight:600}
-#jobs span{display:block;color:var(--muted);font-size:.85rem}
-.result-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-#job-status,#report,#report-archive,#sources,#receipts{margin-top:10px}
-#report,#full-report{white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:12px}
-pre{white-space:pre-wrap;overflow-wrap:anywhere}
-li{overflow-wrap:anywhere;margin-bottom:6px}
+:root{
+  color-scheme:light;
+  --bg:#ffffff;--sidebar:#f9fafb;--surface:#ffffff;--surface-2:#f5f6f7;
+  --code-bg:#f6f8fa;--inline-code:#f1f3f5;
+  --border-1:rgba(0,0,0,.05);--border-2:rgba(0,0,0,.09);--border-3:rgba(0,0,0,.13);
+  --ink:#0f1115;--ink-2:#5c626a;--ink-3:#81858c;--caption:#9ea4ad;
+  --accent:#4176e6;--accent-hover:#3164d4;--accent-soft:#e4edfd;--accent-ink:#ffffff;
+  --hover:rgba(38,49,72,.055);--active:rgba(38,49,72,.10);
+  --ok:#16a34a;--ok-soft:#e6faed;--warn:#d97706;--warn-soft:#fef5e7;--err:#dc2626;--err-soft:#fef2f2;
+  --shadow-soft:0 0 0 .5px rgba(0,0,0,.10),0 4px 16px rgba(0,0,0,.045),0 0 24px rgba(0,0,0,.025);
+  --shadow-float:0 0 0 .5px rgba(0,0,0,.12),0 6px 18px rgba(0,0,0,.08);
+  --content-w:clamp(660px,80%,900px);
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:"SF Mono","JetBrains Mono","Fira Code",Consolas,Menlo,monospace;
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#151517;--sidebar:#1b1b1c;--surface:#232324;--surface-2:#2c2c2e;
+  --code-bg:#1b1b1c;--inline-code:#2a2a2d;
+  --border-1:rgba(255,255,255,.06);--border-2:rgba(255,255,255,.11);--border-3:rgba(255,255,255,.16);
+  --ink:#f5f6f8;--ink-2:#cfd3d6;--ink-3:#9ca3af;--caption:#7b818c;
+  --accent:#7aaaff;--accent-hover:#5f97fa;--accent-soft:rgba(122,170,255,.16);--accent-ink:#0f1115;
+  --hover:rgba(255,255,255,.065);--active:rgba(255,255,255,.12);
+  --ok:#22c55e;--ok-soft:rgba(34,197,94,.14);--warn:#f59e0b;--warn-soft:rgba(245,158,11,.14);--err:#f25a5a;--err-soft:rgba(242,90,90,.14);
+  --shadow-soft:0 0 0 .5px rgba(255,255,255,.11),0 6px 20px rgba(0,0,0,.28);
+  --shadow-float:0 0 0 .5px rgba(255,255,255,.14),0 6px 20px rgba(0,0,0,.40);
+}
+*{box-sizing:border-box}
 [hidden]{display:none!important}
-@media(max-width:720px){.shell{padding:14px}.layout{grid-template-columns:1fr;gap:12px;margin-top:12px}}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.6 var(--font);-webkit-font-smoothing:antialiased}
+button,textarea,input,select,a{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer;padding:0}
+:is(button,textarea,input,select,a,summary):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-3);border-radius:999px}
+.app{display:flex;height:100dvh;width:100%;overflow:hidden;position:relative}
+.backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.38);z-index:19}
+/* Sidebar */
+.sidebar{width:280px;flex:0 0 280px;background:var(--sidebar);border-right:.5px solid var(--border-3);display:flex;flex-direction:column;transition:width .18s ease,opacity .16s ease;overflow:hidden;z-index:20}
+.app[data-collapsed="true"] .sidebar{width:0;flex-basis:0;border-right:0;opacity:0;pointer-events:none}
+.app:not([data-collapsed="true"]) #side-open{display:none}
+.side-top{height:52px;padding:0 10px 0 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+.side-title{display:flex;align-items:center;gap:8px;min-width:0}
+.side-title strong{font-size:14px;font-weight:600;white-space:nowrap}
+.target-tag{font-size:11px;color:var(--ink-3);background:var(--surface-2);border:.5px solid var(--border-2);border-radius:999px;padding:1px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.icon-btn{width:30px;height:30px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;color:var(--ink-2);flex-shrink:0;transition:background .12s,color .12s}
+.icon-btn:hover{background:var(--hover);color:var(--ink)}
+.icon-btn svg{width:16px;height:16px;display:block;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.nav-seg{margin:2px 10px 10px;padding:3px;background:var(--surface-2);border:.5px solid var(--border-1);border-radius:10px;display:grid;grid-template-columns:1fr 1fr;gap:2px;flex-shrink:0}
+.nav-seg a{height:28px;border-radius:7px;font-size:12.5px;font-weight:500;color:var(--ink-2);text-decoration:none;display:flex;align-items:center;justify-content:center;transition:background .12s,color .12s}
+.nav-seg a:hover{color:var(--ink)}
+.nav-seg a[aria-current="page"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.new-task-btn{margin:0 10px 10px;height:36px;padding:0 12px;border-radius:11px;background:var(--surface);border:.5px solid var(--border-3);display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;font-weight:500;color:var(--ink);flex-shrink:0;transition:background .12s,border-color .12s}
+.new-task-btn:hover{background:var(--hover);border-color:var(--accent)}
+.new-task-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+.list-head{padding:2px 12px 6px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+.list-head h2{margin:0;font-size:11.5px;font-weight:600;color:var(--ink-3)}
+.jobs-updated{display:block;padding:0 12px 8px;font-size:11px;color:var(--caption);font-variant-numeric:tabular-nums;flex-shrink:0}
+.jobs-updated[data-stale]{color:var(--warn)}
+.side-list{flex:1;overflow-y:auto;padding:0 8px 12px}
+.job-item{width:100%;text-align:left;padding:8px 10px;border-radius:11px;display:flex;flex-direction:column;gap:3px;margin-bottom:2px;transition:background .12s;color:var(--ink)}
+.job-item:hover{background:var(--hover)}
+.job-item[aria-current="true"]{background:var(--active)}
+.job-row{display:flex;align-items:center;gap:7px;min-width:0}
+.job-name{font-size:13px;font-weight:500;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
+.job-sub{font-size:11.5px;color:var(--ink-3);padding-left:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--caption)}
+.dot.live{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);animation:pulse 1.8s infinite}
+.dot.ok{background:var(--ok)}
+.dot.warn{background:var(--warn)}
+.dot.err{background:var(--err)}
+.dot.idle{background:var(--caption);opacity:.65}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(.85)}}
+.empty-list{padding:8px 10px;font-size:12px;color:var(--caption)}
+.side-foot{padding:8px 10px;border-top:.5px solid var(--border-2);flex-shrink:0}
+.side-foot a{font-size:12.5px;color:var(--ink-2);text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;width:100%;transition:background .12s,color .12s}
+.side-foot a:hover{background:var(--hover);color:var(--ink)}
+:root[data-embed="dsh"] .side-foot{display:none}
+/* Main Stage */
+.stage{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh;background:var(--bg)}
+.head{min-height:52px;padding:8px 18px 8px 14px;border-bottom:.5px solid var(--border-2);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0}
+.head-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+h1{margin:0;font-size:15px;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.head-right{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.pill-btn{height:28px;padding:0 11px;border-radius:8px;font-size:12px;font-weight:500;background:var(--surface-2);border:.5px solid var(--border-2);color:var(--ink);display:inline-flex;align-items:center;gap:5px;transition:background .12s,border-color .12s}
+.pill-btn:hover:not(:disabled){background:var(--hover);border-color:var(--accent)}
+.pill-btn:disabled{opacity:.42;cursor:default}
+.pill-btn.danger{color:var(--err);border-color:var(--err-soft);background:var(--err-soft)}
+.pill-btn.danger:hover:not(:disabled){border-color:var(--err)}
+.ext-link{text-decoration:none}
+:root:not([data-embed="dsh"]) #ext-workbench{display:none}
+:root[data-embed="dsh"] #theme-btn{display:none}
+.scroll{flex:1;overflow-y:auto;padding:20px 20px 36px}
+.container{width:min(100%,var(--content-w));margin:0 auto;display:flex;flex-direction:column;gap:18px}
+/* Cards */
+.card{background:var(--surface);border:.5px solid var(--border-2);border-radius:16px;padding:18px 20px;box-shadow:0 2px 10px rgba(0,0,0,.03)}
+:root[data-theme="dark"] .card{box-shadow:none}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.card-head h2{margin:0;font-size:14.5px;font-weight:600}
+.kind-seg{display:inline-flex;padding:3px;background:var(--surface-2);border:.5px solid var(--border-1);border-radius:10px;gap:2px}
+.kind-seg button{height:28px;padding:0 12px;border-radius:7px;font-size:12.5px;font-weight:500;color:var(--ink-2);transition:background .12s,color .12s}
+.kind-seg button:hover{color:var(--ink)}
+.kind-seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+form#task{display:flex;flex-direction:column;gap:12px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field>span,.field-label{font-size:12px;font-weight:500;color:var(--ink-2)}
+.ctrl{width:100%;padding:9px 12px;border-radius:11px;background:var(--bg);border:.5px solid var(--border-3);color:var(--ink);font-size:13.5px;transition:border-color .12s}
+.ctrl:focus{border-color:var(--accent);outline:none}
+textarea.ctrl{min-height:92px;resize:vertical;line-height:1.6}
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.form-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-top:2px}
+.hint{font-size:12px;color:var(--ink-3);margin:0}
+.hint.err{color:var(--err)}
+.primary-btn{height:36px;padding:0 18px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px;transition:background .12s,opacity .12s}
+.primary-btn:hover:not(:disabled){background:var(--accent-hover)}
+.primary-btn:disabled{opacity:.38;cursor:default}
+/* Result Section */
+.status-bar{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);flex-wrap:wrap;padding:8px 12px;border-radius:11px;background:var(--surface-2);border:.5px solid var(--border-1);margin-bottom:12px}
+.preview-box{padding:12px 14px;border-radius:12px;background:var(--accent-soft);border:.5px solid var(--border-2);margin:10px 0 14px;display:flex;flex-direction:column;gap:10px}
+.preview-box p{margin:0;font-size:13px;color:var(--ink);line-height:1.55}
+.preview-actions{display:flex;flex-wrap:wrap;gap:8px}
+.chip-row{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px}
+.dl-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:12.5px;font-weight:500;text-decoration:none;background:var(--surface-2);border:.5px solid var(--border-2);color:var(--ink);transition:border-color .12s,background .12s}
+.dl-chip:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.report-box{font-size:14px;line-height:1.75;color:var(--ink);overflow-wrap:anywhere}
+.disclosure{margin-top:14px;border:.5px solid var(--border-2);border-radius:12px;background:var(--bg);overflow:hidden}
+.disclosure summary{padding:10px 14px;font-size:13px;font-weight:500;color:var(--ink);cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;list-style:none}
+.disclosure summary::-webkit-details-marker{display:none}
+.disclosure summary:hover{background:var(--hover)}
+.disclosure-body{padding:12px 14px 14px;border-top:.5px solid var(--border-1)}
+.sources-sec{margin-top:16px;padding-top:14px;border-top:.5px solid var(--border-1)}
+.sources-sec h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--ink-2)}
+.sources-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.sources-list a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+pre.raw{margin:0;padding:10px 12px;border-radius:10px;background:var(--code-bg);font:12px/1.55 var(--mono);overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-2)}
+/* Markdown */
+.md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
+.md p{margin:0 0 10px;white-space:pre-wrap}
+.md h1,.md h2,.md h3,.md h4{margin:14px 0 6px;line-height:1.35;font-weight:600}
+.md h1{font-size:18px}.md h2{font-size:16px}.md h3{font-size:14.5px}.md h4{font-size:14px}
+.md ul,.md ol{margin:4px 0 10px;padding-left:20px}
+.md li{margin:3px 0}
+.md blockquote{margin:8px 0;padding:4px 12px;border-left:2.5px solid var(--border-3);color:var(--ink-2)}
+.md hr{border:0;border-top:.5px solid var(--border-2);margin:12px 0}
+.md code{font-family:var(--mono);font-size:12.5px;background:var(--inline-code);padding:1.5px 5px;border-radius:5px}
+.md a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+.md table{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:13px}
+.md th,.md td{border:.5px solid var(--border-2);padding:6px 10px;text-align:left}
+.md th{background:var(--surface-2);font-weight:600}
+.code-box{margin:8px 0 12px;border-radius:12px;background:var(--code-bg);border:.5px solid var(--border-2);overflow:hidden}
+.code-head{display:flex;align-items:center;justify-content:space-between;padding:5px 10px 5px 12px;border-bottom:.5px solid var(--border-1);font-size:11.5px;color:var(--ink-3);font-family:var(--mono)}
+.code-box pre{margin:0;padding:10px 12px;overflow-x:auto;font:12.5px/1.55 var(--mono)}
+.code-box pre code{background:none;padding:0;font-size:inherit}
+.mini-btn{height:24px;padding:0 7px;border-radius:6px;font-size:11.5px;color:var(--ink-3);display:inline-flex;align-items:center;gap:4px}
+.mini-btn:hover{background:var(--hover);color:var(--ink)}
+.mini-btn svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:860px){
+  .app:not([data-collapsed="true"]) #side-open{display:inline-flex}
+  .sidebar{position:fixed;top:0;bottom:0;left:0;width:min(84vw,292px);flex-basis:auto;box-shadow:var(--shadow-float)}
+  .app[data-collapsed="true"] .sidebar{transform:translateX(-100%);width:min(84vw,292px)}
+  .app:not([data-collapsed="true"]) .backdrop{display:block}
+  .scroll{padding:14px 12px 28px}
+  .card{padding:14px}
+  .grid-2{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
-<main class="shell">
-  <header><h1>主人工作台</h1><span>__TARGET__ · DSH</span></header>
-  <nav aria-label="主人工作台"><a href="/owner-work" aria-current="page">直接派活</a><a href="/owner-work/chat">伙伴直聊</a></nav>
-  <div class="layout">
-    <section>
-      <div class="panel">
-        <h2>直接派活</h2>
-        <form id="task">
-          <label>任务类型
-            <select id="kind"><option value="web">网页查证</option><option value="video">B 站视频</option><option value="desktop">Windows 桌面</option></select>
-          </label>
-          <label id="reference-label" hidden>B 站链接或 BV 号
-            <input id="reference" maxlength="500">
-          </label>
-          <label id="video-mode-label" hidden>视频处理方式
-            <select id="video-mode">
-              <option value="preview">先试看，等我选择</option>
-              <option value="off">画面与字幕，不听写</option>
-              <option value="ocr">提取画面字幕</option>
-              <option value="audio">只转写原音</option>
-              <option value="ocr_audio">提取字幕并转写原音</option>
-            </select>
-          </label>
-          <div id="video-transcript-options" hidden>
-            <label>起始秒数 <input id="video-start" type="number" min="0" step="any" placeholder="从开头"></label>
-            <label>结束秒数 <input id="video-end" type="number" min="0" step="any" placeholder="到片尾"></label>
-            <label>字幕语言 <select id="ocr-language"><option value="auto">通用（中英日）</option>
-              <option value="zh">中文</option><option value="en">英文</option><option value="ja">日文</option>
-              <option value="ko">韩文</option></select></label>
-            <label>听写语种 <input id="asr-language" maxlength="8" placeholder="沿用默认设置"></label>
+<div class="app" id="app">
+  <div class="backdrop" id="backdrop"></div>
+  <aside class="sidebar" aria-label="我的任务">
+    <div class="side-top">
+      <div class="side-title"><strong>主人工作台</strong><span class="target-tag" title="__TARGET__">__TARGET__</span></div>
+      <button class="icon-btn" id="side-close" type="button" title="收起侧栏" aria-label="收起侧栏">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+      </button>
+    </div>
+    <nav class="nav-seg" aria-label="主人工作台">
+      <a href="/owner-work" id="nav-work" aria-current="page">直接派活</a>
+      <a href="/owner-work/chat" id="nav-chat">伙伴直聊</a>
+    </nav>
+    <button class="new-task-btn" id="focus-new" type="button">
+      <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <span>新建派活任务</span>
+    </button>
+    <div class="list-head">
+      <h2 id="my-jobs">我的任务</h2>
+      <button class="icon-btn" id="refresh-jobs" type="button" title="刷新任务列表" aria-label="刷新任务列表">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+    <time class="jobs-updated" id="jobs-updated">正在读取</time>
+    <div class="side-list">
+      <div id="jobs"></div>
+    </div>
+    <div class="side-foot">
+      <a href="/" id="workbench">← 返回深海工作台</a>
+    </div>
+  </aside>
+  <section class="stage">
+    <header class="head">
+      <div class="head-left">
+        <button class="icon-btn" id="side-open" type="button" title="展开侧栏" aria-label="展开侧栏">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        </button>
+        <h1 id="stage-title">直接派活</h1>
+      </div>
+      <div class="head-right">
+        <button class="pill-btn" id="pause-video" type="button" hidden>暂停</button>
+        <button class="pill-btn danger" id="cancel" type="button" hidden>取消任务</button>
+        <a class="icon-btn ext-link" id="ext-workbench" href="/" target="_blank" rel="noopener" title="在新标签页打开深海工作台" aria-label="打开深海工作台">
+          <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </a>
+        <button class="icon-btn" id="theme-btn" type="button" title="切换明暗主题" aria-label="切换明暗主题"></button>
+      </div>
+    </header>
+    <div class="scroll" id="scroll">
+      <div class="container">
+        <section class="card" aria-label="发起新任务" id="dispatch-card">
+          <div class="card-head">
+            <h2>发起新任务</h2>
+            <div class="kind-seg" role="group" aria-label="任务类型" id="kind-seg">
+              <button type="button" data-kind="web" aria-pressed="true">网页查证</button>
+              <button type="button" data-kind="video" aria-pressed="false">B 站视频</button>
+              <button type="button" data-kind="desktop" aria-pressed="false">Windows 桌面</button>
+            </div>
+            <select id="kind" hidden><option value="web">网页查证</option><option value="video">B 站视频</option><option value="desktop">Windows 桌面</option></select>
           </div>
-          <label><span id="brief-label">公开搜索问题</span>
-            <textarea id="brief" maxlength="4000" required></textarea>
-          </label>
-          <p id="kind-state" class="muted">正在连接</p>
-          <button id="submit" class="primary" disabled type="submit">交给 DSH</button>
-          <p id="submit-status" role="status"></p>
-        </form>
+          <form id="task">
+            <label class="field" id="reference-label" hidden>
+              <span>B 站链接或 BV 号</span>
+              <input class="ctrl" id="reference" maxlength="500" placeholder="例如 https://www.bilibili.com/video/BV...">
+            </label>
+            <label class="field" id="video-mode-label" hidden>
+              <span>视频处理方式</span>
+              <select class="ctrl" id="video-mode">
+                <option value="preview">先试看，等我选择</option>
+                <option value="off">画面与字幕，不听写</option>
+                <option value="ocr">提取画面字幕</option>
+                <option value="audio">只转写原音</option>
+                <option value="ocr_audio">提取字幕并转写原音</option>
+              </select>
+            </label>
+            <div class="grid-2" id="video-transcript-options" hidden>
+              <label class="field"><span>起始秒数</span><input class="ctrl" id="video-start" type="number" min="0" step="any" placeholder="从开头"></label>
+              <label class="field"><span>结束秒数</span><input class="ctrl" id="video-end" type="number" min="0" step="any" placeholder="到片尾"></label>
+              <label class="field"><span>字幕语言</span>
+                <select class="ctrl" id="ocr-language">
+                  <option value="auto">通用（中英日）</option><option value="zh">中文</option><option value="en">英文</option><option value="ja">日文</option><option value="ko">韩文</option>
+                </select>
+              </label>
+              <label class="field"><span>听写语种</span><input class="ctrl" id="asr-language" maxlength="8" placeholder="沿用默认设置"></label>
+            </div>
+            <label class="field">
+              <span id="brief-label">公开搜索问题</span>
+              <textarea class="ctrl" id="brief" maxlength="4000" required placeholder="输入任务说明…（Ctrl+Enter 快速提交）"></textarea>
+            </label>
+            <div class="form-foot">
+              <div>
+                <p id="kind-state" class="hint">正在连接…</p>
+                <p id="submit-status" class="hint" role="status"></p>
+              </div>
+              <button id="submit" class="primary-btn" disabled type="submit">交给 DSH</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="result-title" id="result-card">
+          <div class="card-head">
+            <h2 id="result-title">任务回执</h2>
+            <button class="pill-btn" id="copy-report" type="button" hidden>复制简报</button>
+          </div>
+          <div class="status-bar" id="job-status-bar" role="status">
+            <span class="dot idle" id="job-dot"></span>
+            <span id="job-status">从左侧选择一条任务查看进度与结果，或在上方发起新任务。</span>
+          </div>
+          <div id="preview-result" class="preview-box" hidden>
+            <p id="preview-evidence"></p>
+            <div class="preview-actions">
+              <button class="pill-btn" type="button" data-video-mode="off">用画面和字幕继续</button>
+              <button class="pill-btn" type="button" data-video-mode="ocr">提取画面字幕</button>
+              <button class="pill-btn" type="button" data-video-mode="audio">只转写原音</button>
+              <button class="pill-btn" type="button" data-video-mode="ocr_audio">提取字幕并转写原音</button>
+            </div>
+          </div>
+          <div id="transcript-downloads" class="chip-row" hidden></div>
+          <div id="report" class="report-box"></div>
+          <details id="report-archive" class="disclosure" hidden>
+            <summary><span>查看完整报告</span><span class="hint">展开阅读或下载</span></summary>
+            <div class="disclosure-body">
+              <div class="chip-row" style="margin-top:0"><a class="dl-chip" id="download-report">下载 Markdown 报告</a></div>
+              <div id="full-report" class="report-box"></div>
+            </div>
+          </details>
+          <div id="sources" class="sources-sec" hidden>
+            <h3>来源</h3>
+            <ul id="evidence-links" class="sources-list"></ul>
+          </div>
+          <details id="receipts" class="disclosure" hidden>
+            <summary><span>执行回执</span><span class="hint">JSON</span></summary>
+            <div class="disclosure-body"><pre id="raw-receipts" class="raw"></pre></div>
+          </details>
+        </section>
       </div>
-      <section class="panel history" aria-labelledby="my-jobs">
-        <div class="result-head"><h2 id="my-jobs">我的任务</h2><button id="refresh-jobs" type="button">刷新任务</button></div>
-        <time id="jobs-updated">正在读取</time>
-        <div id="jobs"></div>
-      </section>
-    </section>
-    <section class="panel" aria-labelledby="result-title">
-      <div class="result-head"><h2 id="result-title">任务回执</h2><button id="pause-video" hidden>暂停</button><button id="cancel" hidden>取消任务</button></div>
-      <p id="job-status" class="muted" role="status">选择一条任务查看进度和结果。</p>
-      <div id="report"></div>
-      <div id="preview-result" hidden>
-        <p id="preview-evidence"></p>
-        <button type="button" data-video-mode="off">用画面和字幕继续</button>
-        <button type="button" data-video-mode="ocr">提取画面字幕</button>
-        <button type="button" data-video-mode="audio">只转写原音</button>
-        <button type="button" data-video-mode="ocr_audio">提取字幕并转写原音</button>
-      </div>
-      <div id="transcript-downloads" hidden></div>
-      <details id="report-archive" hidden>
-        <summary>查看完整报告</summary>
-        <p><a id="download-report">下载 Markdown 报告</a></p>
-        <div id="full-report"></div>
-      </details>
-      <div id="sources" hidden><h2>来源</h2><ul id="evidence-links"></ul></div>
-      <details id="receipts" hidden><summary>执行回执</summary><pre id="raw-receipts"></pre></details>
-    </section>
-  </div>
-</main>
+    </div>
+  </section>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const apiPath = '/api/owner-work';
+const ALLOWED_PARENT = /^http:\/\/127\.0\.0\.1:(59934|59935|15934)$/;
 const specs = {
-  web:{name:'网页查证',label:'公开搜索问题',limit:4000},
-  video:{name:'B 站视频',label:'要核对的画面或时间段',limit:1000},
-  desktop:{name:'Windows 桌面',label:'要执行的操作',limit:1000}
+  web:{name:'网页查证', label:'公开搜索问题', limit:4000},
+  video:{name:'B 站视频', label:'要核对的画面或时间段', limit:1000},
+  desktop:{name:'Windows 桌面', label:'要执行的操作', limit:1000}
 };
 const states = {queued:'排队中', running:'执行中', go_wait:'等待 Go 额度', cancelling:'取消中', paused:'已暂停',
   cancelled:'已取消', completed:'已完成', failed:'失败', needs_review:'待核实'};
@@ -126,22 +344,183 @@ const formatTime = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', m
 const refreshTime = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai',
   hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'});
 let enabled = {}, jobs = [], connected = false, sending = false, transcriptEnabled = false;
-let selected = new URL(location.href).searchParams.get('job'), pending, pollId=0;
-let listSignature='', reportSignature='';
+let selected = new URL(location.href).searchParams.get('job'), pending, pollId = 0;
+let listSignature = '', reportSignature = '', lastSummaryText = '';
 const transcriptModes = new Set(['ocr', 'audio', 'ocr_audio']);
-let previewTask = null, lastChecked;
+let previewTask = null, lastChecked, loadedReport = null;
 
-function node(tag, text = '') {
-  const element = document.createElement(tag);
-  element.textContent = text;
-  return element;
+const el = (tag, cls = '', text = '') => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text) n.textContent = text;
+  return n;
+};
+const svgIcon = paths => {
+  const ns = 'http://www.w3.org/2000/svg';
+  const s = document.createElementNS(ns, 'svg');
+  s.setAttribute('viewBox', '0 0 24 24');
+  for (const [tag, attrs] of paths) {
+    const p = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) p.setAttribute(k, v);
+    s.append(p);
+  }
+  return s;
+};
+const COPY_SVG = () => svgIcon([['rect',{x:'9',y:'9',width:'13',height:'13',rx:'2'}],['path',{d:'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'}]]);
+const SUN_SVG = () => svgIcon([['circle',{cx:'12',cy:'12',r:'4'}],['path',{d:'M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'}]]);
+const MOON_SVG = () => svgIcon([['path',{d:'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'}]]);
+
+function syncNavLinks() {
+  const q = new URLSearchParams();
+  if (document.documentElement.dataset.embed === 'dsh') q.set('embed', 'dsh');
+  const theme = document.documentElement.dataset.theme;
+  if (theme) q.set('theme', theme);
+  const qs = q.toString() ? '?' + q.toString() : '';
+  $('nav-work').href = '/owner-work' + qs;
+  $('nav-chat').href = '/owner-work/chat' + qs;
 }
+function setTheme(theme, persist = false) {
+  if (theme !== 'dark' && theme !== 'light') return;
+  document.documentElement.dataset.theme = theme;
+  if (persist) { try { localStorage.setItem('fishhome-meeting-theme', theme); } catch {} }
+  $('theme-btn').replaceChildren(theme === 'dark' ? SUN_SVG() : MOON_SVG());
+  $('theme-btn').title = theme === 'dark' ? '切换浅色主题' : '切换深色主题';
+  syncNavLinks();
+}
+setTheme(document.documentElement.dataset.theme || 'dark', false);
+$('theme-btn').onclick = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+window.addEventListener('message', event => {
+  if (event.source !== window.parent || !ALLOWED_PARENT.test(event.origin)) return;
+  if (event.data && event.data.type === 'fishhome-theme') setTheme(event.data.theme, false);
+});
+
+function setCollapsed(flag, persist = true) {
+  $('app').dataset.collapsed = String(!!flag);
+  if (persist && window.innerWidth > 860) { try { localStorage.setItem('fishhome-work-collapsed', flag ? '1' : '0'); } catch {} }
+}
+(() => {
+  const saved = (() => { try { return localStorage.getItem('fishhome-work-collapsed'); } catch { return ''; } })();
+  if (window.innerWidth <= 860) setCollapsed(true, false);
+  else if (saved === '1') setCollapsed(true, false);
+})();
+$('side-close').onclick = () => setCollapsed(true);
+$('side-open').onclick = () => setCollapsed($('app').dataset.collapsed !== 'true');
+$('backdrop').onclick = () => setCollapsed(true, false);
+$('focus-new').onclick = () => {
+  if (window.innerWidth <= 860) setCollapsed(true, false);
+  $('dispatch-card').scrollIntoView({behavior:'smooth', block:'start'});
+  $('brief').focus();
+};
+
+async function copyText(text, btn, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const sp = btn.querySelector('span') || btn;
+    const prev = sp.textContent;
+    sp.textContent = '已复制';
+    setTimeout(() => { sp.textContent = label || prev; }, 1400);
+  } catch {}
+}
+
+function renderInline(text) {
+  const frag = document.createDocumentFragment();
+  const re = /(`[^`\n]+`|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>()]+))/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) frag.append(text.slice(last, m.index));
+    const tok = m[0];
+    if (tok.startsWith('`')) frag.append(el('code', '', tok.slice(1, -1)));
+    else if (tok.startsWith('**')) frag.append(el('strong', '', tok.slice(2, -2)));
+    else if (tok.startsWith('~~')) frag.append(el('del', '', tok.slice(2, -2)));
+    else if (tok.startsWith('*')) frag.append(el('em', '', tok.slice(1, -1)));
+    else if (m[2] && m[3]) { const a = el('a', '', m[2]); a.href = m[3]; a.target = '_blank'; a.rel = 'noopener noreferrer'; frag.append(a); }
+    else if (m[4]) { const a = el('a', '', m[4]); a.href = m[4]; a.target = '_blank'; a.rel = 'noopener noreferrer'; frag.append(a); }
+    last = re.lastIndex;
+  }
+  if (last < text.length) frag.append(text.slice(last));
+  return frag;
+}
+function renderMarkdown(raw) {
+  const box = el('div', 'md');
+  const lines = String(raw || '').replace(/\r\n?/g, '\n').split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    const fence = line.match(/^```([\w.+-]*)\s*$/);
+    if (fence) {
+      const lang = fence[1] || 'text', code = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      const wrap = el('div', 'code-box'), head = el('div', 'code-head');
+      head.append(el('span', '', lang));
+      const cbtn = el('button', 'mini-btn'); cbtn.type = 'button'; cbtn.append(COPY_SVG(), el('span', '', '复制'));
+      const joined = code.join('\n');
+      cbtn.onclick = () => copyText(joined, cbtn, '复制');
+      head.append(cbtn);
+      const pre = el('pre'); pre.append(el('code', '', joined));
+      wrap.append(head, pre); box.append(wrap); continue;
+    }
+    const hd = line.match(/^(#{1,4})\s+(.+)$/);
+    if (hd) { const h = el('h' + hd[1].length); h.append(renderInline(hd[2].trim())); box.append(h); i++; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { box.append(el('hr')); i++; continue; }
+    if (line.startsWith('>')) {
+      const q = [];
+      while (i < lines.length && lines[i].startsWith('>')) { q.push(lines[i].replace(/^>\s?/, '')); i++; }
+      const bq = el('blockquote'), p = el('p'); p.append(renderInline(q.join('\n'))); bq.append(p); box.append(bq); continue;
+    }
+    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(lines[i + 1])) {
+      const parseRow = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const tbl = el('table'), thead = el('thead'), tr = el('tr');
+      for (const cell of parseRow(line)) { const th = el('th'); th.append(renderInline(cell)); tr.append(th); }
+      thead.append(tr); tbl.append(thead); i += 2;
+      const tbody = el('tbody');
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+        const btr = el('tr');
+        for (const cell of parseRow(lines[i])) { const td = el('td'); td.append(renderInline(cell)); btr.append(td); }
+        tbody.append(btr); i++;
+      }
+      tbl.append(tbody); box.append(tbl); continue;
+    }
+    if (/^\s*[-*•]\s+/.test(line)) {
+      const ul = el('ul');
+      while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+        const li = el('li'); li.append(renderInline(lines[i].replace(/^\s*[-*•]\s+/, ''))); ul.append(li); i++;
+      }
+      box.append(ul); continue;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const ol = el('ol');
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        const li = el('li'); li.append(renderInline(lines[i].replace(/^\s*\d+\.\s+/, ''))); ol.append(li); i++;
+      }
+      box.append(ol); continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !lines[i].match(/^(```|#{1,4}\s|>|[-*•]\s|\d+\.\s|(-{3,}|\*{3,})\s*$)/)) {
+      para.push(lines[i]); i++;
+    }
+    const p = el('p'); p.append(renderInline(para.join('\n'))); box.append(p);
+  }
+  return box;
+}
+
+function dotClass(st) {
+  if (['queued','running','go_wait','cancelling'].includes(st)) return 'live';
+  if (st === 'completed') return 'ok';
+  if (st === 'failed') return 'err';
+  if (st === 'paused' || st === 'needs_review') return 'warn';
+  return 'idle';
+}
+
 async function api(args = {}, method = 'GET', body) {
   let request;
   try {
     request = await fetch(apiPath + '?' + new URLSearchParams(args), {
-      method, cache:'no-store', headers:body ? {'Content-Type':'application/json'} : {}, body:body && JSON.stringify(body),
-      ...(method === 'GET' && !args.report ? {signal:AbortSignal.timeout(10000)} : {})
+      method, cache:'no-store', headers:body ? {'Content-Type':'application/json'} : {},
+      body: body && JSON.stringify(body),
+      ...(method === 'GET' && !args.report ? {signal:AbortSignal.timeout(10000)} : {}),
     });
   } catch (error) {
     if (error.name === 'TimeoutError') throw Error('读取任务超时，稍后会自动重试。');
@@ -152,6 +531,14 @@ async function api(args = {}, method = 'GET', body) {
   if (!request.ok || !data) throw Error(data?.error || '暂时无法打开任务。');
   return data;
 }
+
+function setKind(kind) {
+  $('kind').value = kind;
+  for (const b of $('kind-seg').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.kind === kind));
+  formState();
+}
+for (const b of $('kind-seg').querySelectorAll('button')) b.onclick = () => setKind(b.dataset.kind);
+
 function formState() {
   const kind = $('kind').value, spec = specs[kind], video = kind === 'video';
   $('brief-label').textContent = spec.label;
@@ -162,16 +549,23 @@ function formState() {
   $('video-transcript-options').hidden = !transcript;
   $('reference').required = video;
   $('submit').disabled = sending || !connected || !(enabled[kind] || transcript);
-  if (connected) $('kind-state').textContent = enabled[kind] ? (kind === 'desktop' ? '使用已配对的专用桌面和已登记的软件。' : '')
-    : '该工具当前不可用。可在 ThinkBook 控制台检查开关和连接设置。';
+  if (connected) {
+    $('kind-state').textContent = enabled[kind] ? (kind === 'desktop' ? '使用已配对的专用桌面和已登记软件。' : '')
+      : '该工具当前不可用，可在 ThinkBook 控制台检查开关与连接设置。';
+  }
 }
+
 function select(id) {
   selected = id;
-  history.replaceState(null, '', location.pathname + '?job=' + id);
+  const q = new URLSearchParams(location.search);
+  q.set('job', id);
+  history.replaceState(null, '', location.pathname + '?' + q.toString());
   $('cancel').hidden = true;
   $('pause-video').hidden = true;
   $('transcript-downloads').hidden = true;
-  $('job-status').textContent = '正在读取任务';
+  $('copy-report').hidden = true;
+  $('job-dot').className = 'dot live';
+  $('job-status').textContent = '正在读取任务…';
   $('report').replaceChildren();
   $('preview-result').hidden = true;
   $('report-archive').hidden = true;
@@ -179,27 +573,33 @@ function select(id) {
   $('full-report').replaceChildren();
   loadedReport = null;
   $('sources').hidden = $('receipts').hidden = true;
-  reportSignature='';
+  reportSignature = '';
+  if (window.innerWidth <= 860) setCollapsed(true, false);
   void refresh();
 }
+
 function renderList() {
-  const signature = JSON.stringify([selected,jobs]);
+  const signature = JSON.stringify([selected, jobs]);
   if (listSignature === signature) return;
   listSignature = signature;
   const rows = jobs.map(item => {
     const task = item.task;
-    const text = task.reference || task.query || task.instruction;
-    const button = node('button');
-    button.type = 'button';
-    button.setAttribute('aria-current', String(item.id === selected));
-    button.append(node('strong', text.slice(0, 110)),node('span',[specs[task.kind].name,
-      states[item.state] || item.state, item.state === 'running' ? phases[item.phase] : '',
-      item.created ? formatTime.format(item.created * 1000) : ''].filter(Boolean).join(' · ')));
-    button.onclick = () => select(item.id);
-    return button;
+    const text = task.reference || task.query || task.instruction || item.id;
+    const btn = el('button', 'job-item');
+    btn.type = 'button';
+    btn.setAttribute('aria-current', String(item.id === selected));
+    const row = el('div', 'job-row');
+    row.append(el('span', 'dot ' + dotClass(item.state)), el('span', 'job-name', text.slice(0, 110)));
+    const sub = [specs[task.kind]?.name || task.kind, states[item.state] || item.state,
+      item.state === 'running' ? phases[item.phase] : '',
+      item.created ? formatTime.format(item.created * 1000) : ''].filter(Boolean).join(' · ');
+    btn.append(row, el('span', 'job-sub', sub));
+    btn.onclick = () => select(item.id);
+    return btn;
   });
-  $('jobs').replaceChildren(...(rows.length ? rows : [node('p','还没有任务。')]));
+  $('jobs').replaceChildren(...(rows.length ? rows : [el('div', 'empty-list', '还没有任务')]));
 }
+
 function external(url) {
   try {
     const value = new URL(url);
@@ -207,17 +607,22 @@ function external(url) {
   } catch {}
   return null;
 }
+
 function renderResult(item) {
   const signature = JSON.stringify(item);
   if (reportSignature === signature) return;
   reportSignature = signature;
-  const kind = jobs.find(row => row.id === item.id)?.task.kind;
-  const videoMode = jobs.find(row => row.id === item.id)?.task.asr_mode;
+  const jobMeta = jobs.find(row => row.id === item.id);
+  const kind = jobMeta?.task.kind;
+  const videoMode = jobMeta?.task.asr_mode;
   const preview = item.report?.preview;
   const completion = item.report?.completion;
+  $('stage-title').textContent = (jobMeta?.task.reference || jobMeta?.task.query || jobMeta?.task.instruction || '任务回执').slice(0, 60);
+  $('job-dot').className = 'dot ' + dotClass(item.state);
   $('job-status').textContent = [preview ? '试看完成，等待选择' : ({partial:'部分完成', needs_review:'待核实'})[completion]
     || states[item.state] || item.state,
-    item.state === 'running' ? phases[item.phase] : '', item.id.slice(0,12)].filter(Boolean).join(' · ');
+    item.state === 'running' ? phases[item.phase] : '', item.id.slice(0, 12)].filter(Boolean).join(' · ');
+
   const canCancel = ['queued','running','go_wait','paused'].includes(item.state)
     && !(kind === 'desktop' && item.state === 'running' && ['submitting_prompt','waiting_for_result'].includes(item.phase));
   $('cancel').hidden = !canCancel;
@@ -227,16 +632,22 @@ function renderResult(item) {
   pause.disabled = !!item.pause_requested && !resume;
   pause.textContent = resume ? '续做' : item.pause_requested ? '等待本段结束' : '暂停';
   pause.dataset.action = resume ? 'resume' : 'pause';
-  $('report').textContent = item.report?.summary || item.failure?.detail || '';
-  const downloadNames = {'captions.txt':'画面字幕 TXT','captions.srt':'画面字幕 SRT',
-    'speech.txt':'原音转写 TXT','speech.srt':'原音转写 SRT'};
+
+  lastSummaryText = item.report?.summary || item.failure?.detail || '';
+  $('copy-report').hidden = !lastSummaryText;
+  if (lastSummaryText) $('report').replaceChildren(renderMarkdown(lastSummaryText));
+  else $('report').replaceChildren();
+
+  const downloadNames = {'captions.txt':'画面字幕 TXT', 'captions.srt':'画面字幕 SRT',
+    'speech.txt':'原音转写 TXT', 'speech.srt':'原音转写 SRT'};
   const downloads = Object.entries(item.report?.artifacts || {}).map(([key, artifact]) => {
-    const anchor = node('a', downloadNames[key] || key);
-    anchor.href = apiPath + '?' + new URLSearchParams({artifact});
-    return anchor;
+    const a = el('a', 'dl-chip', '↓ ' + (downloadNames[key] || key));
+    a.href = apiPath + '?' + new URLSearchParams({artifact});
+    return a;
   });
   $('transcript-downloads').hidden = !downloads.length;
-  $('transcript-downloads').replaceChildren(...downloads.flatMap(anchor => [anchor, document.createTextNode('  ')]));
+  $('transcript-downloads').replaceChildren(...downloads);
+
   $('preview-result').hidden = !preview;
   if (preview) {
     const tracks = {available:'已获取外挂字幕轨', not_listed:'接口未列出外挂字幕轨', unknown:'外挂字幕轨待核实'};
@@ -247,58 +658,62 @@ function renderResult(item) {
       burned[preview.burned_subtitles], '未调用 ASR'
     ].join(' · ');
   }
+
   $('report-archive').hidden = !item.report?.has_full_report;
   if (item.report?.has_full_report) {
     $('download-report').href = apiPath + '?' + new URLSearchParams({id:item.id, report:'download'});
   }
+
   const evidence = item.report?.evidence || item.failure?.evidence || [];
   const links = [];
   for (const entry of evidence) {
     const url = external(entry.url || entry.source);
     if (!url) continue;
-    const row = node('li');
-    const link = node('a',entry.title || url);
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-    row.append(link);
-    if (entry.kind === 'search_excerpt') row.append(' · 搜索摘要');
-    if (entry.kind === 'page_text') row.append(' · 已读正文');
+    const li = el('li');
+    const a = el('a', '', entry.title || url);
+    a.href = url; a.target = '_blank'; a.rel = 'noreferrer';
+    li.append(a);
+    if (entry.kind === 'search_excerpt') li.append(' · 搜索摘要');
+    if (entry.kind === 'page_text') li.append(' · 已读正文');
     if (entry.artifact && /^web-sources\/[0-9a-f]{32}\.md$/.test(entry.artifact)) {
-      const download = node('a','下载正文');
-      download.href = apiPath + '?' + new URLSearchParams({artifact:entry.artifact});
-      row.append(' · ', download);
+      const dl = el('a', '', '下载正文');
+      dl.href = apiPath + '?' + new URLSearchParams({artifact:entry.artifact});
+      li.append(' · ', dl);
     }
-    links.push(row);
+    links.push(li);
   }
   $('sources').hidden = !links.length;
   $('evidence-links').replaceChildren(...links);
+
   const billing = item.report?.billing || [];
   $('receipts').hidden = !evidence.length && !billing.length;
-  $('raw-receipts').textContent = JSON.stringify({evidence,billing}, null, 2);
+  $('raw-receipts').textContent = JSON.stringify({evidence, billing}, null, 2);
 }
-let loadedReport = null;
+
+$('copy-report').onclick = () => { if (lastSummaryText) copyText(lastSummaryText, $('copy-report'), '复制简报'); };
 $('report-archive').ontoggle = async () => {
   if (!$('report-archive').open || $('report-archive').hidden || loadedReport === selected) return;
   const id = selected;
-  $('full-report').textContent = '正在读取完整报告';
+  $('full-report').textContent = '正在读取完整报告…';
   try {
     const result = await api({id, report:'view'});
     if (selected !== id) return;
-    $('full-report').textContent = result.text;
+    $('full-report').replaceChildren(renderMarkdown(result.text));
     loadedReport = id;
   } catch (error) {
     if (selected === id) $('full-report').textContent = error.message;
   }
 };
+
 function showRefresh(stale = false) {
   if (!stale) lastChecked = new Date();
   const label = $('jobs-updated');
   label.toggleAttribute('data-stale', stale);
-  label.textContent = lastChecked ? (stale ? '读取中断 · 上次更新 ' : '自动更新 · 最近读取 ') + refreshTime.format(lastChecked)
+  label.textContent = lastChecked ? (stale ? '读取中断 · 上次 ' : '自动更新 · ') + refreshTime.format(lastChecked)
     : '暂时无法读取任务';
   if (lastChecked) label.dateTime = lastChecked.toISOString();
 }
+
 async function refresh() {
   const id = ++pollId;
   try {
@@ -315,7 +730,7 @@ async function refresh() {
     connected = false;
     $('kind-state').textContent = error.message;
     $('cancel').hidden = $('pause-video').hidden = true;
-    reportSignature='';
+    reportSignature = '';
     showRefresh(true);
     formState();
     return;
@@ -327,40 +742,52 @@ async function refresh() {
       renderResult(item);
     } catch (error) {
       if (id !== pollId) return;
+      $('job-dot').className = 'dot err';
       $('job-status').textContent = error.message;
       $('cancel').hidden = $('pause-video').hidden = true;
-      reportSignature='';
+      reportSignature = '';
       showRefresh(true);
       return;
     }
   }
   showRefresh();
 }
+
 $('refresh-jobs').onclick = () => void refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
 window.addEventListener('online', () => void refresh());
 window.addEventListener('offline', () => showRefresh(true));
-$('kind').onchange = formState;
+$('kind').onchange = () => setKind($('kind').value);
 $('video-mode').onchange = formState;
+$('brief').addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    event.preventDefault();
+    $('task').requestSubmit();
+  }
+});
+
 for (const button of $('preview-result').querySelectorAll('[data-video-mode]')) button.onclick = () => {
   const job = jobs.find(row => row.id === selected)?.task;
   const link = $('evidence-links').querySelector('a');
   if (!job || !connected || sending) return;
-  $('kind').value = 'video';
+  setKind('video');
   $('reference').value = link?.href || job.reference;
   $('brief').value = job.question;
   $('video-mode').value = button.dataset.videoMode;
   previewTask = {id:selected, reference:$('reference').value};
   formState();
-  if (transcriptEnabled && transcriptModes.has(button.dataset.videoMode)) $('video-start').focus();
-  else $('task').requestSubmit();
+  if (transcriptEnabled && transcriptModes.has(button.dataset.videoMode)) {
+    $('dispatch-card').scrollIntoView({behavior:'smooth', block:'start'});
+    $('video-start').focus();
+  } else $('task').requestSubmit();
 };
+
 $('task').onsubmit = async event => {
   event.preventDefault();
   if ($('submit').disabled) return;
   const kind = $('kind').value, text = $('brief').value.trim();
-  const body = kind === 'video' ? {kind,reference:$('reference').value.trim(),question:text,asr_mode:$('video-mode').value}
-    : kind === 'desktop' ? {kind,instruction:text} : {kind,query:text};
+  const body = kind === 'video' ? {kind, reference:$('reference').value.trim(), question:text, asr_mode:$('video-mode').value}
+    : kind === 'desktop' ? {kind, instruction:text} : {kind, query:text};
   if (kind === 'video' && transcriptEnabled) {
     if (body.asr_mode !== 'preview' && previewTask?.reference === body.reference) body.preview_id = previewTask.id;
     if (transcriptModes.has(body.asr_mode)) {
@@ -377,6 +804,7 @@ $('task').onsubmit = async event => {
   try {
     const accepted = await api({id:pending.id}, 'PUT', body);
     $('submit-status').textContent = '已受理';
+    $('submit-status').className = 'hint';
     pending = null;
     previewTask = null;
     $('brief').value = '';
@@ -384,11 +812,13 @@ $('task').onsubmit = async event => {
     select(accepted.id);
   } catch (error) {
     $('submit-status').textContent = error.message;
+    $('submit-status').className = 'hint err';
   } finally {
     sending = false;
     formState();
   }
 };
+
 $('pause-video').onclick = async () => {
   try {
     await api({id:selected}, 'PUT', {control:$('pause-video').dataset.action});
@@ -405,10 +835,12 @@ $('cancel').onclick = async () => {
     await refresh();
   } catch (error) {
     $('submit-status').textContent = error.message;
+    $('submit-status').className = 'hint err';
   } finally {
     $('cancel').disabled = false;
   }
 };
+
 formState();
 (async function update() {
   if (!document.hidden) await refresh();
